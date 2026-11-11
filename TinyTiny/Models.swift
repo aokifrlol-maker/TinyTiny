@@ -113,6 +113,11 @@ struct GoonedFeedResponse: Decodable {
 
     enum CodingKeys: String, CodingKey { case posts, after }
 
+    init(posts: [Gif], after: String?) {
+        self.posts = posts
+        self.after = after
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         posts = ((try? c.decode([Lossy<Gif>].self, forKey: .posts)) ?? []).compactMap { $0.value }
