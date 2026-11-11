@@ -33,7 +33,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build | tee xcodebuild.log | grep -E "error:|warning: unre|BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/TinyTiny.app || (grep -E "error" xcodebuild.log; exit 1)
+          test -f build/Build/Products/Release-iphoneos/TinyTiny.app/TinyTiny || (grep -E "error:" xcodebuild.log; exit 1)
 
       - name: Package IPA
         run: |

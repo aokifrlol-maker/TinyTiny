@@ -32,13 +32,15 @@ final class UserStore: ObservableObject {
     }
 
     init() {
+        let loaded: UserData
         if let raw = try? Data(contentsOf: Self.fileURL),
            let decoded = try? JSONDecoder().decode(UserData.self, from: raw) {
-            data = decoded
+            loaded = decoded
         } else {
-            data = UserData()
+            loaded = UserData()
         }
-        seenSet = Set(data.seen)
+        self.data = loaded
+        self.seenSet = Set(loaded.seen)
     }
 
     private func scheduleSave() {
