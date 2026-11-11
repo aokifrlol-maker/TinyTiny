@@ -1,10 +1,11 @@
 import SwiftUI
 
-// MARK: - 1. Browse / Search / Categories Fullscreen Overlay (Screenshot 3 Exact Clone)
+// MARK: - 1. Browse / Search / Categories Fullscreen Overlay (Screenshot 3 Exact Clone + Personal X)
 
 struct GoonedBrowseOverlay: View {
     var onClose: () -> Void
     var onSelectFeed: (FeedSource) -> Void
+    var onConnectX: () -> Void
 
     @EnvironmentObject var store: UserStore
     @State private var query = ""
@@ -50,7 +51,7 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
 
-                        TextField("Search subreddits or categories", text: $query)
+                        TextField("Search subreddits, categories, or 𝕏", text: $query)
                             .font(.system(size: 16))
                             .foregroundStyle(.white)
                             .autocorrectionDisabled()
@@ -59,7 +60,9 @@ struct GoonedBrowseOverlay: View {
                             .onSubmit {
                                 let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !clean.isEmpty else { return }
-                                if let cat = matchingCategories.first {
+                                if clean.hasPrefix("@") {
+                                    onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
+                                } else if let cat = matchingCategories.first {
                                     onSelectFeed(.category(cat.name))
                                 } else {
                                     onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "")))
@@ -114,7 +117,7 @@ struct GoonedBrowseOverlay: View {
         }
     }
 
-    // MARK: - Default Browse Content (Pick Up Where You Left Off + Featured Bento + A-Z Chips)
+    // MARK: - Default Browse Content (Pick Up Where You Left Off + Personal X + Featured Bento + A-Z Chips)
 
     private var defaultBrowseContent: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -133,6 +136,12 @@ struct GoonedBrowseOverlay: View {
                         case "category": onSelectFeed(.category(recent.name))
                         case "subreddit": onSelectFeed(.subreddit(recent.name))
                         case "user": onSelectFeed(.user(recent.name))
+                        case "xforyou": onSelectFeed(.xForYou)
+                        case "xfollowing": onSelectFeed(.xFollowing)
+                        case "xbookmarks": onSelectFeed(.xBookmarks)
+                        case "xlikes": onSelectFeed(.xLikes)
+                        case "xsearch": onSelectFeed(.xSearch(recent.name))
+                        case "xuser": onSelectFeed(.xUser(recent.name))
                         default: onSelectFeed(.forYou)
                         }
                     } else {
@@ -164,6 +173,74 @@ struct GoonedBrowseOverlay: View {
                 }
                 .buttonStyle(ScalePressButtonStyle())
                 .padding(.horizontal, 16)
+            }
+
+            // PERSONAL X (TWITTER) SECTION
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("PERSONAL 𝕏")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(.white.opacity(0.55))
+                    Spacer()
+                    if store.data.xSession.isConnected {
+                        let sn = store.data.xSession.screenName
+                        Text(sn.isEmpty ? "CONNECTED" : "@\(sn.uppercased())")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .tracking(1.0)
+                            .foregroundStyle(Theme.accentBright)
+                    }
+                }
+                .padding(.horizontal, 18)
+
+                if store.data.xSession.isConnected {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                        xQuickCard(title: "𝕏 For You", subtitle: "Home video feed", icon: "sparkles") {
+                            onSelectFeed(.xForYou)
+                        }
+                        xQuickCard(title: "𝕏 Following", subtitle: "Creators you follow", icon: "person.2.fill") {
+                            onSelectFeed(.xFollowing)
+                        }
+                        xQuickCard(title: "𝕏 Bookmarks", subtitle: "Your saved X videos", icon: "bookmark.fill") {
+                            onSelectFeed(.xBookmarks)
+                        }
+                        xQuickCard(title: "𝕏 Likes", subtitle: "Videos you liked on X", icon: "heart.fill") {
+                            onSelectFeed(.xLikes)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                } else {
+                    Button(action: onConnectX) {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.black.opacity(0.55))
+                                    .frame(width: 44, height: 44)
+                                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                                Text("𝕏")
+                                    .font(.system(size: 20, weight: .black))
+                                    .foregroundStyle(.white)
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Connect Personal X")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundStyle(.white)
+                                Text("Stream your X For You, Following, Bookmarks & 18+ creators")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.68))
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 20)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                    .padding(.horizontal, 16)
+                }
             }
 
             // BROWSE — 50 CATEGORIES
@@ -274,6 +351,33 @@ struct GoonedBrowseOverlay: View {
         }
     }
 
+    private func xQuickCard(title: String, subtitle: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.accentBright)
+                    .frame(width: 30, height: 30)
+                    .background(Color.black.opacity(0.35), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlassCard(cornerRadius: 16)
+        }
+        .buttonStyle(ScalePressButtonStyle())
+    }
+
     private func subscriberBadge(_ count: Int) -> some View {
         HStack(spacing: 5) {
             Image(systemName: "person.2")
@@ -288,7 +392,7 @@ struct GoonedBrowseOverlay: View {
         .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 0.7))
     }
 
-    // MARK: - Live Search Results Content (Categories + Subreddits + Users)
+    // MARK: - Live Search Results Content (X Search + X Creator + Categories + Subreddits + Users)
 
     private var liveSearchResultsContent: some View {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -297,30 +401,88 @@ struct GoonedBrowseOverlay: View {
             .replacingOccurrences(of: "@", with: "")
 
         return VStack(alignment: .leading, spacing: 14) {
-            // Direct Open r/<query>
-            Button {
-                onSelectFeed(.subreddit(clean))
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "arrow.up.right.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(Theme.accentBright)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Open r/\(clean)")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("Go directly to subreddit feed")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+            // Direct Actions: Open r/<query>, Search X Videos, Open @<query> on X
+            VStack(spacing: 8) {
+                Button {
+                    onSelectFeed(.subreddit(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.up.right.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(Theme.accentBright)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open r/\(clean)")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Go directly to subreddit feed")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.5))
                     }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .foregroundStyle(.white.opacity(0.5))
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
                 }
-                .padding(14)
-                .liquidGlassCard(cornerRadius: 18)
+                .buttonStyle(ScalePressButtonStyle())
+
+                Button {
+                    onSelectFeed(.xSearch(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.black.opacity(0.6))
+                                .frame(width: 28, height: 28)
+                            Text("𝕏")
+                                .font(.system(size: 14, weight: .black))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Search \"\(clean)\" Videos on 𝕏")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Stream 18+ video results from X.com")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                Button {
+                    onSelectFeed(.xUser(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.black.opacity(0.6))
+                                .frame(width: 28, height: 28)
+                            Text("@")
+                                .font(.system(size: 14, weight: .black))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open @\(clean) on 𝕏")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Watch creator's X video & media timeline")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
+                }
+                .buttonStyle(ScalePressButtonStyle())
             }
-            .buttonStyle(ScalePressButtonStyle())
 
             // Matching Categories
             if !matchingCategories.isEmpty {
@@ -393,7 +555,7 @@ struct GoonedBrowseOverlay: View {
 
             // Users from api.gooned.app/reddit/search
             if !searchResults.users.isEmpty {
-                Text("USERS")
+                Text("REDDIT USERS")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.horizontal, 4)
@@ -570,7 +732,12 @@ struct GridThumb: View {
             .clipped()
             .overlay(alignment: .bottomLeading) {
                 HStack(spacing: 4) {
-                    Image(systemName: gif.isImage ? "photo" : "play.fill")
+                    if gif.isXPost {
+                        Text("𝕏")
+                            .font(.system(size: 10, weight: .black))
+                    } else {
+                        Image(systemName: gif.isImage ? "photo" : "play.fill")
+                    }
                     Text(shortCount(gif.upvotes))
                 }
                 .font(.system(size: 11, weight: .bold))
@@ -582,14 +749,21 @@ struct GridThumb: View {
     }
 }
 
-// MARK: - 3. Profile / Follows View
+// MARK: - 3. Profile / Follows View (Subreddits, Reddit Creators & Personal X)
 
 struct GoonedFollowsView: View {
     var onOpenSettings: () -> Void
     var onSelectFeed: (FeedSource) -> Void
+    var onConnectX: () -> Void
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
+
+    private var hasAnyFollows: Bool {
+        !store.data.followedSubreddits.isEmpty ||
+        !store.data.followedUsers.isEmpty ||
+        !store.data.followedXUsers.isEmpty
+    }
 
     var body: some View {
         ZStack {
@@ -621,32 +795,141 @@ struct GoonedFollowsView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
 
-                if store.data.followedSubreddits.isEmpty && store.data.followedUsers.isEmpty {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        ZStack {
-                            Circle()
-                                .fill(Color(red: 0.42, green: 0.10, blue: 0.20).opacity(0.85))
-                                .frame(width: 68, height: 68)
-                                .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
-                            Image(systemName: "person.badge.plus")
-                                .font(.system(size: 26))
-                                .foregroundStyle(.white)
-                        }
-                        Text("No follows yet")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundStyle(.white)
-                        Text("Tap + on any video to follow its subreddit or creator.")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.white.opacity(0.72))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 40)
-                    }
-                    Spacer()
-                    Spacer().frame(height: 76)
-                } else {
-                    ScrollView(.vertical, showsIndicators: false) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        // Personal X Account Card
                         VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.black.opacity(0.6))
+                                        .frame(width: 42, height: 42)
+                                        .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                                    Text("𝕏")
+                                        .font(.system(size: 19, weight: .black))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    if store.data.xSession.isConnected {
+                                        let sn = store.data.xSession.screenName
+                                        Text(sn.isEmpty ? "Personal X Connected" : "@\(sn)")
+                                            .font(.system(size: 16, weight: .bold))
+                                        Text("Streaming personal X timeline & 18+ media")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    } else {
+                                        Text("Personal X Account")
+                                            .font(.system(size: 16, weight: .bold))
+                                        Text("Connect your X to watch For You & Bookmarks")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    }
+                                }
+                                Spacer()
+                                if !store.data.xSession.isConnected {
+                                    Button(action: onConnectX) {
+                                        Text("Connect")
+                                            .font(.subheadline.bold())
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 8)
+                                            .liquidGlassCapsule(active: true)
+                                    }
+                                }
+                            }
+
+                            if store.data.xSession.isConnected {
+                                HStack(spacing: 8) {
+                                    Button {
+                                        onSelectFeed(.xForYou)
+                                    } label: {
+                                        Text("𝕏 For You")
+                                            .font(.caption.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 9)
+                                            .liquidGlassCapsule(active: true)
+                                    }
+                                    Button {
+                                        onSelectFeed(.xFollowing)
+                                    } label: {
+                                        Text("𝕏 Following")
+                                            .font(.caption.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 9)
+                                            .liquidGlassCapsule()
+                                    }
+                                    Button {
+                                        onSelectFeed(.xBookmarks)
+                                    } label: {
+                                        Text("𝕏 Saved")
+                                            .font(.caption.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 9)
+                                            .liquidGlassCapsule()
+                                    }
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 20)
+
+                        if !hasAnyFollows {
+                            VStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(red: 0.42, green: 0.10, blue: 0.20).opacity(0.85))
+                                        .frame(width: 64, height: 64)
+                                        .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                                    Image(systemName: "person.badge.plus")
+                                        .font(.system(size: 24))
+                                        .foregroundStyle(.white)
+                                }
+                                Text("No follows yet")
+                                    .font(.system(size: 19, weight: .bold))
+                                    .foregroundStyle(.white)
+                                Text("Tap + on any video to follow its subreddit, Reddit creator, or 𝕏 creator.")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 48)
+                        } else {
+                            if !store.data.followedXUsers.isEmpty {
+                                Text("𝕏 CREATORS")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.6))
+                                    .padding(.horizontal, 4)
+
+                                ForEach(store.data.followedXUsers, id: \.self) { handle in
+                                    HStack {
+                                        Button {
+                                            onSelectFeed(.xUser(handle))
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Circle()
+                                                    .fill(Color.black.opacity(0.55))
+                                                    .frame(width: 36, height: 36)
+                                                    .overlay(Text("𝕏").font(.system(size: 13, weight: .black)))
+                                                Text("@\(handle)")
+                                                    .font(.system(size: 16, weight: .bold))
+                                                Spacer()
+                                            }
+                                        }
+                                        Button {
+                                            store.toggleFollowXUser(handle)
+                                        } label: {
+                                            Text("Unfollow")
+                                                .font(.caption.bold())
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 6)
+                                                .liquidGlassCapsule()
+                                        }
+                                    }
+                                    .padding(12)
+                                    .liquidGlassCard(cornerRadius: 16)
+                                }
+                            }
+
                             if !store.data.followedSubreddits.isEmpty {
                                 Text("SUBREDDITS")
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -684,11 +967,11 @@ struct GoonedFollowsView: View {
                             }
 
                             if !store.data.followedUsers.isEmpty {
-                                Text("CREATORS")
+                                Text("REDDIT CREATORS")
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                     .foregroundStyle(.white.opacity(0.6))
                                     .padding(.horizontal, 4)
-                                    .padding(.top, 8)
+                                    .padding(.top, 4)
 
                                 ForEach(store.data.followedUsers, id: \.self) { u in
                                     HStack {
@@ -720,20 +1003,21 @@ struct GoonedFollowsView: View {
                                 }
                             }
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 92)
                     }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 92)
                 }
             }
         }
     }
 }
 
-// MARK: - 4. Settings Modal (Screenshot 4 Exact Clone: Delay 3s/6s/10s/15s, Play to End, SD/HD, Clear/Tinted)
+// MARK: - 4. Settings Modal (Screenshot 4 Exact Clone + Personal X Account Section)
 
 struct GoonedSettingsModal: View {
     @Binding var isPresented: Bool
+    var onConnectX: () -> Void
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
     @State private var changingPasscode = false
@@ -771,6 +1055,72 @@ struct GoonedSettingsModal: View {
 
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 18) {
+                        // X.COM PERSONAL ACCOUNT
+                        sectionHeader("𝕏 (TWITTER) ACCOUNT")
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.black.opacity(0.6))
+                                        .frame(width: 40, height: 40)
+                                        .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                                    Text("𝕏")
+                                        .font(.system(size: 18, weight: .black))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    if store.data.xSession.isConnected {
+                                        let sn = store.data.xSession.screenName
+                                        Text(sn.isEmpty ? "Personal X Connected" : "Connected as @\(sn)")
+                                            .font(.system(size: 16, weight: .bold))
+                                        Text("Your personal X feed, search & bookmarks are active.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    } else {
+                                        Text("Connect Personal X")
+                                            .font(.system(size: 16, weight: .bold))
+                                        Text("Sign in to stream your X For You, Following & 18+ videos.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    }
+                                }
+                                Spacer()
+                            }
+
+                            if store.data.xSession.isConnected {
+                                Divider().overlay(Color.white.opacity(0.14))
+
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Mix 𝕏 into For You")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("Blend videos from your X timeline into the main For You feed.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: $store.data.xSession.mixIntoForYou)
+                                        .labelsHidden()
+                                        .tint(Theme.accent)
+                                }
+
+                                HStack(spacing: 10) {
+                                    pillOption(title: "Reconnect 𝕏", active: false) {
+                                        onConnectX()
+                                    }
+                                    pillOption(title: "Disconnect", active: false) {
+                                        store.disconnectX()
+                                    }
+                                }
+                            } else {
+                                pillOption(title: "Sign in with Personal 𝕏", active: true) {
+                                    onConnectX()
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
                         // AUTOPLAY
                         sectionHeader("AUTOPLAY")
 

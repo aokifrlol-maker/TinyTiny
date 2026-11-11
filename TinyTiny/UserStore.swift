@@ -12,7 +12,7 @@ struct AppSettings: Codable {
 
 struct RecentFeedEntry: Codable, Hashable, Identifiable {
     var id: String { "\(kind):\(name)" }
-    var kind: String // "foryou", "category", "subreddit", "user"
+    var kind: String // "foryou", "category", "subreddit", "user", "xforyou", "xuser", "xsearch"
     var name: String
     var displayTitle: String
     var swipedCount: Int
@@ -23,9 +23,29 @@ struct UserData: Codable {
     var liked: [Gif] = []
     var followedSubreddits: [String] = []
     var followedUsers: [String] = []
+    var followedXUsers: [String] = []
     var recentFeeds: [RecentFeedEntry] = []
     var swipedTotal: Int = 0
     var settings = AppSettings()
+    var xSession = XAccountSession()
+
+    enum CodingKeys: String, CodingKey {
+        case liked, followedSubreddits, followedUsers, followedXUsers, recentFeeds, swipedTotal, settings, xSession
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        liked = (try? c.decode([Gif].self, forKey: .liked)) ?? []
+        followedSubreddits = (try? c.decode([String].self, forKey: .followedSubreddits)) ?? []
+        followedUsers = (try? c.decode([String].self, forKey: .followedUsers)) ?? []
+        followedXUsers = (try? c.decode([String].self, forKey: .followedXUsers)) ?? []
+        recentFeeds = (try? c.decode([RecentFeedEntry].self, forKey: .recentFeeds)) ?? []
+        swipedTotal = (try? c.decode(Int.self, forKey: .swipedTotal)) ?? 0
+        settings = (try? c.decode(AppSettings.self, forKey: .settings)) ?? AppSettings()
+        xSession = (try? c.decode(XAccountSession.self, forKey: .xSession)) ?? XAccountSession()
+    }
 }
 
 @MainActor
@@ -92,7 +112,7 @@ final class UserStore: ObservableObject {
         if !isLiked(g) { toggleLike(g) }
     }
 
-    // MARK: - Follows (Subreddits & Creators)
+    // MARK: - Follows (Subreddits, Reddit Creators & X Creators)
 
     func isFollowingSubreddit(_ sub: String) -> Bool {
         data.followedSubreddits.contains { $0.caseInsensitiveCompare(sub) == .orderedSame }
@@ -122,6 +142,28 @@ final class UserStore: ObservableObject {
         }
     }
 
+    func isFollowingXUser(_ handle: String) -> Bool {
+        let clean = handle.replacingOccurrences(of: "@", with: "")
+        return data.followedXUsers.contains { $0.caseInsensitiveCompare(clean) == .orderedSame }
+    }
+
+    func toggleFollowXUser(_ handle: String) {
+        let clean = handle
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "@", with: "")
+        guard !clean.isEmpty else { return }
+        if let i = data.followedXUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
+            data.followedXUsers.remove(at: i)
+        } else {
+            data.followedXUsers.insert(clean, at: 0)
+        }
+    }
+
+    func disconnectX() {
+        data.xSession = XAccountSession()
+        Task { await XWebEngine.shared.resetSession() }
+    }
+
     // MARK: - Pick Up Where You Left Off (Swipe Tracking)
 
     func recordSwipe(kind: String, name: String, displayTitle: String) {
@@ -144,5 +186,6 @@ final class UserStore: ObservableObject {
         saveTask?.cancel()
         data = UserData()
         try? FileManager.default.removeItem(at: Self.fileURL)
+        Task { await XWebEngine.shared.resetSession() }
     }
 }

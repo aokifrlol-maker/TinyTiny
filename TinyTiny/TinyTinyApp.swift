@@ -72,6 +72,8 @@ struct GoonedMainShell: View {
     @State private var activeTab: GoonedDockTab = .home
     @State private var currentPostID: String? = nil
     @State private var showSettingsModal = false
+    @State private var showXLoginSheet = false
+    @State private var pendingXFeedAfterLogin: FeedSource? = nil
 
     private var tinted: Bool { store.data.settings.tintedGlass }
 
@@ -85,7 +87,7 @@ struct GoonedMainShell: View {
             // 1. Main Full-Screen Feed Scroller (always mounted for instant responsiveness)
             FeedView(
                 model: feedModel,
-                isVisible: activeTab == .home && !showSettingsModal,
+                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet,
                 currentID: $currentPostID,
                 onOpenCategories: {
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) {
@@ -97,12 +99,19 @@ struct GoonedMainShell: View {
                 },
                 onSelectUser: { u in
                     selectFeed(.user(u))
+                },
+                onSelectXUser: { handle in
+                    selectXFeedOrLogin(.xUser(handle))
+                },
+                onConnectX: {
+                    pendingXFeedAfterLogin = feedModel.source.isXFeed ? feedModel.source : .xForYou
+                    showXLoginSheet = true
                 }
             )
             .opacity(activeTab == .home ? 1 : 0)
             .allowsHitTesting(activeTab == .home)
 
-            // 2. Top Bar on Home: Search Circle (left) | Following / For You (or active category/subreddit chip) | Gear Circle (right)
+            // 2. Top Bar on Home: Search Circle (left) | Following / For You / 𝕏 | Gear Circle (right)
             if activeTab == .home {
                 VStack {
                     homeTopBar
@@ -139,7 +148,15 @@ struct GoonedMainShell: View {
                         }
                     },
                     onSelectFeed: { src in
-                        selectFeed(src)
+                        if src.isXFeed {
+                            selectXFeedOrLogin(src)
+                        } else {
+                            selectFeed(src)
+                        }
+                    },
+                    onConnectX: {
+                        pendingXFeedAfterLogin = .xForYou
+                        showXLoginSheet = true
                     }
                 )
                 .transition(.opacity)
@@ -150,7 +167,15 @@ struct GoonedMainShell: View {
                 GoonedFollowsView(
                     onOpenSettings: { showSettingsModal = true },
                     onSelectFeed: { src in
-                        selectFeed(src)
+                        if src.isXFeed {
+                            selectXFeedOrLogin(src)
+                        } else {
+                            selectFeed(src)
+                        }
+                    },
+                    onConnectX: {
+                        pendingXFeedAfterLogin = .xForYou
+                        showXLoginSheet = true
                     }
                 )
                 .transition(.opacity)
@@ -168,13 +193,29 @@ struct GoonedMainShell: View {
 
             // 7. Liquid Glass Settings Modal (Screenshot 4)
             if showSettingsModal {
-                GoonedSettingsModal(isPresented: $showSettingsModal)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                    .zIndex(30)
+                GoonedSettingsModal(
+                    isPresented: $showSettingsModal,
+                    onConnectX: {
+                        showSettingsModal = false
+                        pendingXFeedAfterLogin = nil
+                        showXLoginSheet = true
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .zIndex(30)
             }
         }
         .animation(.easeInOut(duration: 0.18), value: activeTab)
         .animation(.easeInOut(duration: 0.18), value: showSettingsModal)
+        .sheet(isPresented: $showXLoginSheet) {
+            XLoginSheet {
+                let target = pendingXFeedAfterLogin ?? .xForYou
+                pendingXFeedAfterLogin = nil
+                selectFeed(target)
+                Task { await feedModel.refresh() }
+            }
+            .environmentObject(store)
+        }
     }
 
     private func selectFeed(_ src: FeedSource) {
@@ -185,7 +226,16 @@ struct GoonedMainShell: View {
         }
     }
 
-    // MARK: - Home Top Bar (`🔍` | `Following   For You` | `⚙️`)
+    private func selectXFeedOrLogin(_ src: FeedSource) {
+        if store.data.xSession.isConnected {
+            selectFeed(src)
+        } else {
+            pendingXFeedAfterLogin = src
+            showXLoginSheet = true
+        }
+    }
+
+    // MARK: - Home Top Bar (`🔍` | `Following   For You   𝕏` | `⚙️`)
 
     private var homeTopBar: some View {
         HStack {
@@ -204,10 +254,10 @@ struct GoonedMainShell: View {
 
             Spacer()
 
-            // Center: `Following   For You` or active Category / Subreddit breadcrumb pill
+            // Center: `Following   For You   𝕏` or active X / Category / Subreddit breadcrumb pill
             switch feedModel.source {
             case .forYou, .following:
-                HStack(spacing: 18) {
+                HStack(spacing: 16) {
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         selectFeed(.following)
@@ -229,8 +279,62 @@ struct GoonedMainShell: View {
                             .font(.system(size: 16, weight: !isFollowingFeed ? .bold : .medium))
                             .foregroundStyle(!isFollowingFeed ? .white : .white.opacity(0.62))
                     }
+
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        selectXFeedOrLogin(.xForYou)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("𝕏")
+                                .font(.system(size: 15, weight: .black))
+                            if store.data.xSession.isConnected {
+                                Circle()
+                                    .fill(Theme.accentBright)
+                                    .frame(width: 5, height: 5)
+                            }
+                        }
+                        .foregroundStyle(.white.opacity(0.78))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .liquidGlassCapsule(tinted: tinted)
+                    }
                 }
                 .shadow(color: .black.opacity(0.5), radius: 4)
+
+            case .xForYou, .xFollowing, .xBookmarks:
+                HStack(spacing: 10) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        selectFeed(.forYou)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    ForEach([
+                        (FeedSource.xForYou, "𝕏 For You"),
+                        (FeedSource.xFollowing, "Following"),
+                        (FeedSource.xBookmarks, "Saved")
+                    ], id: \.1) { src, title in
+                        let active = feedModel.source == src
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            if active {
+                                Task { await feedModel.refresh() }
+                            } else {
+                                selectXFeedOrLogin(src)
+                            }
+                        } label: {
+                            Text(title)
+                                .font(.system(size: 14, weight: active ? .bold : .medium))
+                                .foregroundStyle(active ? .white : .white.opacity(0.62))
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .liquidGlassCapsule(tinted: tinted)
 
             default:
                 HStack(spacing: 8) {
@@ -297,7 +401,6 @@ struct GoonedMainShell: View {
         return Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             if isSelected && tab == .home {
-                // Tapping Home when already on a category/subreddit resets to For You
                 if case .forYou = feedModel.source {
                     Task { await feedModel.refresh() }
                 } else {

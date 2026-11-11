@@ -36,6 +36,10 @@ struct Gif: Codable, Identifiable, Hashable {
     static func == (a: Gif, b: Gif) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
 
+    var isXPost: Bool {
+        id.hasPrefix("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
+    }
+
     var isImage: Bool {
         if mediaType == "image" { return true }
         return videoURL(hd: true) == nil

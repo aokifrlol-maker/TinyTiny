@@ -111,6 +111,8 @@ struct FeedView: View {
     var onOpenCategories: () -> Void
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
+    var onSelectXUser: (String) -> Void
+    var onConnectX: () -> Void
 
     @EnvironmentObject var store: UserStore
     @State private var onScreen = false
@@ -133,6 +135,7 @@ struct FeedView: View {
                         },
                         onSelectSubreddit: onSelectSubreddit,
                         onSelectUser: onSelectUser,
+                        onSelectXUser: onSelectXUser,
                         onClipFinished: {
                             if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
                                 advanceToNext(from: gif.id)
@@ -145,8 +148,12 @@ struct FeedView: View {
                 }
 
                 if model.canLoadMore || model.errorText != nil || model.items.isEmpty {
-                    FeedStateView(model: model, onOpenCategories: onOpenCategories)
-                        .containerRelativeFrame([.horizontal, .vertical])
+                    FeedStateView(
+                        model: model,
+                        onOpenCategories: onOpenCategories,
+                        onConnectX: onConnectX
+                    )
+                    .containerRelativeFrame([.horizontal, .vertical])
                 }
             }
             .scrollTargetLayout()
@@ -184,7 +191,6 @@ struct FeedView: View {
         autoScrollTask?.cancel()
         guard onScreen, isVisible, store.data.settings.autoScroll else { return }
         guard let curID = currentID, let curGif = model.items.first(where: { $0.id == curID }) else { return }
-        // If "Play videos to the end" is enabled and this is a video, wait for onClipFinished instead of fixed timer
         if store.data.settings.playVideosToEnd && !curGif.isImage { return }
 
         let delay = max(3, store.data.settings.autoScrollDelay)
@@ -213,18 +219,45 @@ struct FeedView: View {
 struct FeedStateView: View {
     @ObservedObject var model: FeedModel
     var onOpenCategories: () -> Void
+    var onConnectX: () -> Void
+    @EnvironmentObject var store: UserStore
 
     var body: some View {
         VStack(spacing: 16) {
-            if let err = model.errorText {
+            if model.source.isXFeed && !store.data.xSession.isConnected {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: 68, height: 68)
+                        .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                    Text("𝕏")
+                        .font(.system(size: 32, weight: .black))
+                }
+                Text("Connect Personal X")
+                    .font(.title3.bold())
+                Text("Sign in once to stream your X For You, Following, Bookmarks, and 18+ creator videos.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+                Button(action: onConnectX) {
+                    Text("Sign in with X")
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 12)
+                        .liquidGlassCapsule(tinted: true, active: true)
+                }
+            } else if let err = model.errorText {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.system(size: 36, weight: .light))
                     .foregroundStyle(Theme.accent)
                 Text(err)
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
                 Button {
-                    Task { await model.loadMore() }
+                    Task { await model.refresh() }
                 } label: {
                     Text("Retry")
                         .font(.subheadline.bold())
@@ -236,20 +269,36 @@ struct FeedStateView: View {
                 ProgressView()
                     .tint(Theme.accent)
                     .controlSize(.large)
+                if model.source.isXFeed {
+                    Text("Loading \(model.source.displayTitle)...")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
             } else {
                 Image(systemName: "safari")
                     .font(.system(size: 38))
                     .foregroundStyle(Theme.accent)
                 Text("No posts found")
                     .font(.headline)
-                Button {
-                    onOpenCategories()
-                } label: {
-                    Text("Browse Categories")
-                        .font(.subheadline.bold())
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 11)
-                        .liquidGlassCapsule(tinted: true, active: true)
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await model.refresh() }
+                    } label: {
+                        Text("Reload")
+                            .font(.subheadline.bold())
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 11)
+                            .liquidGlassCapsule(tinted: true)
+                    }
+                    Button {
+                        onOpenCategories()
+                    } label: {
+                        Text("Browse")
+                            .font(.subheadline.bold())
+                            .padding(.horizontal, 22)
+                            .padding(.vertical, 11)
+                            .liquidGlassCapsule(tinted: true, active: true)
+                    }
                 }
             }
         }
@@ -271,6 +320,7 @@ struct GoonedReelCell: View {
     var onShuffle: () -> Void
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
+    var onSelectXUser: (String) -> Void
     var onClipFinished: () -> Void
 
     @EnvironmentObject var store: UserStore
@@ -288,6 +338,9 @@ struct GoonedReelCell: View {
     private var tinted: Bool { store.data.settings.tintedGlass }
 
     private var isFollowed: Bool {
+        if gif.isXPost, let u = gif.author {
+            return store.isFollowingXUser(u)
+        }
         if let sub = gif.subreddit, store.isFollowingSubreddit(sub) { return true }
         if let u = gif.author, store.isFollowingUser(u) { return true }
         return false
@@ -382,6 +435,10 @@ struct GoonedReelCell: View {
                 onSelectUser: { u in
                     showMoreSheet = false
                     onSelectUser(u)
+                },
+                onSelectXUser: { u in
+                    showMoreSheet = false
+                    onSelectXUser(u)
                 }
             )
             .presentationDetents([.medium])
@@ -461,7 +518,9 @@ struct GoonedReelCell: View {
 
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    if let sub = gif.subreddit {
+                    if gif.isXPost, let u = gif.author {
+                        store.toggleFollowXUser(u)
+                    } else if let sub = gif.subreddit {
                         store.toggleFollowSubreddit(sub)
                     } else if let u = gif.author {
                         store.toggleFollowUser(u)
@@ -477,32 +536,52 @@ struct GoonedReelCell: View {
         }
     }
 
-    // MARK: - Exact gooned.app Right Action Stack (Reddit Avatar, Heart + Count, Mute + Label, `•••`)
+    // MARK: - Exact gooned.app Right Action Stack (Source Badge `r/` or `𝕏`, Heart + Count, Mute + Label, `•••`)
 
     private var rightActionStack: some View {
         VStack(spacing: 14) {
-            // Pink Reddit Snoo / Subreddit Circle Button
+            // Source Badge Circle (`𝕏` for X posts, Pink `r/` for Reddit posts)
             Button {
-                if let sub = gif.subreddit {
+                if gif.isXPost, let u = gif.author {
+                    onSelectXUser(u)
+                } else if let sub = gif.subreddit {
                     onSelectSubreddit(sub)
                 } else if let u = gif.author {
                     onSelectUser(u)
                 }
             } label: {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [ Color(red: 0.96, green: 0.65, blue: 0.74), Color(red: 0.85, green: 0.42, blue: 0.56) ],
-                                startPoint: .top,
-                                endPoint: .bottom
+                if gif.isXPost {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(white: 0.18), Color.black],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                        .frame(width: 44, height: 44)
-                        .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
-                    Text("r/")
-                        .font(.system(size: 15, weight: .black, design: .rounded))
-                        .foregroundStyle(Color(red: 0.45, green: 0.12, blue: 0.22))
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
+                        Text("𝕏")
+                            .font(.system(size: 18, weight: .black))
+                            .foregroundStyle(.white)
+                    }
+                } else {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [ Color(red: 0.96, green: 0.65, blue: 0.74), Color(red: 0.85, green: 0.42, blue: 0.56) ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                        Text("r/")
+                            .font(.system(size: 15, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.45, green: 0.12, blue: 0.22))
+                    }
                 }
             }
             .buttonStyle(ScalePressButtonStyle())
@@ -572,15 +651,21 @@ struct GoonedReelCell: View {
 
             Spacer()
 
-            // Exact gooned.app caption layout (`wisconsinWife · /r/BustyPetite · 6d` + Title) shown ONLY while holding
+            // Exact gooned.app caption layout (`wisconsinWife · /r/BustyPetite · 6d` or `@handle · 𝕏 · 2h`) shown ONLY while holding
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
                     if let author = gif.author {
-                        Text(author)
+                        Text(gif.isXPost ? "@\(author)" : author)
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
                     }
-                    if let sub = gif.subreddit {
+                    if gif.isXPost {
+                        Text("·")
+                            .foregroundStyle(.white.opacity(0.65))
+                        Text("𝕏")
+                            .font(.system(size: 14, weight: .black))
+                            .foregroundStyle(.white.opacity(0.9))
+                    } else if let sub = gif.subreddit {
                         Text("·")
                             .foregroundStyle(.white.opacity(0.65))
                         Text("/r/\(sub)")
@@ -731,6 +816,7 @@ struct PostMoreSheet: View {
     let gif: Gif
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
+    var onSelectXUser: (String) -> Void
     @EnvironmentObject var store: UserStore
     @Environment(\.dismiss) private var dismiss
 
@@ -786,10 +872,14 @@ struct PostMoreSheet: View {
                 if let u = gif.author {
                     HStack {
                         Button {
-                            onSelectUser(u)
+                            if gif.isXPost {
+                                onSelectXUser(u)
+                            } else {
+                                onSelectUser(u)
+                            }
                         } label: {
                             HStack(spacing: 8) {
-                                Text("u/\(u)")
+                                Text(gif.isXPost ? "𝕏  @\(u)" : "u/\(u)")
                                     .font(.headline)
                                 Image(systemName: "chevron.right")
                                     .font(.caption.bold())
@@ -797,13 +887,18 @@ struct PostMoreSheet: View {
                         }
                         Spacer()
                         Button {
-                            store.toggleFollowUser(u)
+                            if gif.isXPost {
+                                store.toggleFollowXUser(u)
+                            } else {
+                                store.toggleFollowUser(u)
+                            }
                         } label: {
-                            Text(store.isFollowingUser(u) ? "Following" : "Follow")
+                            let following = gif.isXPost ? store.isFollowingXUser(u) : store.isFollowingUser(u)
+                            Text(following ? "Following" : "Follow")
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
-                                .liquidGlassCapsule(active: store.isFollowingUser(u))
+                                .liquidGlassCapsule(active: following)
                         }
                     }
                     .padding(14)
@@ -813,7 +908,7 @@ struct PostMoreSheet: View {
                 ShareLink(item: gif.webURL) {
                     HStack {
                         Image(systemName: "square.and.arrow.up")
-                        Text("Share Post Link")
+                        Text(gif.isXPost ? "Share X Post Link" : "Share Post Link")
                             .font(.subheadline.bold())
                         Spacer()
                     }
