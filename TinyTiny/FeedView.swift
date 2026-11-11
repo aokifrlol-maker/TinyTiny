@@ -30,29 +30,18 @@ struct PlayerLayerView: UIViewRepresentable {
 final class PlayerModel: ObservableObject {
     let player = AVQueuePlayer()
     @Published var progress: Double = 0
-    @Published var isBuffering: Bool = true
+    @Published var is2xSpeed: Bool = false
     private var looper: AVPlayerLooper?
     private var timeObserver: Any?
-    private var statusObserver: NSKeyValueObservation?
     private var prepared = false
 
     func prepare(url: URL) {
         guard !prepared else { return }
         prepared = true
-        isBuffering = true
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]])
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 4
         looper = AVPlayerLooper(player: player, templateItem: item)
-
-        statusObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if p.timeControlStatus == .playing {
-                    self.isBuffering = false
-                }
-            }
-        }
 
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.15, preferredTimescale: 600), queue: .main
@@ -60,48 +49,64 @@ final class PlayerModel: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let d = self.player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
                 self.progress = min(max(time.seconds / d, 0), 1)
-                if time.seconds > 0.05 { self.isBuffering = false }
             }
         }
     }
 
-    func play() { player.play() }
-    func pause() { player.pause() }
-    func setMuted(_ m: Bool) { player.isMuted = m }
+    func play() {
+        player.play()
+        if is2xSpeed { player.rate = 2.0 }
+    }
 
-    func seek(fraction: Double) {
-        guard let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
-        let target = CMTime(seconds: d * min(max(fraction, 0), 1), preferredTimescale: 600)
+    func pause() {
+        player.pause()
+    }
+
+    func setMuted(_ m: Bool) {
+        player.isMuted = m
+    }
+
+    func setFastForward(_ active: Bool) {
+        is2xSpeed = active
+        guard player.timeControlStatus == .playing || active else { return }
+        player.rate = active ? 2.0 : 1.0
+    }
+
+    func skip(by seconds: Double) {
+        guard let item = player.currentItem else { return }
+        let dur = item.duration.seconds
+        let cur = player.currentTime().seconds
+        guard dur.isFinite, dur > 0, cur.isFinite else { return }
+        let targetSec = min(max(cur + seconds, 0), max(dur - 0.1, 0))
+        let target = CMTime(seconds: targetSec, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     func teardown() {
         player.pause()
-        statusObserver?.invalidate()
-        statusObserver = nil
+        is2xSpeed = false
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         looper?.disableLooping()
         looper = nil
         player.removeAllItems()
         prepared = false
         progress = 0
-        isBuffering = true
     }
 }
 
-// MARK: - Full-Screen Immersive Reels Scroller
+// MARK: - Full-Screen Reels Scroller
 
 struct FeedView: View {
     @ObservedObject var model: FeedModel
     var isVisible: Bool = true
-    var bottomInset: CGFloat = 68
+    var bottomInset: CGFloat = 64
 
     @EnvironmentObject var store: UserStore
     @State private var currentID: String?
     @State private var onScreen = false
     @State private var enteredAt = Date()
 
-    init(model: FeedModel, isVisible: Bool = true, initialID: String? = nil, bottomInset: CGFloat = 68) {
+    init(model: FeedModel, isVisible: Bool = true, initialID: String? = nil, bottomInset: CGFloat = 64) {
         self.model = model
         self.isVisible = isVisible
         self.bottomInset = bottomInset
@@ -115,8 +120,7 @@ struct FeedView: View {
                     ReelCellView(
                         gif: gif,
                         isActive: onScreen && isVisible && currentID == gif.id,
-                        bottomInset: bottomInset,
-                        onDismissNotInterested: { advanceOrRemove(gif) }
+                        bottomInset: bottomInset
                     )
                     .containerRelativeFrame([.horizontal, .vertical])
                     .id(gif.id)
@@ -149,18 +153,6 @@ struct FeedView: View {
         }
     }
 
-    private func advanceOrRemove(_ gif: Gif) {
-        if let idx = model.items.firstIndex(where: { $0.id == gif.id }) {
-            if idx + 1 < model.items.count {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    currentID = model.items[idx + 1].id
-                }
-            } else {
-                model.removeItem(gif.id)
-            }
-        }
-    }
-
     private func fixCurrent() {
         if currentID == nil || !model.items.contains(where: { $0.id == currentID }) {
             currentID = model.items.first?.id
@@ -172,40 +164,31 @@ struct FeedStateView: View {
     @ObservedObject var model: FeedModel
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             if let err = model.errorText {
                 Image(systemName: "wifi.exclamationmark")
-                    .font(.system(size: 40, weight: .light))
+                    .font(.system(size: 34, weight: .light))
                     .foregroundStyle(Theme.accent)
                 Text(err)
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 36)
                 Button {
                     Task { await model.loadMore() }
                 } label: {
-                    Text("Try Again")
+                    Text("Retry")
                         .font(.subheadline.bold())
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 11)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 10)
                         .background(Theme.accent, in: Capsule())
                         .foregroundStyle(.white)
                 }
             } else if model.canLoadMore {
-                ProgressView()
-                    .tint(.white)
-                    .controlSize(.large)
-                Text("Loading Reels…")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                ProgressView().tint(.white).controlSize(.large)
             } else {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 38))
+                    .font(.system(size: 32))
                     .foregroundStyle(Theme.accent)
-                Text("You're all caught up")
-                    .font(.headline)
-                Button("Refresh Feed") {
+                Button("Refresh") {
                     Task { await model.refresh() }
                 }
                 .font(.subheadline.bold())
@@ -219,20 +202,20 @@ struct FeedStateView: View {
     }
 }
 
-// MARK: - Instagram Reels / TikTok Full-Screen Cell
+// MARK: - Full-Screen Reel Cell (Hold for 2x Speed + Details, Left/Right/Center Double-Tap)
 
 struct ReelCellView: View {
     let gif: Gif
     let isActive: Bool
-    var bottomInset: CGFloat = 68
-    var onDismissNotInterested: () -> Void = {}
+    var bottomInset: CGFloat = 64
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
     @StateObject private var player = PlayerModel()
     @State private var userPaused = false
     @State private var showHeart = false
-    @State private var feedbackBanner: String? = nil
+    @State private var skipIndicator: Int? = nil // -5 or +5
+    @State private var isHolding = false
     @State private var showInfoSheet = false
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused }
@@ -247,85 +230,89 @@ struct ReelCellView: View {
                 Color.black
                 mediaView(geo.size)
 
-                // Subtle top & bottom legibility gradients
-                VStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [.black.opacity(0.55), .clear],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 110)
+                // Interactive Gesture Zones (Left = -5s, Center = Like, Right = +5s, Single Tap = Pause, Hold = 2x Speed + Video Details)
+                gestureOverlay(size: geo.size)
+
+                // Bottom legibility gradient
+                VStack {
                     Spacer()
                     LinearGradient(
-                        colors: [.clear, .black.opacity(0.45), .black.opacity(0.85)],
+                        colors: [.clear, .black.opacity(0.68)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
-                    .frame(height: 280)
+                    .frame(height: 210)
                 }
                 .allowsHitTesting(false)
 
-                if userPaused {
+                // Center Play Icon when paused
+                if userPaused && !isHolding {
                     Circle()
-                        .fill(.black.opacity(0.45))
-                        .frame(width: 78, height: 78)
+                        .fill(.black.opacity(0.42))
+                        .frame(width: 72, height: 72)
                         .overlay(
                             Image(systemName: "play.fill")
-                                .font(.system(size: 34))
+                                .font(.system(size: 30))
                                 .foregroundStyle(.white)
                                 .offset(x: 2)
                         )
                         .allowsHitTesting(false)
                 }
 
+                // Double-tap Heart Burst
                 if showHeart {
                     Image(systemName: "heart.fill")
-                        .font(.system(size: 108))
+                        .font(.system(size: 105))
                         .foregroundStyle(Theme.accent)
-                        .shadow(color: Theme.accent.opacity(0.55), radius: 18)
+                        .shadow(color: Theme.accent.opacity(0.55), radius: 16)
                         .transition(.scale.combined(with: .opacity))
                         .allowsHitTesting(false)
                 }
 
-                if let banner = feedbackBanner {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Theme.accent)
-                        Text(banner)
-                            .font(.subheadline.weight(.semibold))
+                // Double-tap Left / Right Skip Feedback (-5s / +5s)
+                if let skip = skipIndicator {
+                    HStack {
+                        if skip > 0 { Spacer() }
+                        VStack(spacing: 4) {
+                            Image(systemName: skip < 0 ? "gobackward.5" : "goforward.5")
+                                .font(.system(size: 30, weight: .bold))
+                            Text(skip < 0 ? "-5s" : "+5s")
+                                .font(.caption.bold())
+                        }
+                        .foregroundStyle(.white)
+                        .padding(18)
+                        .background(.black.opacity(0.50), in: Circle())
+                        .padding(.horizontal, 42)
+                        if skip < 0 { Spacer() }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.scale.combined(with: .opacity))
                     .allowsHitTesting(false)
                 }
 
-                // Bottom Overlay: Creator Row + Caption + Interested/Not Interested Bar + Right Rail
-                VStack(spacing: 10) {
-                    Spacer()
-
-                    HStack(alignment: .bottom, spacing: 12) {
-                        leftCreatorOverlay
-                            .frame(maxWidth: geo.size.width * 0.76, alignment: .leading)
-                        Spacer(minLength: 0)
-                        rightActionRail
-                    }
-                    .padding(.horizontal, 14)
-
-                    // Instagram Reels style "Not interested" / "Interested" pill bar
-                    interestedBar
+                // Hold Overlay: 2x Speed Pill at Top + Full Video Details HUD at Bottom
+                if isHolding {
+                    holdDetailsOverlay(width: geo.size.width)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                } else {
+                    // Normal Minimal Overlay
+                    VStack(spacing: 8) {
+                        Spacer()
+                        HStack(alignment: .bottom, spacing: 12) {
+                            leftMinimalOverlay
+                                .frame(maxWidth: geo.size.width * 0.76, alignment: .leading)
+                            Spacer(minLength: 0)
+                            rightActionRail
+                        }
                         .padding(.horizontal, 14)
 
-                    scrubberBar(width: geo.size.width)
+                        scrubberBar(width: geo.size.width)
+                    }
+                    .padding(.bottom, bottomInset)
+                    .foregroundStyle(.white)
                 }
-                .padding(.bottom, bottomInset)
-                .foregroundStyle(.white)
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { triggerDoubleTapLike() }
-            .onTapGesture { userPaused.toggle() }
         }
         .sheet(isPresented: $showInfoSheet) {
             PostDetailSheet(gif: gif)
@@ -342,30 +329,164 @@ struct ReelCellView: View {
         .onDisappear {
             player.teardown()
             userPaused = false
+            isHolding = false
         }
         .onChange(of: shouldPlay) { _, _ in syncPlayback() }
         .onChange(of: store.data.settings.muted) { _, m in player.setMuted(m) }
+    }
+
+    // MARK: - Gesture Zones
+
+    private func gestureOverlay(size: CGSize) -> some View {
+        HStack(spacing: 0) {
+            // Left 30%: Double-tap = -5s rewind
+            zoneView(width: size.width * 0.30) {
+                triggerSkip(-5)
+            }
+            // Center 40%: Double-tap = Like
+            zoneView(width: size.width * 0.40) {
+                triggerDoubleTapLike()
+            }
+            // Right 30%: Double-tap = +5s fast-forward
+            zoneView(width: size.width * 0.30) {
+                triggerSkip(5)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .onLongPressGesture(minimumDuration: 0.22, maximumDistance: 40, pressing: { pressing in
+            if pressing {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                    // Only engage if still pressing
+                }
+            } else if isHolding {
+                withAnimation(.easeOut(duration: 0.15)) { isHolding = false }
+                player.setFastForward(false)
+            }
+        }, perform: {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(.easeInOut(duration: 0.15)) { isHolding = true }
+            if !gif.isImage {
+                userPaused = false
+                player.setFastForward(true)
+            }
+        })
+    }
+
+    private func zoneView(width: CGFloat, onDoubleTap: @escaping () -> Void) -> some View {
+        Color.clear
+            .frame(width: width)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2, perform: onDoubleTap)
+            .onTapGesture(count: 1) {
+                if !isHolding { userPaused.toggle() }
+            }
+    }
+
+    private func triggerSkip(_ seconds: Int) {
+        guard !gif.isImage else {
+            triggerDoubleTapLike()
+            return
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        player.skip(by: Double(seconds))
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.7)) { skipIndicator = seconds }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            withAnimation(.easeOut(duration: 0.18)) { skipIndicator = nil }
+        }
+    }
+
+    private func triggerDoubleTapLike() {
+        store.like(gif)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.55)) { showHeart = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            withAnimation(.easeOut(duration: 0.2)) { showHeart = false }
+        }
     }
 
     private func syncPlayback() {
         if shouldPlay { player.play() } else { player.pause() }
     }
 
-    private func triggerDoubleTapLike() {
-        store.like(gif)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) { showHeart = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-            withAnimation(.easeOut(duration: 0.22)) { showHeart = false }
+    // MARK: - Hold Overlay (2x Speed + Video Details)
+
+    private func holdDetailsOverlay(width: CGFloat) -> some View {
+        VStack {
+            HStack(spacing: 6) {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 11, weight: .bold))
+                Text(gif.isImage ? "Details" : "2x Speed")
+                    .font(.system(size: 13, weight: .bold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(.top, 56)
+
+            Spacer()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    AvatarRingView(username: gif.userName ?? "creator", size: 36, showRing: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(gif.userName.map { "@\($0)" } ?? "Creator")
+                            .font(.system(size: 15, weight: .bold))
+                        HStack(spacing: 6) {
+                            if let sub = gif.subreddit {
+                                Text("r/\(sub)")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Theme.redditOrange)
+                            }
+                            Text(cat.title)
+                                .font(.caption.bold())
+                                .foregroundStyle(cat.color)
+                            if let w = gif.width, let h = gif.height {
+                                Text("• \(w)×\(h)")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                            if let d = gif.duration {
+                                Text("• \(Int(d))s")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                    }
+                    Spacer()
+                }
+
+                if let desc = gif.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.subheadline)
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !gif.allTags.isEmpty {
+                    Text(gif.allTags.prefix(10).map { "#\($0)" }.joined(separator: "  "))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                }
+
+                HStack(spacing: 16) {
+                    Label("\(shortCount(gif.views)) views", systemImage: "play.fill")
+                    Label("\(shortCount(gif.likes)) likes", systemImage: "heart.fill")
+                }
+                .font(.caption.bold())
+                .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .padding(.horizontal, 14)
+            .padding(.bottom, bottomInset + 10)
         }
+        .foregroundStyle(.white)
     }
 
-    private func showToast(_ text: String) {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { feedbackBanner = text }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-            withAnimation(.easeOut(duration: 0.2)) { feedbackBanner = nil }
-        }
-    }
+    // MARK: - Media & Normal Minimal Overlay
 
     @ViewBuilder
     private func mediaView(_ size: CGSize) -> some View {
@@ -396,76 +517,88 @@ struct ReelCellView: View {
         }
     }
 
-    private var leftCreatorOverlay: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            // Creator Avatar + Handle + Inline Outlined Follow Pill (matches Instagram Reels screenshot)
-            HStack(spacing: 10) {
-                let user = gif.userName ?? "creator"
-                NavigationLink(value: Route.creator(user)) {
-                    HStack(spacing: 9) {
-                        AvatarRingView(username: user, size: 36, showRing: true)
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 4) {
-                                Text(user)
+    private var leftMinimalOverlay: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
+                if let sub = gif.subreddit {
+                    NavigationLink(value: Route.subreddit(sub)) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Theme.redditOrange)
+                                .frame(width: 34, height: 34)
+                                .overlay(Text("r/").font(.system(size: 13, weight: .black)).foregroundStyle(.white))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("r/\(sub)")
                                     .font(.system(size: 15, weight: .bold))
-                                if gif.verified == true {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.cyan)
+                                if let u = gif.userName {
+                                    Text("u/\(u)")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.white.opacity(0.70))
                                 }
                             }
-                            HStack(spacing: 5) {
-                                Image(systemName: gif.hasAudio == true ? "waveform" : "play.fill")
-                                    .font(.system(size: 10))
-                                Text("\(cat.title) • \(shortCount(gif.views)) views")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .foregroundStyle(.white.opacity(0.75))
                         }
                     }
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-                if let user = gif.userName {
-                    let following = store.isFollowing(user)
+                    let joined = store.isFollowingSubreddit(sub)
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        store.toggleFollow(user)
+                        store.toggleFollowSubreddit(sub)
                     } label: {
-                        Text(following ? "Following" : "Follow")
+                        Text(joined ? "Joined" : "Join")
                             .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 11)
                             .padding(.vertical, 5)
-                            .background(following ? Color.white.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.white.opacity(0.85), lineWidth: 1)
-                            )
+                            .background(joined ? Color.white.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.82), lineWidth: 1))
                     }
                     .buttonStyle(ScalePressButtonStyle())
+                } else {
+                    let user = gif.userName ?? "creator"
+                    NavigationLink(value: Route.creator(user)) {
+                        HStack(spacing: 8) {
+                            AvatarRingView(username: user, size: 34, showRing: true)
+                            Text(user)
+                                .font(.system(size: 15, weight: .bold))
+                            if gif.verified == true {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.cyan)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if let user = gif.userName {
+                        let following = store.isFollowing(user)
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            store.toggleFollow(user)
+                        } label: {
+                            Text(following ? "Following" : "Follow")
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 5)
+                                .background(following ? Color.white.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.82), lineWidth: 1))
+                        }
+                        .buttonStyle(ScalePressButtonStyle())
+                    }
                 }
             }
 
-            // Fixed Category Badge + Description
-            HStack(spacing: 6) {
-                NavigationLink(value: Route.category(cat)) {
-                    CategoryBadgePill(category: cat, compact: true)
-                }
-                .buttonStyle(.plain)
-
-                if let d = gif.description, !d.isEmpty {
-                    Text(d)
-                        .font(.system(size: 13))
-                        .lineLimit(1)
-                        .foregroundStyle(.white.opacity(0.92))
-                }
+            if let d = gif.description, !d.isEmpty {
+                Text(d)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundStyle(.white.opacity(0.90))
             }
         }
-        .shadow(color: .black.opacity(0.55), radius: 4)
+        .shadow(color: .black.opacity(0.55), radius: 3)
     }
 
     private var rightActionRail: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 18) {
             railButton(
                 icon: liked ? "heart.fill" : "heart",
                 label: shortCount((gif.likes ?? 0) + (liked ? 1 : 0)),
@@ -477,18 +610,17 @@ struct ReelCellView: View {
 
             railButton(
                 icon: saved ? "bookmark.fill" : "bookmark",
-                label: saved ? "Saved" : "Save",
+                label: nil,
                 tint: saved ? .yellow : .white
             ) {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 store.toggleSave(gif)
-                showToast(store.isSaved(gif) ? "Saved to collection" : "Removed from Saved")
             }
 
             if !gif.isImage {
                 railButton(
                     icon: store.data.settings.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                    label: store.data.settings.muted ? "Muted" : "Audio",
+                    label: nil,
                     tint: .white
                 ) {
                     store.data.settings.muted.toggle()
@@ -496,93 +628,45 @@ struct ReelCellView: View {
             }
 
             ShareLink(item: gif.webURL) {
-                VStack(spacing: 4) {
-                    Image(systemName: "paperplane")
-                        .font(.system(size: 24, weight: .medium))
-                    Text("Share")
-                        .font(.system(size: 11, weight: .semibold))
-                }
+                Image(systemName: "paperplane")
+                    .font(.system(size: 22, weight: .medium))
+                    .frame(width: 36, height: 32)
             }
 
             Button {
                 showInfoSheet = true
             } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 20, weight: .medium))
-                    .frame(width: 36, height: 30)
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 20, weight: .bold))
+                    .frame(width: 36, height: 28)
             }
             .buttonStyle(.plain)
         }
-        .shadow(color: .black.opacity(0.6), radius: 4)
+        .shadow(color: .black.opacity(0.6), radius: 3)
     }
 
-    private func railButton(icon: String, label: String, tint: Color, action: @escaping () -> Void) -> some View {
+    private func railButton(icon: String, label: String?, tint: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            VStack(spacing: 3) {
                 Image(systemName: icon)
-                    .font(.system(size: 26, weight: .medium))
+                    .font(.system(size: 25, weight: .medium))
                     .foregroundStyle(tint)
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold))
+                if let label {
+                    Text(label)
+                        .font(.system(size: 11, weight: .semibold))
+                }
             }
         }
         .buttonStyle(ScalePressButtonStyle())
     }
 
-    private var interestedBar: some View {
-        HStack(spacing: 10) {
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                store.markNotInterested(gif)
-                showToast("Showing less from \(cat.title)")
-                onDismissNotInterested()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                    Text("Not interested")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
-                )
-            }
-            .buttonStyle(ScalePressButtonStyle())
-
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                store.markInterested(gif)
-                showToast("Showing more like \(cat.title)")
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                    Text("Interested")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
-                )
-            }
-            .buttonStyle(ScalePressButtonStyle())
-        }
-    }
-
     private func scrubberBar(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
-            Capsule().fill(Color.white.opacity(0.22))
-            Capsule().fill(Color.white.opacity(0.92))
+            Capsule().fill(Color.white.opacity(0.20))
+            Capsule().fill(Color.white.opacity(0.90))
                 .frame(width: max(0, width * player.progress))
         }
-        .frame(height: 2.5)
+        .frame(height: 2)
         .opacity(gif.isImage ? 0 : 1)
     }
 }
@@ -602,67 +686,58 @@ struct SocialPostCardView: View {
 
     private var liked: Bool { store.isLiked(gif) }
     private var saved: Bool { store.isSaved(gif) }
-    private var cat: GoonedCategory { gif.category }
     private var shouldPlay: Bool { isPlaying && store.data.settings.autoplayFeed && !app.isLocked }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Card Header: Avatar Ring + Username + Category Subtitle + Follow / Menu
+        VStack(alignment: .leading, spacing: 8) {
+            // Clean Header
             HStack(spacing: 10) {
-                let user = gif.userName ?? "creator"
-                NavigationLink(value: Route.creator(user)) {
-                    HStack(spacing: 10) {
-                        AvatarRingView(username: user, size: 34, showRing: true)
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 4) {
-                                Text(user)
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundStyle(.white)
-                                if gif.verified == true {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.cyan)
-                                }
-                            }
-                            Text("\(cat.title) • \(gif.relativeTime)")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.textSecondary)
+                if let sub = gif.subreddit {
+                    NavigationLink(value: Route.subreddit(sub)) {
+                        HStack(spacing: 9) {
+                            Circle()
+                                .fill(Theme.redditOrange)
+                                .frame(width: 32, height: 32)
+                                .overlay(Text("r/").font(.system(size: 12, weight: .black)).foregroundStyle(.white))
+                            Text("r/\(sub)")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
                         }
                     }
+                    .buttonStyle(.plain)
+                } else {
+                    let user = gif.userName ?? "creator"
+                    NavigationLink(value: Route.creator(user)) {
+                        HStack(spacing: 9) {
+                            AvatarRingView(username: user, size: 32, showRing: true)
+                            Text(user)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                            if gif.verified == true {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.cyan)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 Spacer()
-
-                if let user = gif.userName, !store.isFollowing(user) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        store.toggleFollow(user)
-                    } label: {
-                        Text("Follow")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.borderStrong, lineWidth: 0.8))
-                    }
-                    .buttonStyle(ScalePressButtonStyle())
-                }
 
                 Button {
                     showSheet = true
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 12)
 
-            // Media Container
+            // Media
             GeometryReader { geo in
                 ZStack {
                     Color.black
@@ -695,18 +770,11 @@ struct SocialPostCardView: View {
 
                     if showHeart {
                         Image(systemName: "heart.fill")
-                            .font(.system(size: 92))
+                            .font(.system(size: 88))
                             .foregroundStyle(Theme.accent)
-                            .shadow(radius: 14)
+                            .shadow(radius: 12)
                             .transition(.scale.combined(with: .opacity))
                     }
-                }
-                .overlay(alignment: .topLeading) {
-                    NavigationLink(value: Route.category(cat)) {
-                        CategoryBadgePill(category: cat, compact: true)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(10)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if !gif.isImage {
@@ -716,8 +784,8 @@ struct SocialPostCardView: View {
                             Image(systemName: store.data.settings.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(.white)
-                                .frame(width: 30, height: 30)
-                                .background(.black.opacity(0.65), in: Circle())
+                                .frame(width: 28, height: 28)
+                                .background(.black.opacity(0.60), in: Circle())
                         }
                         .buttonStyle(.plain)
                         .padding(10)
@@ -727,8 +795,8 @@ struct SocialPostCardView: View {
                 .onTapGesture(count: 2) {
                     store.like(gif)
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) { showHeart = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.55)) { showHeart = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
                         withAnimation(.easeOut(duration: 0.2)) { showHeart = false }
                     }
                 }
@@ -737,9 +805,8 @@ struct SocialPostCardView: View {
                 }
             }
             .aspectRatio(gif.clampedFeedAspect, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
 
-            // Instagram Action Bar
+            // Action Bar
             HStack(spacing: 16) {
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -747,7 +814,7 @@ struct SocialPostCardView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: liked ? "heart.fill" : "heart")
-                            .font(.system(size: 22, weight: .medium))
+                            .font(.system(size: 21, weight: .medium))
                             .foregroundStyle(liked ? Theme.accent : .white)
                         Text(shortCount((gif.likes ?? 0) + (liked ? 1 : 0)))
                             .font(.system(size: 13, weight: .semibold))
@@ -755,19 +822,9 @@ struct SocialPostCardView: View {
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
-                Button(action: onOpenReels) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "play.rectangle")
-                            .font(.system(size: 20, weight: .medium))
-                        Text(shortCount(gif.views))
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                }
-                .buttonStyle(.plain)
-
                 ShareLink(item: gif.webURL) {
                     Image(systemName: "paperplane")
-                        .font(.system(size: 20, weight: .medium))
+                        .font(.system(size: 19, weight: .medium))
                 }
 
                 Spacer()
@@ -777,7 +834,7 @@ struct SocialPostCardView: View {
                     store.toggleSave(gif)
                 } label: {
                     Image(systemName: saved ? "bookmark.fill" : "bookmark")
-                        .font(.system(size: 20, weight: .medium))
+                        .font(.system(size: 19, weight: .medium))
                         .foregroundStyle(saved ? .yellow : .white)
                 }
                 .buttonStyle(ScalePressButtonStyle())
@@ -785,16 +842,15 @@ struct SocialPostCardView: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
 
-            // Caption
             if let d = gif.description, !d.isEmpty {
-                (Text((gif.userName ?? "creator") + " ").font(.system(size: 13, weight: .bold)) +
-                 Text(d).font(.system(size: 13)))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
+                Text(d)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
                     .padding(.horizontal, 12)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .sheet(isPresented: $showSheet) {
             PostDetailSheet(gif: gif)
                 .presentationDetents([.medium, .large])
@@ -820,7 +876,7 @@ struct SocialPostCardView: View {
     }
 }
 
-// MARK: - Post Detail Sheet & Full Detail Screen
+// MARK: - Post Detail Sheet
 
 struct PostDetailSheet: View {
     let gif: Gif
@@ -832,26 +888,40 @@ struct PostDetailSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                if let desc = gif.description, !desc.isEmpty {
+                    Section("Caption") {
+                        Text(desc).font(.subheadline)
+                    }
+                }
+
                 Section("Category") {
                     NavigationLink(value: Route.category(cat)) {
                         HStack(spacing: 12) {
                             Image(systemName: cat.icon)
-                                .font(.title3)
                                 .foregroundStyle(cat.color)
-                                .frame(width: 34, height: 34)
-                                .background(cat.color.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(cat.title).font(.headline)
-                                Text(cat.subtitle).font(.caption).foregroundStyle(Theme.textSecondary)
-                            }
+                            Text(cat.title).font(.headline)
                         }
                     }
                 }
 
-                if let user = gif.userName {
+                if let sub = gif.subreddit {
+                    Section("Subreddit") {
+                        HStack {
+                            NavigationLink(value: Route.subreddit(sub)) {
+                                Text("r/\(sub)").font(.headline).foregroundStyle(Theme.redditOrange)
+                            }
+                            Spacer()
+                            Button(store.isFollowingSubreddit(sub) ? "Joined" : "Join") {
+                                store.toggleFollowSubreddit(sub)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(store.isFollowingSubreddit(sub) ? .gray : Theme.redditOrange)
+                        }
+                    }
+                } else if let user = gif.userName {
                     Section("Creator") {
                         HStack {
-                            AvatarRingView(username: user, size: 36, showRing: true)
+                            AvatarRingView(username: user, size: 34, showRing: true)
                             Text("@\(user)").font(.headline)
                             Spacer()
                             Button(store.isFollowing(user) ? "Following" : "Follow") {
@@ -863,31 +933,19 @@ struct PostDetailSheet: View {
                     }
                 }
 
-                Section("Preferences") {
-                    Button {
-                        store.markInterested(gif)
-                        dismiss()
-                    } label: {
-                        Label("Interested — show more like this", systemImage: "checkmark.circle")
-                    }
-                    Button(role: .destructive) {
-                        store.markNotInterested(gif)
-                        dismiss()
-                    } label: {
-                        Label("Not interested — hide & show less", systemImage: "xmark.circle")
-                    }
-                }
-
                 if !gif.allTags.isEmpty {
-                    Section("Post Tags") {
+                    Section("Tags") {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(gif.allTags, id: \.self) { t in
-                                    Text("#\(t)")
-                                        .font(.caption.bold())
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(Theme.surfaceElevated, in: Capsule())
+                                    NavigationLink(value: Route.tag(t)) {
+                                        Text("#\(t)")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(Theme.surfaceElevated, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -896,7 +954,7 @@ struct PostDetailSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
-            .navigationTitle("Post Details")
+            .navigationTitle("Details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

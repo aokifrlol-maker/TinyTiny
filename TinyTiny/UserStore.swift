@@ -8,27 +8,25 @@ struct AppSettings: Codable {
 }
 
 struct UserData: Codable {
-    var liked: [Gif] = []                  // newest first
+    var liked: [Gif] = []                  // newest first (Likes = your recommendation signal)
     var saved: [Gif] = []                  // bookmarked / saved posts
     var following: [RGUser] = []           // followed creators
+    var followedSubreddits: [String] = []  // followed 18+ subreddits (e.g. "gonewild")
     var favoriteCategoryIDs: [String] = [] // pinned predefined categories
     var recentSearches: [String] = []      // search history
-    var categoryAff: [String: Double] = [:]// affinity for the 10 fixed categories
-    var tagAff: [String: Double] = [:]     // secondary signal for ranking
-    var creatorAff: [String: Double] = [:] // creator affinity
-    var dislikedIDs: [String] = []         // "Not interested" posts
+    var categoryAff: [String: Double] = [:]
+    var tagAff: [String: Double] = [:]
+    var creatorAff: [String: Double] = [:]
     var seen: [String] = []
     var settings = AppSettings()
 }
 
-/// Everything about "you" lives here, on-device only.
 @MainActor
 final class UserStore: ObservableObject {
     static let shared = UserStore()
 
     @Published var data: UserData { didSet { scheduleSave() } }
     private var seenSet: Set<String>
-    private var dislikedSet: Set<String>
     private var saveTask: Task<Void, Never>?
 
     private static var fileURL: URL {
@@ -46,7 +44,6 @@ final class UserStore: ObservableObject {
         }
         self.data = loaded
         self.seenSet = Set(loaded.seen)
-        self.dislikedSet = Set(loaded.dislikedIDs)
     }
 
     private func scheduleSave() {
@@ -64,17 +61,17 @@ final class UserStore: ObservableObject {
         }
     }
 
-    // MARK: Likes
+    // MARK: Likes (Primary Interest Signal)
 
     func isLiked(_ g: Gif) -> Bool { data.liked.contains { $0.id == g.id } }
 
     func toggleLike(_ g: Gif) {
         if let i = data.liked.firstIndex(where: { $0.id == g.id }) {
             data.liked.remove(at: i)
-            adjust(g, by: -2.0)
+            adjust(g, by: -3.5)
         } else {
             data.liked.insert(g, at: 0)
-            adjust(g, by: 3.5)
+            adjust(g, by: 5.0)
         }
     }
 
@@ -89,30 +86,14 @@ final class UserStore: ObservableObject {
     func toggleSave(_ g: Gif) {
         if let i = data.saved.firstIndex(where: { $0.id == g.id }) {
             data.saved.remove(at: i)
-            adjust(g, by: -1.5)
+            adjust(g, by: -2.0)
         } else {
             data.saved.insert(g, at: 0)
-            adjust(g, by: 4.0)
+            adjust(g, by: 4.5)
         }
     }
 
-    // MARK: Interested / Not Interested
-
-    func markInterested(_ g: Gif) {
-        adjust(g, by: 4.5)
-    }
-
-    func markNotInterested(_ g: Gif) {
-        markSeen(g.id)
-        if dislikedSet.insert(g.id).inserted {
-            data.dislikedIDs.append(g.id)
-        }
-        adjust(g, by: -5.0)
-    }
-
-    func isDisliked(_ id: String) -> Bool { dislikedSet.contains(id) }
-
-    // MARK: Following Creators
+    // MARK: Following Creators & Subreddits
 
     func isFollowing(_ name: String) -> Bool {
         data.following.contains { $0.username.caseInsensitiveCompare(name) == .orderedSame }
@@ -131,6 +112,18 @@ final class UserStore: ObservableObject {
     func updateFollowedUser(_ u: RGUser) {
         if let i = data.following.firstIndex(where: { $0.username.caseInsensitiveCompare(u.username) == .orderedSame }) {
             if data.following[i] != u { data.following[i] = u }
+        }
+    }
+
+    func isFollowingSubreddit(_ sub: String) -> Bool {
+        data.followedSubreddits.contains { $0.caseInsensitiveCompare(sub) == .orderedSame }
+    }
+
+    func toggleFollowSubreddit(_ sub: String) {
+        if let i = data.followedSubreddits.firstIndex(where: { $0.caseInsensitiveCompare(sub) == .orderedSame }) {
+            data.followedSubreddits.remove(at: i)
+        } else {
+            data.followedSubreddits.insert(sub, at: 0)
         }
     }
 
@@ -166,15 +159,11 @@ final class UserStore: ObservableObject {
         }
     }
 
-    func removeRecentSearch(_ q: String) {
-        data.recentSearches.removeAll { $0 == q }
-    }
-
     func clearRecentSearches() {
         data.recentSearches = []
     }
 
-    // MARK: Recommendation Engine
+    // MARK: Recommendation Engine (Driven by Likes & Watch Time)
 
     func adjust(_ g: Gif, by w: Double) {
         var d = data
@@ -191,9 +180,9 @@ final class UserStore: ObservableObject {
         markSeen(g.id)
         let dur = max(g.duration ?? 8, 1)
         if seconds >= min(dur * 0.85, 18) {
-            adjust(g, by: seconds > dur * 1.7 ? 1.8 : 1.1)
-        } else if seconds < 1.3 {
-            adjust(g, by: -0.45)
+            adjust(g, by: seconds > dur * 1.7 ? 1.8 : 1.0)
+        } else if seconds < 1.2 {
+            adjust(g, by: -0.4)
         }
     }
 
@@ -222,6 +211,9 @@ final class UserStore: ObservableObject {
             s += data.creatorAff[u] ?? 0
             if isFollowing(u) { s += 4.0 }
         }
+        if let sub = g.subreddit, isFollowingSubreddit(sub) {
+            s += 4.5
+        }
         return s
     }
 
@@ -248,17 +240,14 @@ final class UserStore: ObservableObject {
         data.categoryAff = [:]
         data.tagAff = [:]
         data.creatorAff = [:]
-        data.dislikedIDs = []
         data.seen = []
         seenSet = []
-        dislikedSet = []
     }
 
     func eraseAll() {
         saveTask?.cancel()
         data = UserData()
         seenSet = []
-        dislikedSet = []
         try? FileManager.default.removeItem(at: Self.fileURL)
     }
 

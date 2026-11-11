@@ -62,6 +62,7 @@ struct RootView: View {
 enum Route: Hashable {
     case category(GoonedCategory)
     case tag(String)
+    case subreddit(String)
     case creator(String)
     case reelList(title: String, items: [Gif], start: String)
     case postDetail(Gif)
@@ -75,6 +76,8 @@ extension View {
                 CategoryDetailScreen(category: cat)
             case .tag(let t):
                 TagFeedScreen(tag: t)
+            case .subreddit(let sub):
+                SubredditFeedScreen(subreddit: sub)
             case .creator(let u):
                 CreatorProfileScreen(username: u)
             case .reelList(let title, let items, let start):
@@ -91,7 +94,7 @@ extension View {
     }
 }
 
-// MARK: - 5-Tab Floating Pill Navigation Shell (Home, Reels, Categories, Search, Profile)
+// MARK: - 5-Tab Floating Dock Navigation Shell with Tap-to-Pop-to-Root
 
 enum AppTab: Int, CaseIterable {
     case home = 0
@@ -123,38 +126,69 @@ enum AppTab: Int, CaseIterable {
 
 struct MainShellView: View {
     @State private var selectedTab: AppTab = .home
+    @State private var homePath = NavigationPath()
+    @State private var reelsPath = NavigationPath()
+    @State private var categoriesPath = NavigationPath()
+    @State private var searchPath = NavigationPath()
+    @State private var profilePath = NavigationPath()
+    @State private var reelsResetTrigger = 0
     @Namespace private var navAnim
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView(selection: $selectedTab) {
-                HomeFeedView(isTabActive: selectedTab == .home, switchToTab: { selectedTab = $0 })
-                    .tag(AppTab.home)
-
-                ReelsTabView(isTabActive: selectedTab == .reels)
-                    .tag(AppTab.reels)
-
-                CategoriesTabView()
-                    .tag(AppTab.categories)
-
-                SearchTabView()
-                    .tag(AppTab.search)
-
-                ProfileTabView()
-                    .tag(AppTab.profile)
+            Group {
+                switch selectedTab {
+                case .home:
+                    HomeFeedView(path: $homePath, isTabActive: selectedTab == .home, switchToTab: { selectedTab = $0 })
+                case .reels:
+                    ReelsTabView(path: $reelsPath, isTabActive: selectedTab == .reels, resetTrigger: reelsResetTrigger)
+                case .categories:
+                    CategoriesTabView(path: $categoriesPath)
+                case .search:
+                    SearchTabView(path: $searchPath)
+                case .profile:
+                    ProfileTabView(path: $profilePath)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            FloatingDockBar(selectedTab: $selectedTab, namespace: navAnim)
-                .padding(.horizontal, 22)
-                .padding(.bottom, 6)
+            FloatingDockBar(
+                selectedTab: $selectedTab,
+                namespace: navAnim,
+                onTapSelectedTab: { tab in
+                    popToRoot(tab)
+                }
+            )
+            .padding(.horizontal, 26)
+            .padding(.bottom, 6)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+
+    private func popToRoot(_ tab: AppTab) {
+        switch tab {
+        case .home:
+            if !homePath.isEmpty { homePath = NavigationPath() }
+        case .reels:
+            if !reelsPath.isEmpty {
+                reelsPath = NavigationPath()
+            } else {
+                reelsResetTrigger += 1
+            }
+        case .categories:
+            if !categoriesPath.isEmpty { categoriesPath = NavigationPath() }
+        case .search:
+            if !searchPath.isEmpty { searchPath = NavigationPath() }
+        case .profile:
+            if !profilePath.isEmpty { profilePath = NavigationPath() }
+        }
     }
 }
 
 struct FloatingDockBar: View {
     @Binding var selectedTab: AppTab
     var namespace: Namespace.ID
+    var onTapSelectedTab: (AppTab) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
@@ -162,8 +196,12 @@ struct FloatingDockBar: View {
                 let active = selectedTab == tab
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                        selectedTab = tab
+                    if active {
+                        onTapSelectedTab(tab)
+                    } else {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
+                            selectedTab = tab
+                        }
                     }
                 } label: {
                     ZStack {
@@ -174,7 +212,7 @@ struct FloatingDockBar: View {
                         }
                         Image(systemName: active ? tab.activeIcon : tab.icon)
                             .font(.system(size: 20, weight: active ? .bold : .medium))
-                            .foregroundStyle(active ? .white : Color.white.opacity(0.60))
+                            .foregroundStyle(active ? .white : Color.white.opacity(0.58))
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
@@ -187,13 +225,13 @@ struct FloatingDockBar: View {
         .padding(.vertical, 6)
         .background(
             Capsule()
-                .fill(Color(red: 0.09, green: 0.09, blue: 0.11).opacity(0.92))
+                .fill(Color(red: 0.08, green: 0.08, blue: 0.10).opacity(0.92))
                 .background(.ultraThinMaterial, in: Capsule())
         )
         .overlay(
             Capsule()
-                .stroke(Color.white.opacity(0.13), lineWidth: 0.8)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
         )
-        .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.55), radius: 16, y: 6)
     }
 }
