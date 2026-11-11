@@ -24,7 +24,6 @@ enum Passcode {
         ]
         let status = SecItemAdd(q as CFDictionary, nil)
         if status != errSecSuccess {
-            // Some sideload setups have no keychain access; fall back to app storage.
             UserDefaults.standard.set(hash(code), forKey: fallbackKey)
         }
     }
@@ -63,7 +62,7 @@ enum Biometrics {
     static func authenticate() async -> Bool {
         let ctx = LAContext()
         ctx.localizedFallbackTitle = "Enter Passcode"
-        return (try? await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock the app")) ?? false
+        return (try? await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock Gooned")) ?? false
     }
 }
 
@@ -116,37 +115,64 @@ struct PasscodePad: View {
     private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["face", "0", "del"]]
 
     var body: some View {
-        VStack(spacing: 26) {
+        VStack(spacing: 24) {
             Spacer()
-            Image(systemName: "lock.fill").font(.system(size: 34)).foregroundStyle(.pink)
-            Text(title).font(.title3.bold()).multilineTextAlignment(.center)
-            if let subtitle {
-                Text(subtitle).font(.footnote).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center).padding(.horizontal, 40)
+
+            ZStack {
+                Circle()
+                    .stroke(Theme.ringGradient, lineWidth: 2)
+                    .frame(width: 68, height: 68)
+                Circle()
+                    .fill(Theme.surfaceElevated)
+                    .frame(width: 60, height: 60)
+                    .overlay(
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(Theme.accent)
+                    )
             }
-            HStack(spacing: 20) {
-                ForEach(0..<4, id: \.self) { i in
-                    Circle()
-                        .fill(i < code.count ? Color.white : Color.clear)
-                        .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
-                        .frame(width: 15, height: 15)
+
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 42)
                 }
             }
+
+            HStack(spacing: 18) {
+                ForEach(0..<4, id: \.self) { i in
+                    Circle()
+                        .fill(i < code.count ? Theme.accent : Color.white.opacity(0.10))
+                        .overlay(Circle().stroke(i < code.count ? Theme.accent : Color.white.opacity(0.32), lineWidth: 1.5))
+                        .frame(width: 15, height: 15)
+                        .scaleEffect(i < code.count ? 1.12 : 1.0)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: code.count)
+                }
+            }
+            .padding(.top, 4)
             .modifier(Shake(animatableData: CGFloat(shakes)))
             .animation(.default, value: shakes)
+
             Spacer()
-            VStack(spacing: 18) {
+
+            VStack(spacing: 16) {
                 ForEach(rows, id: \.self) { row in
-                    HStack(spacing: 26) {
+                    HStack(spacing: 24) {
                         ForEach(row, id: \.self) { key in keyView(key) }
                     }
                 }
             }
-            .padding(.bottom, 40)
+            .padding(.bottom, 36)
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.ignoresSafeArea())
+        .background(Theme.bg.ignoresSafeArea())
     }
 
     @ViewBuilder
@@ -154,7 +180,9 @@ struct PasscodePad: View {
         switch key {
         case "face":
             Button(action: onFaceID) {
-                Image(systemName: "faceid").font(.system(size: 30)).frame(width: 78, height: 78)
+                Image(systemName: "faceid")
+                    .font(.system(size: 28))
+                    .frame(width: 76, height: 76)
             }
             .opacity(showFaceID ? 1 : 0)
             .disabled(!showFaceID)
@@ -162,7 +190,10 @@ struct PasscodePad: View {
             Button {
                 if !code.isEmpty { code.removeLast() }
             } label: {
-                Image(systemName: "delete.left").font(.system(size: 24)).frame(width: 78, height: 78)
+                Image(systemName: "delete.left.fill")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 76, height: 76)
             }
         default:
             Button {
@@ -171,47 +202,89 @@ struct PasscodePad: View {
                 code.append(key)
                 if code.count == 4 {
                     let c = code
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { onComplete(c) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { onComplete(c) }
                 }
             } label: {
-                Text(key).font(.system(size: 32, weight: .regular))
-                    .frame(width: 78, height: 78)
-                    .background(Circle().fill(Color.white.opacity(0.13)))
+                Text(key)
+                    .font(.system(size: 30, weight: .medium, design: .rounded))
+                    .frame(width: 76, height: 76)
+                    .background(
+                        Circle()
+                            .fill(Theme.surfaceElevated)
+                            .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+                    )
             }
+            .buttonStyle(ScalePressButtonStyle())
         }
     }
 }
 
-// MARK: - Screens
+// MARK: - Age Gate & Lock Screens
 
 struct AgeGateView: View {
     @EnvironmentObject var app: AppState
     @State private var under = false
 
     var body: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 24) {
             Spacer()
-            Text("18+").font(.system(size: 72, weight: .heavy)).foregroundStyle(.pink)
-            Text("Adults only").font(.title.bold())
-            Text("This app shows sexually explicit content. By continuing you confirm you are at least 18 years old (or the age of majority where you live) and that viewing this content is legal for you.")
-                .font(.callout).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).padding(.horizontal, 30)
-            Spacer()
-            Button {
-                app.ageConfirmed = true
-            } label: {
-                Text("I'm 18 or older").bold().frame(maxWidth: .infinity).padding()
-                    .background(Color.pink, in: RoundedRectangle(cornerRadius: 14))
+
+            ZStack {
+                Circle()
+                    .stroke(Theme.ringGradient, lineWidth: 3)
+                    .frame(width: 108, height: 108)
+                Circle()
+                    .fill(Theme.surfaceElevated)
+                    .frame(width: 96, height: 96)
+                    .overlay(
+                        Text("18+")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .foregroundStyle(Theme.ringGradient)
+                    )
             }
-            Button("I'm under 18") { under = true }.foregroundStyle(.secondary)
+
+            VStack(spacing: 10) {
+                Text("Welcome to Gooned")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                Text("Adults Only (18+)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                Text("This platform contains sexually explicit adult media. By entering, you confirm you are at least 18 years old (or the legal age of majority in your jurisdiction).")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+
+            Spacer()
+
+            VStack(spacing: 12) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    app.ageConfirmed = true
+                } label: {
+                    Text("I am 18 or older — Continue")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 16))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                Button("I am under 18") { under = true }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.vertical, 6)
+            }
         }
         .padding(24)
         .foregroundStyle(.white)
-        .background(Color.black.ignoresSafeArea())
-        .alert("Sorry", isPresented: $under) {
+        .background(Theme.bg.ignoresSafeArea())
+        .alert("Access Restricted", isPresented: $under) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("You must be 18 or older to use this app.")
+            Text("You must be at least 18 years old to use Gooned.")
         }
     }
 }
@@ -239,16 +312,16 @@ struct PasscodeSetupView: View {
 
     private var title: String {
         switch step {
-        case .current: return "Enter current passcode"
-        case .enter: return mode == .create ? "Create your 4-digit passcode" : "Enter new passcode"
-        case .confirm: return "Confirm passcode"
+        case .current: return "Enter Current Passcode"
+        case .enter: return mode == .create ? "Create 4-Digit Passcode" : "Enter New Passcode"
+        case .confirm: return "Confirm Passcode"
         }
     }
 
     private var subtitle: String? {
         if let message { return message }
         if mode == .create && step == .enter {
-            return "This passcode is your account. You'll need it every time you open the app."
+            return "Your passcode is your private Gooned vault key."
         }
         return nil
     }
@@ -257,14 +330,14 @@ struct PasscodeSetupView: View {
         PasscodePad(title: title, subtitle: subtitle, code: $code, shakes: shakes) { c in
             handle(c)
         }
-        .alert("Unlock with Face ID?", isPresented: $askFaceID) {
-            Button("Enable") {
+        .alert("Enable Face ID Unlock?", isPresented: $askFaceID) {
+            Button("Enable Face ID") {
                 Task {
                     if await Biometrics.authenticate() { store.data.settings.faceID = true }
                     finish()
                 }
             }
-            Button("Not now", role: .cancel) { finish() }
+            Button("Not Now", role: .cancel) { finish() }
         }
     }
 
@@ -272,7 +345,7 @@ struct PasscodeSetupView: View {
         code = ""
         switch step {
         case .current:
-            if Passcode.verify(c) { step = .enter; message = nil } else { fail("Wrong passcode") }
+            if Passcode.verify(c) { step = .enter; message = nil } else { fail("Incorrect passcode") }
         case .enter:
             first = c
             step = .confirm
@@ -321,19 +394,27 @@ struct LockView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            PasscodePad(title: "Enter Passcode", subtitle: message, code: $code, shakes: shakes,
-                        showFaceID: faceIDOn, onFaceID: tryFaceID) { c in
+            PasscodePad(
+                title: "Unlock Vault",
+                subtitle: message,
+                code: $code,
+                shakes: shakes,
+                showFaceID: faceIDOn,
+                onFaceID: tryFaceID
+            ) { c in
                 check(c)
             }
-            Button("Forgot passcode?") { confirmErase = true }
-                .font(.footnote).foregroundStyle(.secondary).padding(.bottom, 8)
+            Button("Forgot Passcode?") { confirmErase = true }
+                .font(.footnote)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.bottom, 10)
         }
         .onAppear { if phase == .active { tryFaceID() } }
         .onChange(of: phase) { _, p in if p == .active { tryFaceID() } }
-        .confirmationDialog("Reset the app?", isPresented: $confirmErase, titleVisibility: .visible) {
-            Button("Erase all data & reset", role: .destructive) { app.eraseEverything() }
+        .confirmationDialog("Reset Gooned Vault?", isPresented: $confirmErase, titleVisibility: .visible) {
+            Button("Erase All Data & Reset", role: .destructive) { app.eraseEverything() }
         } message: {
-            Text("Your passcode can't be recovered. Resetting deletes your likes, follows and settings.")
+            Text("Your passcode cannot be recovered. Resetting permanently deletes saved likes, follows, and preferences.")
         }
     }
 
@@ -364,19 +445,20 @@ struct LockView: View {
                 lockedUntil = Date().addingTimeInterval(30)
                 message = "Too many attempts. Wait 30 seconds."
             } else {
-                message = "Wrong passcode"
+                message = "Incorrect passcode"
             }
         }
     }
 }
 
-/// Shown in the app switcher so nobody sees what you were watching.
+/// Shown in the iOS App Switcher so nobody sees what you were watching.
 struct PrivacyCover: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            Image(systemName: "plus.forwardslash.minus").font(.system(size: 60)).foregroundStyle(.orange)
+            Image(systemName: "plus.forwardslash.minus")
+                .font(.system(size: 56))
+                .foregroundStyle(.orange)
         }
     }
 }
-

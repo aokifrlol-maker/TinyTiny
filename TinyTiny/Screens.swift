@@ -1,74 +1,418 @@
 import SwiftUI
 
-// MARK: - Home
+// MARK: - 1. Home Feed Tab (Instagram-Style Header, Stories Tray & Inline Autoplay Cards)
 
-struct HomeView: View {
+struct HomeFeedView: View {
+    var isTabActive: Bool
+    var switchToTab: (AppTab) -> Void
+
+    @EnvironmentObject var store: UserStore
+    @StateObject private var forYouModel = FeedModel(source: .forYou)
+    @StateObject private var followingModel = FeedModel(source: .following)
+    @State private var feedMode: Int = 0 // 0 = For You, 1 = Following
+    @State private var activeCardID: String?
+    @State private var path = NavigationPath()
+
+    private var activeModel: FeedModel {
+        feedMode == 0 ? forYouModel : followingModel
+    }
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            VStack(spacing: 0) {
+                topHeaderBar
+                Divider().overlay(Theme.border)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 14) {
+                        storiesTray
+                            .padding(.top, 10)
+
+                        categoryQuickStrip
+
+                        Divider().overlay(Theme.border)
+
+                        if feedMode == 1 && store.data.following.isEmpty {
+                            emptyFollowingState
+                        } else if activeModel.items.isEmpty && activeModel.isLoading {
+                            ForEach(0..<3, id: \.self) { _ in
+                                SkeletonPostCard()
+                            }
+                        } else if let err = activeModel.errorText, activeModel.items.isEmpty {
+                            errorBanner(err)
+                        } else {
+                            ForEach(activeModel.items) { gif in
+                                SocialPostCardView(
+                                    gif: gif,
+                                    isPlaying: isTabActive && (activeCardID == gif.id || activeCardID == nil && gif.id == activeModel.items.first?.id),
+                                    onOpenReels: {
+                                        path.append(Route.reelList(title: "Reels", items: activeModel.items, start: gif.id))
+                                    }
+                                )
+                                .id(gif.id)
+                                .onAppear {
+                                    activeCardID = gif.id
+                                    activeModel.onItemAppear(gif)
+                                }
+                                Divider().overlay(Theme.border)
+                            }
+                        }
+
+                        if activeModel.isLoading && !activeModel.items.isEmpty {
+                            ProgressView().tint(.white).padding(.vertical, 24)
+                        }
+                    }
+                    .padding(.bottom, 84)
+                }
+                .refreshable {
+                    await activeModel.refresh()
+                }
+            }
+            .background(Theme.bg)
+            .toolbar(.hidden, for: .navigationBar)
+            .withGoonedRoutes()
+        }
+        .task {
+            if forYouModel.items.isEmpty { await forYouModel.loadMore() }
+        }
+        .onChange(of: feedMode) { _, mode in
+            if mode == 1 && followingModel.items.isEmpty && !store.data.following.isEmpty {
+                Task { await followingModel.refresh() }
+            }
+        }
+    }
+
+    private var topHeaderBar: some View {
+        HStack(spacing: 14) {
+            Menu {
+                Picker("Feed", selection: $feedMode) {
+                    Label("For You", systemImage: "sparkles").tag(0)
+                    Label("Following", systemImage: "person.2.fill").tag(1)
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(feedMode == 0 ? "Gooned" : "Following")
+                        .font(.system(size: 24, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            Spacer()
+
+            Button {
+                switchToTab(.reels)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Reels")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.brandGradient, in: Capsule())
+            }
+            .buttonStyle(ScalePressButtonStyle())
+
+            NavigationLink(value: Route.reelList(title: "Liked", items: store.data.liked, start: store.data.liked.first?.id ?? "")) {
+                Image(systemName: "heart")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+            .disabled(store.data.liked.isEmpty)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var storiesTray: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                // "For You" live pulse circle
+                Button {
+                    switchToTab(.reels)
+                } label: {
+                    VStack(spacing: 5) {
+                        ZStack {
+                            Circle()
+                                .stroke(Theme.ringGradient, lineWidth: 2.5)
+                                .frame(width: 68, height: 68)
+                            Circle()
+                                .fill(Theme.surfaceElevated)
+                                .frame(width: 60, height: 60)
+                                .overlay(
+                                    Image(systemName: "flame.fill")
+                                        .font(.system(size: 26))
+                                        .foregroundStyle(Theme.ringGradient)
+                                )
+                        }
+                        Text("For You")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    .frame(width: 72)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                // Followed Creators + Top Feed Creators
+                let creators = storyCreators
+                ForEach(creators, id: \.username) { u in
+                    NavigationLink(value: Route.creator(u.username)) {
+                        VStack(spacing: 5) {
+                            AvatarRingView(username: u.username, imageURL: u.profileImageUrl, size: 60, showRing: true)
+                            Text(u.username)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 72)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private var storyCreators: [RGUser] {
+        var seen = Set<String>()
+        var list: [RGUser] = []
+        for u in store.data.following {
+            if seen.insert(u.username.lowercased()).inserted { list.append(u) }
+        }
+        for g in forYouModel.items {
+            if let name = g.userName, seen.insert(name.lowercased()).inserted {
+                list.append(RGUser(username: name, verified: g.verified))
+            }
+            if list.count >= 14 { break }
+        }
+        return list
+    }
+
+    private var categoryQuickStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(GoonedCategory.all) { cat in
+                    NavigationLink(value: Route.category(cat)) {
+                        CategoryBadgePill(category: cat, compact: false)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private var emptyFollowingState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "person.2.circle.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(Theme.accent)
+            Text("Follow Your Favorite Creators")
+                .font(.title3.bold())
+            Text("Tap Follow on any post or Reel to build your personalized Following feed.")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 36)
+            Button {
+                feedMode = 0
+            } label: {
+                Text("Explore For You")
+                    .font(.subheadline.bold())
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 11)
+                    .background(Theme.accent, in: Capsule())
+                    .foregroundStyle(.white)
+            }
+        }
+        .padding(.vertical, 64)
+        .foregroundStyle(.white)
+    }
+
+    private func errorBanner(_ err: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 36))
+                .foregroundStyle(Theme.accent)
+            Text(err)
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 30)
+            Button("Retry") {
+                Task { await activeModel.refresh() }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.vertical, 60)
+    }
+}
+
+struct SkeletonPostCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Circle().fill(Theme.surfaceElevated).frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 5) {
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.surfaceElevated).frame(width: 110, height: 11)
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.surface).frame(width: 75, height: 9)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+
+            ShimmerPlaceholder()
+                .frame(height: 410)
+
+            HStack(spacing: 16) {
+                RoundedRectangle(cornerRadius: 4).fill(Theme.surfaceElevated).frame(width: 50, height: 18)
+                RoundedRectangle(cornerRadius: 4).fill(Theme.surfaceElevated).frame(width: 50, height: 18)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+// MARK: - 2. Full-Screen Reels Tab (Instagram Reels / TikTok Style)
+
+struct ReelsTabView: View {
+    var isTabActive: Bool
+
     @EnvironmentObject var store: UserStore
     @StateObject private var forYou = FeedModel(source: .forYou)
     @StateObject private var following = FeedModel(source: .following)
-    @State private var tab = 1
-    @State private var followSnapshot: [String] = []
+    @State private var mode = 0 // 0 = Reels (For You), 1 = Friends / Following
+    @State private var selectedCategory: GoonedCategory? = nil
+    @State private var showFilterSheet = false
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                FeedView(model: forYou, isVisible: tab == 1)
-                    .opacity(tab == 1 ? 1 : 0)
-                    .allowsHitTesting(tab == 1)
+                if let cat = selectedCategory {
+                    CategoryReelsContainer(category: cat, isVisible: isTabActive)
+                        .id(cat.id)
+                } else {
+                    FeedView(model: forYou, isVisible: isTabActive && mode == 0)
+                        .opacity(mode == 0 ? 1 : 0)
+                        .allowsHitTesting(mode == 0)
 
-                Group {
-                    if store.data.following.isEmpty {
-                        emptyFollowing
-                    } else {
-                        FeedView(model: following, isVisible: tab == 0)
+                    Group {
+                        if store.data.following.isEmpty {
+                            emptyFriendsReels
+                        } else {
+                            FeedView(model: following, isVisible: isTabActive && mode == 1)
+                        }
                     }
+                    .opacity(mode == 1 ? 1 : 0)
+                    .allowsHitTesting(mode == 1)
                 }
-                .opacity(tab == 0 ? 1 : 0)
-                .allowsHitTesting(tab == 0)
 
-                HStack(spacing: 26) {
-                    topTab("Following", 0)
-                    topTab("For You", 1)
-                }
-                .padding(.top, 6)
+                // Instagram Reels Top Bar: "Reels  Following" + Category Filter Button
+                reelsTopOverlay
             }
             .background(Color.black)
             .toolbar(.hidden, for: .navigationBar)
-            .withRoutes()
-        }
-        .onChange(of: tab) { _, t in
-            let names = store.data.following.map(\.username)
-            if t == 0 && names != followSnapshot {
-                followSnapshot = names
-                Task { await following.refresh() }
+            .withGoonedRoutes()
+            .sheet(isPresented: $showFilterSheet) {
+                ReelsCategoryFilterSheet(selected: $selectedCategory)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
             }
         }
-        .onAppear { if followSnapshot.isEmpty { followSnapshot = store.data.following.map(\.username) } }
     }
 
-    private func topTab(_ title: String, _ i: Int) -> some View {
-        Button {
-            if tab == i, i == 1 {
-                Task { await forYou.refresh() } // tap again to refresh
+    private var reelsTopOverlay: some View {
+        HStack(spacing: 18) {
+            if let cat = selectedCategory {
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        selectedCategory = nil
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .bold))
+                        Image(systemName: cat.icon)
+                            .foregroundStyle(cat.color)
+                        Text(cat.title)
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                }
+            } else {
+                Button {
+                    if mode == 0 { Task { await forYou.refresh() } }
+                    mode = 0
+                } label: {
+                    Text("Reels")
+                        .font(.system(size: 20, weight: mode == 0 ? .heavy : .semibold))
+                        .foregroundStyle(mode == 0 ? .white : .white.opacity(0.55))
+                }
+
+                Button {
+                    mode = 1
+                    if following.items.isEmpty && !store.data.following.isEmpty {
+                        Task { await following.refresh() }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Following")
+                            .font(.system(size: 20, weight: mode == 1 ? .heavy : .semibold))
+                            .foregroundStyle(mode == 1 ? .white : .white.opacity(0.55))
+                        if !store.data.following.isEmpty {
+                            HStack(spacing: -6) {
+                                ForEach(store.data.following.prefix(3)) { u in
+                                    AvatarRingView(username: u.username, imageURL: u.profileImageUrl, size: 18, showRing: false)
+                                        .overlay(Circle().stroke(Color.black, lineWidth: 1.2))
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            tab = i
-        } label: {
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 17, weight: tab == i ? .bold : .semibold))
-                    .foregroundStyle(tab == i ? .white : .white.opacity(0.6))
-                Capsule().fill(tab == i ? Color.white : Color.clear).frame(width: 26, height: 3)
+
+            Spacer()
+
+            Button {
+                showFilterSheet = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.35), in: Circle())
             }
         }
-        .shadow(color: .black.opacity(0.5), radius: 3)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .shadow(color: .black.opacity(0.6), radius: 4)
     }
 
-    private var emptyFollowing: some View {
+    private var emptyFriendsReels: some View {
         VStack(spacing: 14) {
-            Image(systemName: "person.2.fill").font(.system(size: 50)).foregroundStyle(.pink)
-            Text("Follow creators").font(.title2.bold())
-            Text("Tap the + on a creator's picture in For You.\nTheir newest posts will show up here.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+            Image(systemName: "person.2.fill")
+                .font(.system(size: 46))
+                .foregroundStyle(Theme.accent)
+            Text("No Followed Creators Yet")
+                .font(.title3.bold())
+            Text("Follow creators from the Reels feed to watch their latest clips here.")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button("Back to Reels") { mode = 0 }
+                .buttonStyle(.borderedProminent)
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -76,43 +420,358 @@ struct HomeView: View {
     }
 }
 
-// MARK: - Discover
+private struct CategoryReelsContainer: View {
+    @StateObject private var model: FeedModel
+    let isVisible: Bool
 
-struct DiscoverView: View {
+    init(category: GoonedCategory, isVisible: Bool) {
+        _model = StateObject(wrappedValue: FeedModel(source: .category(category, order: "top")))
+        self.isVisible = isVisible
+    }
+
+    var body: some View {
+        FeedView(model: model, isVisible: isVisible)
+    }
+}
+
+struct ReelsCategoryFilterSheet: View {
+    @Binding var selected: GoonedCategory?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        selected = nil
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Label("All Personalized Reels", systemImage: "sparkles")
+                                .foregroundStyle(.white)
+                            Spacer()
+                            if selected == nil {
+                                Image(systemName: "checkmark").foregroundStyle(Theme.accent)
+                            }
+                        }
+                    }
+                }
+
+                Section("Filter by Category") {
+                    ForEach(GoonedCategory.all) { cat in
+                        Button {
+                            selected = cat
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: cat.icon)
+                                    .foregroundStyle(cat.color)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(cat.title).font(.subheadline.bold()).foregroundStyle(.white)
+                                    Text(cat.subtitle).font(.caption).foregroundStyle(Theme.textSecondary)
+                                }
+                                Spacer()
+                                if selected == cat {
+                                    Image(systemName: "checkmark").foregroundStyle(Theme.accent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Theme.bg)
+            .navigationTitle("Reels Filter")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 3. Controlled Predefined Categories Tab (Fixed 10 Categories Only)
+
+struct CategoriesTabView: View {
     @EnvironmentObject var store: UserStore
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Pinned Favorites Row
+                    if !store.favoriteCategories.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Pinned Categories")
+                                .font(.headline)
+                                .foregroundStyle(Theme.textSecondary)
+                                .padding(.horizontal, 16)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(store.favoriteCategories) { cat in
+                                        NavigationLink(value: Route.category(cat)) {
+                                            CategoryBadgePill(category: cat, compact: false)
+                                        }
+                                        .buttonStyle(ScalePressButtonStyle())
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+
+                    // All 10 Predefined Curated Categories
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Browse Categories")
+                                .font(.title3.bold())
+                            Spacer()
+                            Text("\(GoonedCategory.all.count) curated")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .padding(.horizontal, 16)
+
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(GoonedCategory.all) { cat in
+                                NavigationLink(value: Route.category(cat)) {
+                                    CategoryCardTile(category: cat)
+                                }
+                                .buttonStyle(ScalePressButtonStyle())
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                .padding(.top, 10)
+                .padding(.bottom, 90)
+            }
+            .background(Theme.bg)
+            .navigationTitle("Categories")
+            .withGoonedRoutes()
+        }
+    }
+}
+
+struct CategoryCardTile: View {
+    let category: GoonedCategory
+    @EnvironmentObject var store: UserStore
+
+    private var isPinned: Bool { store.isFavoriteCategory(category.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(category.color.opacity(0.20))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: category.icon)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(category.color)
+                }
+                Spacer()
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    store.toggleFavoriteCategory(category)
+                } label: {
+                    Image(systemName: isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isPinned ? category.color : Theme.textMuted)
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.06), in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(category.title)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(category.subtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .padding(14)
+        .frame(height: 138)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Theme.surface)
+                .overlay(
+                    LinearGradient(
+                        colors: [category.color.opacity(0.18), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isPinned ? category.color.opacity(0.55) : Theme.border, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Category Detail Screen (Switchable Grid + Fullscreen Reels + Sort)
+
+struct CategoryDetailScreen: View {
+    let category: GoonedCategory
+    @EnvironmentObject var store: UserStore
+    @State private var order: String = "top" // "top" or "latest"
+    @State private var viewMode: Int = 0    // 0 = Grid, 1 = Reels
+
+    var body: some View {
+        CategoryDetailInner(category: category, order: order, viewMode: viewMode)
+            .id("\(category.id)-\(order)")
+            .navigationTitle(category.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        store.toggleFavoriteCategory(category)
+                    } label: {
+                        Image(systemName: store.isFavoriteCategory(category.id) ? "pin.fill" : "pin")
+                            .foregroundStyle(store.isFavoriteCategory(category.id) ? category.color : .white)
+                    }
+
+                    Button {
+                        withAnimation { viewMode = viewMode == 0 ? 1 : 0 }
+                    } label: {
+                        Image(systemName: viewMode == 0 ? "play.rectangle.fill" : "square.grid.3x3.fill")
+                    }
+
+                    Menu {
+                        Picker("Sort By", selection: $order) {
+                            Label("Top Rated", systemImage: "flame.fill").tag("top")
+                            Label("Latest", systemImage: "clock.fill").tag("latest")
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down.circle")
+                    }
+                }
+            }
+    }
+}
+
+private struct CategoryDetailInner: View {
+    let category: GoonedCategory
+    let viewMode: Int
+    @StateObject private var model: FeedModel
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    init(category: GoonedCategory, order: String, viewMode: Int) {
+        self.category = category
+        self.viewMode = viewMode
+        _model = StateObject(wrappedValue: FeedModel(source: .category(category, order: order)))
+    }
+
+    var body: some View {
+        Group {
+            if viewMode == 1 {
+                FeedView(model: model, bottomInset: 72)
+            } else {
+                ScrollView {
+                    // Category Hero Banner
+                    HStack(spacing: 14) {
+                        Image(systemName: category.icon)
+                            .font(.system(size: 26, weight: .bold))
+                            .foregroundStyle(category.color)
+                            .frame(width: 52, height: 52)
+                            .background(category.color.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(category.title).font(.headline)
+                            Text(category.subtitle).font(.caption).foregroundStyle(Theme.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(14)
+
+                    if model.items.isEmpty && model.isLoading {
+                        LazyVGrid(columns: columns, spacing: 2) {
+                            ForEach(0..<12, id: \.self) { _ in
+                                ShimmerPlaceholder().aspectRatio(9.0 / 16.0, contentMode: .fit)
+                            }
+                        }
+                    } else {
+                        LazyVGrid(columns: columns, spacing: 2) {
+                            ForEach(model.items) { g in
+                                NavigationLink(value: Route.reelList(title: category.title, items: model.items, start: g.id)) {
+                                    GridThumb(gif: g)
+                                }
+                                .onAppear { model.onItemAppear(g) }
+                            }
+                        }
+                    }
+
+                    if model.isLoading && !model.items.isEmpty {
+                        ProgressView().padding(24)
+                    }
+                }
+                .padding(.bottom, 74)
+                .background(Theme.bg)
+                .task {
+                    if model.items.isEmpty { await model.loadMore() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 4. Search & Explore Tab (Instagram Explore Grid + Autocomplete + Recent Searches)
+
+struct SearchTabView: View {
+    @EnvironmentObject var store: UserStore
+    @StateObject private var exploreFeed = FeedModel(source: .forYou)
     @State private var path = NavigationPath()
     @State private var query = ""
     @State private var suggestions: [Suggestion] = []
-    @State private var niches: [Niche] = []
-    @State private var nichePage = 1
-    @State private var nichePages = Int.max
-    @State private var loadingNiches = false
     @State private var trendingTags: [TagCount] = []
+    @State private var selectedFilterCategory: GoonedCategory? = nil
 
-    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    private var filteredExploreItems: [Gif] {
+        guard let cat = selectedFilterCategory else { return exploreFeed.items }
+        return exploreFeed.items.filter { $0.category == cat }
+    }
 
     var body: some View {
         NavigationStack(path: $path) {
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: false) {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    browse
+                    exploreGridContent
                 } else {
-                    searchResults
+                    liveSearchSuggestions
                 }
             }
-            .background(Color.black)
-            .navigationTitle("Discover")
-            .searchable(text: $query, prompt: "Search tags, creators…")
+            .background(Theme.bg)
+            .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search creators, tags, or topics…")
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .onSubmit(of: .search) {
                 let q = query.trimmingCharacters(in: .whitespaces)
-                if !q.isEmpty { path.append(Route.tag(q)) }
+                guard !q.isEmpty else { return }
+                store.addRecentSearch(q)
+                path.append(Route.tag(q))
             }
             .task(id: query) {
                 let q = query.trimmingCharacters(in: .whitespaces)
                 guard !q.isEmpty else { suggestions = []; return }
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
                 suggestions = (try? await RedGifsAPI.shared.suggest(q)) ?? []
             }
@@ -120,169 +779,235 @@ struct DiscoverView: View {
                 if trendingTags.isEmpty {
                     trendingTags = (try? await RedGifsAPI.shared.trendingTags().tags) ?? []
                 }
-                if niches.isEmpty { await loadNiches() }
+                if exploreFeed.items.isEmpty {
+                    await exploreFeed.loadMore()
+                }
             }
-            .withRoutes()
+            .refreshable {
+                await exploreFeed.refresh()
+            }
+            .withGoonedRoutes()
         }
     }
 
-    private var browse: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if !store.data.joinedNiches.isEmpty {
-                sectionTitle("Your categories")
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(store.data.joinedNiches) { n in
-                            NavigationLink(value: Route.niche(id: n.id, name: n.name)) {
-                                NicheTile(niche: n).frame(width: 150)
+    private var exploreGridContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Recent Searches
+            if !store.data.recentSearches.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Recent")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Button("Clear") { store.clearRecentSearches() }
+                            .font(.caption.bold())
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .padding(.horizontal, 14)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(store.data.recentSearches, id: \.self) { term in
+                                NavigationLink(value: Route.tag(term)) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "clock.arrow.circlepath")
+                                            .font(.system(size: 11))
+                                        Text(term)
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 6)
+                                    .background(Theme.surfaceElevated, in: Capsule())
+                                    .foregroundStyle(.white)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
+                        .padding(.horizontal, 14)
                     }
-                    .padding(.horizontal)
                 }
             }
 
+            // Predefined Category Filter Pills
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button {
+                        selectedFilterCategory = nil
+                    } label: {
+                        Text("All")
+                            .font(.system(size: 12, weight: .bold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(selectedFilterCategory == nil ? Theme.accent : Theme.surfaceElevated, in: Capsule())
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+
+                    ForEach(GoonedCategory.all) { cat in
+                        Button {
+                            selectedFilterCategory = (selectedFilterCategory == cat) ? nil : cat
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: cat.icon)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(selectedFilterCategory == cat ? .white : cat.color)
+                                Text(cat.title)
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(selectedFilterCategory == cat ? cat.color : Theme.surfaceElevated, in: Capsule())
+                            .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+            }
+
+            // Trending Tags Strip
             if !trendingTags.isEmpty {
-                sectionTitle("Trending tags")
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHGrid(rows: [GridItem(.fixed(34)), GridItem(.fixed(34))], spacing: 8) {
-                        ForEach(trendingTags, id: \.self) { t in
+                    HStack(spacing: 7) {
+                        ForEach(trendingTags.prefix(16), id: \.self) { t in
                             NavigationLink(value: Route.tag(t.name)) {
                                 Text("#\(t.name)")
-                                    .font(.subheadline.bold())
-                                    .padding(.horizontal, 12).padding(.vertical, 7)
-                                    .background(Color.white.opacity(0.12), in: Capsule())
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Theme.surface, in: Capsule())
+                                    .overlay(Capsule().stroke(Theme.border, lineWidth: 0.8))
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(.horizontal)
+                    .padding(.horizontal, 14)
                 }
             }
 
-            sectionTitle("Categories")
-            LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(niches) { n in
-                    NavigationLink(value: Route.niche(id: n.id, name: n.name)) {
-                        NicheTile(niche: n)
+            // Instagram 3-Column Explore Visual Grid
+            if exploreFeed.items.isEmpty && exploreFeed.isLoading {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(0..<12, id: \.self) { _ in
+                        ShimmerPlaceholder().aspectRatio(9.0 / 16.0, contentMode: .fit)
                     }
-                    .onAppear {
-                        if n.id == niches.last?.id { Task { await loadNiches() } }
+                }
+            } else {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(filteredExploreItems) { g in
+                        NavigationLink(value: Route.reelList(title: "Explore", items: filteredExploreItems, start: g.id)) {
+                            GridThumb(gif: g, showCategoryDot: true)
+                        }
+                        .onAppear {
+                            if g.id == exploreFeed.items.last?.id {
+                                Task { await exploreFeed.loadMore() }
+                            }
+                        }
                     }
                 }
             }
-            .padding(.horizontal)
-            if loadingNiches { ProgressView().frame(maxWidth: .infinity).padding() }
+
+            if exploreFeed.isLoading && !exploreFeed.items.isEmpty {
+                ProgressView().frame(maxWidth: .infinity).padding(20)
+            }
         }
-        .padding(.vertical)
-        .foregroundStyle(.white)
+        .padding(.bottom, 86)
     }
 
-    private var searchResults: some View {
+    private var liveSearchSuggestions: some View {
         let q = query.trimmingCharacters(in: .whitespaces)
+        let cleanCreator = q.replacingOccurrences(of: "@", with: "")
         return LazyVStack(alignment: .leading, spacing: 0) {
-            NavigationLink(value: Route.tag(q)) {
-                row(icon: "magnifyingglass", title: "Search \"\(q)\"", subtitle: nil)
+            // Matching Fixed Categories first
+            let matchingCats = GoonedCategory.all.filter {
+                $0.title.localizedCaseInsensitiveContains(q) || $0.subtitle.localizedCaseInsensitiveContains(q)
             }
-            NavigationLink(value: Route.creator(q.replacingOccurrences(of: "@", with: ""))) {
-                row(icon: "person.crop.circle", title: "Creator @\(q.replacingOccurrences(of: "@", with: ""))", subtitle: nil)
-            }
-            ForEach(suggestions, id: \.self) { s in
-                NavigationLink(value: route(for: s)) {
-                    row(icon: isUser(s) ? "person.fill" : "number",
-                        title: s.text,
-                        subtitle: s.gifs.map { "\(shortCount($0)) posts" })
+            ForEach(matchingCats) { cat in
+                NavigationLink(value: Route.category(cat)) {
+                    searchRow(icon: cat.icon, tint: cat.color, title: cat.title, subtitle: "Category • \(cat.subtitle)")
                 }
+            }
+
+            NavigationLink(value: Route.tag(q)) {
+                searchRow(icon: "magnifyingglass", tint: Theme.accent, title: "Search \"\(q)\"", subtitle: "Posts & Reels")
+            }
+            .simultaneousGesture(TapGesture().onEnded { store.addRecentSearch(q) })
+
+            NavigationLink(value: Route.creator(cleanCreator)) {
+                searchRow(icon: "person.crop.circle.fill", tint: .cyan, title: "@\(cleanCreator)", subtitle: "Creator Profile")
+            }
+            .simultaneousGesture(TapGesture().onEnded { store.addRecentSearch(cleanCreator) })
+
+            ForEach(suggestions, id: \.self) { s in
+                let isUser = (s.type ?? "").lowercased().contains("user")
+                NavigationLink(value: isUser ? Route.creator(s.text) : Route.tag(s.text)) {
+                    searchRow(
+                        icon: isUser ? "person.fill" : "number",
+                        tint: isUser ? .cyan : Theme.accent,
+                        title: s.text,
+                        subtitle: s.gifs.map { "\(shortCount($0)) posts" }
+                    )
+                }
+                .simultaneousGesture(TapGesture().onEnded { store.addRecentSearch(s.text) })
             }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
+        .padding(.bottom, 86)
     }
 
-    private func isUser(_ s: Suggestion) -> Bool {
-        let t = (s.type ?? "").lowercased()
-        return t == "user" || t == "creator" || t == "users"
-    }
-
-    private func route(for s: Suggestion) -> Route {
-        isUser(s) ? .creator(s.text) : .tag(s.text)
-    }
-
-    private func row(icon: String, title: String, subtitle: String?) -> some View {
+    private func searchRow(icon: String, tint: Color, title: String, subtitle: String?) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: icon).frame(width: 28).foregroundStyle(.pink)
-            VStack(alignment: .leading) {
-                Text(title).font(.body)
-                if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
-            }
-            Spacer()
-            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(.horizontal).padding(.vertical, 12)
-        .contentShape(Rectangle())
-    }
-
-    private func sectionTitle(_ s: String) -> some View {
-        Text(s).font(.title3.bold()).padding(.horizontal)
-    }
-
-    private func loadNiches() async {
-        guard !loadingNiches, nichePage <= nichePages else { return }
-        loadingNiches = true
-        defer { loadingNiches = false }
-        if let p = try? await RedGifsAPI.shared.niches(page: nichePage) {
-            nichePages = p.pages
-            nichePage += 1
-            let existing = Set(niches.map(\.id))
-            niches += p.niches.filter { !existing.contains($0.id) }
-        }
-    }
-}
-
-struct NicheTile: View {
-    let niche: Niche
-
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            Color.white.opacity(0.08)
-            AsyncImage(url: URL(string: niche.thumbnail ?? niche.cover ?? "")) { phase in
-                if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) } else { Color.clear }
-            }
-            LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .center, endPoint: .bottom)
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 36, height: 36)
+                .background(tint.opacity(0.14), in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text(niche.name).font(.subheadline.bold()).lineLimit(1)
-                if let g = niche.gifs {
-                    Text("\(shortCount(g)) posts").font(.caption2).foregroundStyle(.white.opacity(0.75))
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(Theme.textSecondary)
                 }
             }
-            .padding(10)
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(Theme.textMuted)
         }
-        .frame(height: 110)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 }
 
-// MARK: - Tag / Niche / List feeds
+// MARK: - Tag & Reel List Screens
 
 struct TagFeedScreen: View {
     let tag: String
     @State private var order = "top"
+    @State private var viewMode = 0 // 0 = Grid, 1 = Reels
 
     var body: some View {
-        TagFeedInner(tag: tag, order: order)
-            .id(order)
+        TagFeedInner(tag: tag, order: order, viewMode: viewMode)
+            .id("\(tag)-\(order)")
             .navigationTitle("#\(tag)")
-            .clearNavBar()
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        withAnimation { viewMode = viewMode == 0 ? 1 : 0 }
+                    } label: {
+                        Image(systemName: viewMode == 0 ? "play.rectangle.fill" : "square.grid.3x3.fill")
+                    }
+
                     Menu {
                         Picker("Sort", selection: $order) {
                             Text("Top").tag("top")
                             Text("Latest").tag("latest")
                         }
                     } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
+                        Image(systemName: "arrow.up.arrow.down.circle")
                     }
                 }
             }
@@ -290,70 +1015,60 @@ struct TagFeedScreen: View {
 }
 
 private struct TagFeedInner: View {
+    let tag: String
+    let viewMode: Int
     @StateObject private var model: FeedModel
-    init(tag: String, order: String) {
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    init(tag: String, order: String, viewMode: Int) {
+        self.tag = tag
+        self.viewMode = viewMode
         _model = StateObject(wrappedValue: FeedModel(source: .tag(tag, order: order)))
     }
-    var body: some View { FeedView(model: model) }
-}
-
-struct NicheScreen: View {
-    let id: String
-    let name: String
-    @EnvironmentObject var store: UserStore
-    @State private var order: String = "hot"
 
     var body: some View {
-        NicheFeedInner(id: id, order: order == "hot" ? nil : order)
-            .id(order)
-            .navigationTitle(name)
-            .clearNavBar()
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button(store.isJoined(id) ? "Joined" : "Join") {
-                        store.toggleJoin(Niche(id: id, name: name))
-                    }
-                    .font(.subheadline.bold())
-                    Menu {
-                        Picker("Sort", selection: $order) {
-                            Text("Hot").tag("hot")
-                            Text("New").tag("new")
-                            Text("Top").tag("top")
+        if viewMode == 1 {
+            FeedView(model: model, bottomInset: 72)
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(model.items) { g in
+                        NavigationLink(value: Route.reelList(title: "#\(tag)", items: model.items, start: g.id)) {
+                            GridThumb(gif: g)
                         }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
+                        .onAppear { model.onItemAppear(g) }
                     }
                 }
+                if model.isLoading { ProgressView().padding(24) }
             }
+            .padding(.bottom, 74)
+            .background(Theme.bg)
+            .task { if model.items.isEmpty { await model.loadMore() } }
+        }
     }
 }
 
-private struct NicheFeedInner: View {
-    @StateObject private var model: FeedModel
-    init(id: String, order: String?) {
-        _model = StateObject(wrappedValue: FeedModel(source: .niche(id, order: order)))
-    }
-    var body: some View { FeedView(model: model) }
-}
-
-struct ListFeedScreen: View {
+struct ReelListScreen: View {
+    let title: String
     @StateObject private var model: FeedModel
     private let start: String
 
-    init(items: [Gif], start: String) {
+    init(title: String, items: [Gif], start: String) {
+        self.title = title
         _model = StateObject(wrappedValue: FeedModel(source: .list, items: items))
         self.start = start
     }
 
     var body: some View {
-        FeedView(model: model, initialID: start)
+        FeedView(model: model, initialID: start, bottomInset: 72)
+            .navigationTitle(title)
             .clearNavBar()
     }
 }
 
-// MARK: - Creator profile
+// MARK: - Creator Profile Screen
 
-struct CreatorView: View {
+struct CreatorProfileScreen: View {
     let username: String
     @EnvironmentObject var store: UserStore
     @StateObject private var model: FeedModel
@@ -367,243 +1082,364 @@ struct CreatorView: View {
 
     var body: some View {
         ScrollView {
-            header
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(model.items) { g in
-                    NavigationLink {
-                        FeedView(model: model, initialID: g.id).clearNavBar()
-                    } label: {
-                        GridThumb(gif: g)
+            headerSection
+            Divider().overlay(Theme.border)
+
+            if model.items.isEmpty && model.isLoading {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(0..<9, id: \.self) { _ in
+                        ShimmerPlaceholder().aspectRatio(9.0 / 16.0, contentMode: .fit)
                     }
-                    .onAppear { model.onItemAppear(g) }
+                }
+            } else {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(model.items) { g in
+                        NavigationLink {
+                            FeedView(model: model, initialID: g.id, bottomInset: 72).clearNavBar()
+                        } label: {
+                            GridThumb(gif: g, showCategoryDot: true)
+                        }
+                        .onAppear { model.onItemAppear(g) }
+                    }
                 }
             }
-            if model.isLoading {
-                ProgressView().padding()
-            } else if let err = model.errorText {
-                VStack {
-                    Text(model.items.isEmpty ? "Creator not found or unavailable." : err).foregroundStyle(.secondary)
+
+            if model.isLoading && !model.items.isEmpty {
+                ProgressView().padding(20)
+            } else if let err = model.errorText, model.items.isEmpty {
+                VStack(spacing: 10) {
+                    Text("Creator unavailable or has no public posts.").foregroundStyle(Theme.textSecondary)
+                    Text(err).font(.caption).foregroundStyle(Theme.textMuted)
                     Button("Retry") { Task { await model.loadMore() } }
+                        .buttonStyle(.borderedProminent)
                 }
-                .padding()
+                .padding(.top, 40)
             }
         }
-        .background(Color.black)
+        .padding(.bottom, 76)
+        .background(Theme.bg)
         .navigationTitle("@\(username)")
         .navigationBarTitleDisplayMode(.inline)
         .task { if model.items.isEmpty { await model.loadMore() } }
     }
 
-    private var header: some View {
+    private var headerSection: some View {
         let u = model.user
         let following = store.isFollowing(username)
-        return VStack(spacing: 10) {
-            AsyncImage(url: URL(string: u?.profileImageUrl ?? "")) { phase in
-                if let img = phase.image {
-                    img.resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    LinearGradient(colors: [.pink, .purple], startPoint: .top, endPoint: .bottom)
-                        .overlay(Text(String(username.prefix(1)).uppercased()).font(.largeTitle.bold()))
+        return VStack(spacing: 14) {
+            HStack(spacing: 22) {
+                AvatarRingView(username: username, imageURL: u?.profileImageUrl, size: 80, showRing: true)
+
+                HStack(spacing: 22) {
+                    profileStat(shortCount(u?.gifs ?? (model.items.isEmpty ? nil : model.items.count)), "Posts")
+                    profileStat(shortCount(u?.followers), "Followers")
+                    profileStat(shortCount(u?.views), "Views")
                 }
             }
-            .frame(width: 92, height: 92)
-            .clipShape(Circle())
+            .padding(.horizontal, 18)
 
-            HStack(spacing: 4) {
-                Text(u?.name ?? username).font(.title3.bold())
-                if u?.verified == true { Image(systemName: "checkmark.seal.fill").foregroundStyle(.cyan) }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 5) {
+                    Text(u?.name ?? username).font(.headline)
+                    if u?.verified == true {
+                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.cyan).font(.subheadline)
+                    }
+                }
+                if let d = u?.description, !d.isEmpty {
+                    Text(d)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(3)
+                }
             }
-            HStack(spacing: 30) {
-                stat(shortCount(u?.followers), "Followers")
-                stat(shortCount(u?.gifs ?? (model.items.isEmpty ? nil : model.items.count)), "Posts")
-                stat(shortCount(u?.views), "Views")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 18)
+
+            HStack(spacing: 10) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    store.toggleFollow(username, user: model.user)
+                } label: {
+                    Text(following ? "Following" : "Follow")
+                        .font(.subheadline.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(following ? Theme.surfaceElevated : Theme.accent, in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                if let first = model.items.first {
+                    NavigationLink {
+                        FeedView(model: model, initialID: first.id, bottomInset: 72).clearNavBar()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "play.fill")
+                            Text("Watch Reels")
+                        }
+                        .font(.subheadline.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(.white)
+                    }
+                }
             }
-            Button {
-                store.toggleFollow(username, user: model.user)
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            } label: {
-                Text(following ? "Following" : "Follow")
-                    .bold()
-                    .frame(width: 180).padding(.vertical, 10)
-                    .background(following ? Color.white.opacity(0.15) : Color.pink, in: RoundedRectangle(cornerRadius: 8))
-            }
-            if let d = u?.description, !d.isEmpty {
-                Text(d).font(.footnote).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center).lineLimit(4).padding(.horizontal)
-            }
+            .padding(.horizontal, 18)
         }
         .foregroundStyle(.white)
-        .padding(.vertical)
+        .padding(.vertical, 14)
     }
 
-    private func stat(_ value: String, _ label: String) -> some View {
+    private func profileStat(_ value: String, _ label: String) -> some View {
         VStack(spacing: 2) {
-            Text(value).font(.headline)
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 17, weight: .bold))
+            Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
         }
     }
 }
 
+// MARK: - Thumbnail Grid Cell
+
 struct GridThumb: View {
     let gif: Gif
+    var showCategoryDot: Bool = false
 
     var body: some View {
-        Color.white.opacity(0.06)
+        Theme.surface
             .aspectRatio(9.0 / 16.0, contentMode: .fit)
             .overlay(
                 AsyncImage(url: gif.thumbURL) { phase in
-                    if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) } else { Color.clear }
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        ShimmerPlaceholder()
+                    }
                 }
             )
             .clipped()
+            .overlay(
+                LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .center, endPoint: .bottom)
+            )
+            .overlay(alignment: .topTrailing) {
+                if showCategoryDot {
+                    Image(systemName: gif.category.icon)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(gif.category.color)
+                        .padding(5)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .padding(5)
+                }
+            }
             .overlay(alignment: .bottomLeading) {
-                HStack(spacing: 3) {
+                HStack(spacing: 4) {
                     Image(systemName: "play.fill")
                     Text(shortCount(gif.views))
                 }
-                .font(.caption2.bold())
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.white)
-                .shadow(radius: 2)
-                .padding(5)
+                .padding(6)
             }
             .contentShape(Rectangle())
     }
 }
 
-// MARK: - Me
+// MARK: - 5. Profile & Vault Tab (Likes, Saved, Following & Settings)
 
-struct MeView: View {
+struct ProfileTabView: View {
     @EnvironmentObject var store: UserStore
-    @State private var section = 0
+    @EnvironmentObject var app: AppState
+    @State private var tab = 0 // 0 = Liked, 1 = Saved, 2 = Following
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 12) {
-                    Circle()
-                        .fill(LinearGradient(colors: [.pink, .purple], startPoint: .top, endPoint: .bottom))
-                        .frame(width: 84, height: 84)
-                        .overlay(Image(systemName: "lock.fill").font(.title))
-                    Text("Private profile").font(.title3.bold())
-                    HStack(spacing: 30) {
-                        stat(store.data.liked.count, "Likes")
-                        stat(store.data.following.count, "Following")
-                        stat(store.data.joinedNiches.count, "Categories")
-                    }
-                    Picker("", selection: $section) {
-                        Image(systemName: "heart.fill").tag(0)
-                        Image(systemName: "person.2.fill").tag(1)
-                        Image(systemName: "square.grid.2x2.fill").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal)
-                }
-                .foregroundStyle(.white)
-                .padding(.vertical)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 16) {
+                    // Profile Header
+                    HStack(spacing: 20) {
+                        ZStack {
+                            Circle()
+                                .stroke(Theme.ringGradient, lineWidth: 2.5)
+                                .frame(width: 78, height: 78)
+                            Circle()
+                                .fill(Theme.surfaceElevated)
+                                .frame(width: 70, height: 70)
+                                .overlay(
+                                    Image(systemName: "lock.shield.fill")
+                                        .font(.system(size: 30))
+                                        .foregroundStyle(Theme.accent)
+                                )
+                        }
 
-                switch section {
-                case 0: likedGrid
-                case 1: followingList
-                default: categoriesGrid
-                }
-            }
-            .background(Color.black)
-            .navigationTitle("Me")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink { SettingsView() } label: { Image(systemName: "gearshape.fill") }
-                }
-            }
-            .withRoutes()
-        }
-    }
-
-    private var likedGrid: some View {
-        Group {
-            if store.data.liked.isEmpty {
-                empty("No likes yet", "Double-tap a video to like it.")
-            } else {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(store.data.liked) { g in
-                        NavigationLink(value: Route.list(items: store.data.liked, start: g.id)) {
-                            GridThumb(gif: g)
+                        HStack(spacing: 24) {
+                            statButton(store.data.liked.count, "Liked", 0)
+                            statButton(store.data.saved.count, "Saved", 1)
+                            statButton(store.data.following.count, "Following", 2)
                         }
                     }
+                    .padding(.horizontal, 18)
+
+                    // Taste Profile Summary Chips
+                    let topCats = store.topCategories(4).map(\.0)
+                    if !topCats.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                Text("Top Taste:")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Theme.textSecondary)
+                                ForEach(topCats) { cat in
+                                    NavigationLink(value: Route.category(cat)) {
+                                        CategoryBadgePill(category: cat, compact: true)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 18)
+                        }
+                    }
+
+                    // Segmented Tab Bar
+                    HStack(spacing: 0) {
+                        segButton(icon: "heart.fill", label: "Liked", index: 0)
+                        segButton(icon: "bookmark.fill", label: "Saved", index: 1)
+                        segButton(icon: "person.2.fill", label: "Following", index: 2)
+                    }
+                    .overlay(alignment: .bottom) { Divider().overlay(Theme.border) }
+
+                    switch tab {
+                    case 0:
+                        mediaGrid(items: store.data.liked, title: "Liked", emptyTitle: "No Liked Reels Yet", emptySub: "Double-tap any post or Reel to add it to your Likes.")
+                    case 1:
+                        mediaGrid(items: store.data.saved, title: "Saved", emptyTitle: "No Saved Posts Yet", emptySub: "Tap the bookmark icon on any video to save it for later.")
+                    default:
+                        followingSection
+                    }
+                }
+                .padding(.top, 10)
+                .padding(.bottom, 88)
+            }
+            .background(Theme.bg)
+            .navigationTitle("Vault")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        app.lock()
+                    } label: {
+                        Image(systemName: "lock.fill")
+                    }
+                    NavigationLink {
+                        SettingsView()
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                    }
+                }
+            }
+            .withGoonedRoutes()
+        }
+    }
+
+    private func statButton(_ count: Int, _ label: String, _ idx: Int) -> some View {
+        Button {
+            withAnimation { tab = idx }
+        } label: {
+            VStack(spacing: 2) {
+                Text("\(count)").font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
+                Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func segButton(icon: String, label: String, index: Int) -> some View {
+        let active = tab == index
+        return Button {
+            withAnimation(.easeInOut(duration: 0.18)) { tab = index }
+        } label: {
+            VStack(spacing: 8) {
+                HStack(spacing: 5) {
+                    Image(systemName: icon).font(.system(size: 13))
+                    Text(label).font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(active ? .white : Theme.textSecondary)
+                Rectangle()
+                    .fill(active ? Theme.accent : Color.clear)
+                    .frame(height: 2)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func mediaGrid(items: [Gif], title: String, emptyTitle: String, emptySub: String) -> some View {
+        if items.isEmpty {
+            VStack(spacing: 8) {
+                Text(emptyTitle).font(.headline)
+                Text(emptySub)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+            }
+            .padding(.top, 56)
+        } else {
+            LazyVGrid(columns: columns, spacing: 2) {
+                ForEach(items) { g in
+                    NavigationLink(value: Route.reelList(title: title, items: items, start: g.id)) {
+                        GridThumb(gif: g, showCategoryDot: true)
+                    }
                 }
             }
         }
     }
 
-    private var followingList: some View {
+    private var followingSection: some View {
         Group {
             if store.data.following.isEmpty {
-                empty("Not following anyone", "Tap + on a creator to follow them.")
+                VStack(spacing: 8) {
+                    Text("Not Following Anyone").font(.headline)
+                    Text("Creators you follow will appear here for quick access.")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+                .padding(.top, 56)
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(store.data.following) { u in
-                        HStack {
+                        HStack(spacing: 12) {
                             NavigationLink(value: Route.creator(u.username)) {
                                 HStack(spacing: 12) {
-                                    Circle()
-                                        .fill(LinearGradient(colors: [.pink, .purple], startPoint: .top, endPoint: .bottom))
-                                        .frame(width: 44, height: 44)
-                                        .overlay(Text(String(u.username.prefix(1)).uppercased()).bold())
-                                    VStack(alignment: .leading) {
-                                        Text(u.name ?? u.username).bold()
-                                        Text("@\(u.username)").font(.caption).foregroundStyle(.secondary)
+                                    AvatarRingView(username: u.username, imageURL: u.profileImageUrl, size: 44, showRing: true)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(u.name ?? u.username).font(.subheadline.bold()).foregroundStyle(.white)
+                                        Text("@\(u.username)").font(.caption).foregroundStyle(Theme.textSecondary)
                                     }
                                     Spacer()
                                 }
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            Button("Unfollow") { store.toggleFollow(u.username) }
-                                .font(.caption.bold())
-                                .buttonStyle(.bordered)
+
+                            Button("Unfollow") {
+                                store.toggleFollow(u.username)
+                            }
+                            .font(.caption.bold())
+                            .buttonStyle(.bordered)
                         }
-                        .padding(.horizontal).padding(.vertical, 8)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
                     }
                 }
-                .foregroundStyle(.white)
             }
-        }
-    }
-
-    private var categoriesGrid: some View {
-        Group {
-            if store.data.joinedNiches.isEmpty {
-                empty("No categories", "Join categories from Discover.")
-            } else {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                    ForEach(store.data.joinedNiches) { n in
-                        NavigationLink(value: Route.niche(id: n.id, name: n.name)) { NicheTile(niche: n) }
-                    }
-                }
-                .padding(.horizontal)
-            }
-        }
-    }
-
-    private func empty(_ title: String, _ sub: String) -> some View {
-        VStack(spacing: 6) {
-            Text(title).font(.headline)
-            Text(sub).font(.subheadline).foregroundStyle(.secondary)
-        }
-        .foregroundStyle(.white)
-        .padding(.top, 50)
-    }
-
-    private func stat(_ n: Int, _ label: String) -> some View {
-        VStack(spacing: 2) {
-            Text("\(n)").font(.headline)
-            Text(label).font(.caption).foregroundStyle(.secondary)
         }
     }
 }
 
-// MARK: - Settings
+// MARK: - Settings View
 
 struct SettingsView: View {
     @EnvironmentObject var store: UserStore
@@ -614,12 +1450,13 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Playback") {
-                Toggle("HD video (uses more data)", isOn: $store.data.settings.hd)
-                Toggle("Muted", isOn: $store.data.settings.muted)
+            Section("Feed & Playback") {
+                Toggle("HD Video Quality", isOn: $store.data.settings.hd)
+                Toggle("Mute Audio by Default", isOn: $store.data.settings.muted)
+                Toggle("Autoplay Home Feed Videos", isOn: $store.data.settings.autoplayFeed)
             }
 
-            Section("Security") {
+            Section("Passcode & Privacy") {
                 if Biometrics.available {
                     Toggle("Unlock with Face ID", isOn: Binding(
                         get: { store.data.settings.faceID },
@@ -632,37 +1469,37 @@ struct SettingsView: View {
                         }
                     ))
                 }
-                Button("Change passcode") { changingPasscode = true }
-                Button("Lock now") { app.lock() }
+                Button("Change 4-Digit Passcode") { changingPasscode = true }
+                Button("Lock App Immediately") { app.lock() }
+            }
+
+            Section("Recommendation Algorithm") {
+                let topCats = store.topCategories(5).map { "\($0.0.title) (+\(Int($0.1)))" }
+                Text(topCats.isEmpty ? "Watching & liking posts will personalize your feed across Gooned's 10 categories." : topCats.joined(separator: " • "))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("Reset Recommendation Taste", role: .destructive) { confirmReset = true }
             }
 
             Section {
-                let top = store.topTags(8).map(\.0)
-                Text(top.isEmpty ? "Still learning what you like…" : top.joined(separator: ", "))
-                    .font(.footnote).foregroundStyle(.secondary)
-                Button("Reset recommendations", role: .destructive) { confirmReset = true }
-            } header: {
-                Text("Your top interests")
-            }
-
-            Section {
-                Button("Erase all data", role: .destructive) { confirmErase = true }
+                Button("Panic Erase All Data", role: .destructive) { confirmErase = true }
             } footer: {
-                Text("Content comes from RedGIFs' public API. Your passcode, likes, follows and interests are stored only on this device.")
+                Text("All likes, saved videos, followed creators, and your passcode are encrypted on-device only.")
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Theme.bg)
         .navigationTitle("Settings")
         .sheet(isPresented: $changingPasscode) {
             PasscodeSetupView(mode: .change)
         }
-        .confirmationDialog("Reset recommendations?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Reset", role: .destructive) { store.resetAlgorithm() }
+        .confirmationDialog("Reset recommendation history?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("Reset Algorithm", role: .destructive) { store.resetAlgorithm() }
         }
-        .confirmationDialog("Erase everything?", isPresented: $confirmErase, titleVisibility: .visible) {
-            Button("Erase all data", role: .destructive) { app.eraseEverything() }
+        .confirmationDialog("Erase everything from this device?", isPresented: $confirmErase, titleVisibility: .visible) {
+            Button("Erase All Data & Passcode", role: .destructive) { app.eraseEverything() }
         } message: {
-            Text("Deletes your passcode, likes, follows and settings.")
+            Text("Permanently removes your passcode, likes, saved posts, follows, and history.")
         }
     }
 }
-

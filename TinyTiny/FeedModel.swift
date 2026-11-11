@@ -3,8 +3,8 @@ import SwiftUI
 enum FeedSource: Hashable {
     case forYou
     case following
+    case category(GoonedCategory, order: String)
     case tag(String, order: String)
-    case niche(String, order: String?)
     case user(String)
     case list
 }
@@ -36,6 +36,10 @@ final class FeedModel: ObservableObject {
         return page <= pages
     }
 
+    func removeItem(_ id: String) {
+        items.removeAll { $0.id == id }
+    }
+
     func onItemAppear(_ g: Gif) {
         if items.suffix(5).contains(where: { $0.id == g.id }) {
             Task { await loadMore() }
@@ -59,75 +63,85 @@ final class FeedModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         let api = RedGifsAPI.shared
+        let store = UserStore.shared
         do {
             var new: [Gif] = []
             switch source {
             case .forYou:
                 new = await loadForYou()
-                if new.isEmpty { throw APIError.http(0) }
+                if new.isEmpty && items.isEmpty { throw APIError.http(0) }
             case .following:
                 new = await loadFollowing()
+            case .category(let cat, let order):
+                let p = try await api.category(cat, order: order, page: page)
+                pages = p.pages; page += 1; new = p.gifs
             case .tag(let t, let order):
                 let p = try await api.search(t, order: order, page: page)
-                pages = p.pages; page += 1; new = p.gifs
-            case .niche(let id, let order):
-                let p = try await api.niche(id, order: order, page: page)
                 pages = p.pages; page += 1; new = p.gifs
             case .user(let name):
                 let p = try await api.user(name, page: page)
                 pages = p.pages; page += 1; new = p.gifs
                 if user == nil {
                     let u = p.users.first { $0.username.caseInsensitiveCompare(name) == .orderedSame } ?? p.users.first
-                    if let u { user = u; UserStore.shared.updateFollowedUser(u) }
+                    if let u { user = u; store.updateFollowedUser(u) }
                 }
             case .list:
                 break
             }
-            let fresh = new.filter { ids.insert($0.id).inserted }
+            let fresh = new.filter { !store.isDisliked($0.id) && ids.insert($0.id).inserted }
             items.append(contentsOf: fresh)
             errorText = nil
         } catch {
-            errorText = "Couldn't load. Check your connection."
+            errorText = "Unable to load feed. Check your connection and try again."
         }
     }
 
-    // MARK: For You algorithm
+    // MARK: For You Recommendation Engine
 
     enum Job: Sendable {
         case trending(Int)
+        case category(GoonedCategory, String, Int)
         case tag(String, String, Int)
-        case niche(String, Int)
         case user(String)
     }
 
     nonisolated static func run(_ job: Job) async throws -> GifPage {
         let api = RedGifsAPI.shared
         switch job {
-        case .trending(let p): return try await api.trending(page: p)
-        case .tag(let t, let o, let p): return try await api.search(t, order: o, page: p, count: 20)
-        case .niche(let n, let p): return try await api.niche(n, page: p, count: 20)
-        case .user(let u): return try await api.user(u, page: 1, count: 10)
+        case .trending(let p):
+            return try await api.trending(page: p)
+        case .category(let cat, let o, let p):
+            return try await api.category(cat, order: o, page: p, count: 22)
+        case .tag(let t, let o, let p):
+            return try await api.search(t, order: o, page: p, count: 18)
+        case .user(let u):
+            return try await api.user(u, page: 1, count: 12)
         }
     }
 
-    /// Mixes trending with posts from your favourite tags, categories and creators, then ranks by your taste.
     private func loadForYou() async -> [Gif] {
         let store = UserStore.shared
-        let tags = store.topTags(12)
-        let niches = store.topNiches(8)
-        let interestLevel = tags.reduce(0) { $0 + $1.1 } // how much we know about you
+        let topCats = store.topCategories(6)
+        let topTags = store.topTags(10)
 
         var jobs: [Job] = [.trending(trendingPage)]
         trendingPage += 1
 
-        let personalJobs = interestLevel > 30 ? 3 : (interestLevel > 5 ? 2 : (tags.isEmpty ? 0 : 1))
-        for _ in 0..<personalJobs {
-            if let t = weightedPick(tags) {
-                jobs.append(.tag(t, Bool.random() ? "top" : "latest", Int.random(in: 1...8)))
+        if !topCats.isEmpty {
+            for _ in 0..<2 {
+                if let pickedCat = weightedPick(topCats) {
+                    jobs.append(.category(pickedCat, Bool.random() ? "top" : "latest", Int.random(in: 1...6)))
+                }
+            }
+        } else {
+            // Seed discovery from a random predefined category
+            if let cat = GoonedCategory.all.randomElement() {
+                jobs.append(.category(cat, "top", Int.random(in: 1...3)))
             }
         }
-        if let n = weightedPick(niches) {
-            jobs.append(.niche(n, Int.random(in: 1...6)))
+
+        if let pickedTag = weightedPick(topTags) {
+            jobs.append(.tag(pickedTag, Bool.random() ? "top" : "latest", Int.random(in: 1...6)))
         }
         if let f = store.data.following.randomElement(), Bool.random() {
             jobs.append(.user(f.username))
@@ -143,17 +157,17 @@ final class FeedModel: ObservableObject {
         }
 
         var local = Set<String>()
-        let unique = results.filter { !ids.contains($0.id) && local.insert($0.id).inserted }
+        let unique = results.filter { !ids.contains($0.id) && !store.isDisliked($0.id) && local.insert($0.id).inserted }
         let unseen = unique.filter { !store.hasSeen($0.id) }
         let pool = unseen.count >= 4 ? unseen : unique
-        // Score by taste + randomness so you still discover new stuff.
+
         return pool
-            .map { ($0, store.score($0) + Double.random(in: 0..<3)) }
+            .map { ($0, store.score($0) + Double.random(in: 0..<3.0)) }
             .sorted { $0.1 > $1.1 }
             .map(\.0)
     }
 
-    // MARK: Following feed
+    // MARK: Following Feed
 
     private func loadFollowing() async -> [Gif] {
         let names = UserStore.shared.data.following.map(\.username).filter { !followDone.contains($0) }
@@ -182,4 +196,3 @@ final class FeedModel: ObservableObject {
         return all.sorted { ($0.createDate ?? 0) > ($1.createDate ?? 0) }
     }
 }
-

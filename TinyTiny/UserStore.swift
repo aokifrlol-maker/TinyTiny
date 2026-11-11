@@ -4,15 +4,19 @@ struct AppSettings: Codable {
     var hd = false
     var muted = false
     var faceID = false
+    var autoplayFeed = true
 }
 
 struct UserData: Codable {
-    var liked: [Gif] = []          // newest first
-    var following: [RGUser] = []   // creators
-    var joinedNiches: [Niche] = [] // categories
-    var tagAff: [String: Double] = [:]
-    var nicheAff: [String: Double] = [:]
-    var creatorAff: [String: Double] = [:]
+    var liked: [Gif] = []                  // newest first
+    var saved: [Gif] = []                  // bookmarked / saved posts
+    var following: [RGUser] = []           // followed creators
+    var favoriteCategoryIDs: [String] = [] // pinned predefined categories
+    var recentSearches: [String] = []      // search history
+    var categoryAff: [String: Double] = [:]// affinity for the 10 fixed categories
+    var tagAff: [String: Double] = [:]     // secondary signal for ranking
+    var creatorAff: [String: Double] = [:] // creator affinity
+    var dislikedIDs: [String] = []         // "Not interested" posts
     var seen: [String] = []
     var settings = AppSettings()
 }
@@ -24,6 +28,7 @@ final class UserStore: ObservableObject {
 
     @Published var data: UserData { didSet { scheduleSave() } }
     private var seenSet: Set<String>
+    private var dislikedSet: Set<String>
     private var saveTask: Task<Void, Never>?
 
     private static var fileURL: URL {
@@ -41,12 +46,13 @@ final class UserStore: ObservableObject {
         }
         self.data = loaded
         self.seenSet = Set(loaded.seen)
+        self.dislikedSet = Set(loaded.dislikedIDs)
     }
 
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled else { return }
             self?.saveNow()
         }
@@ -65,10 +71,10 @@ final class UserStore: ObservableObject {
     func toggleLike(_ g: Gif) {
         if let i = data.liked.firstIndex(where: { $0.id == g.id }) {
             data.liked.remove(at: i)
-            adjust(g, by: -2)
+            adjust(g, by: -2.0)
         } else {
             data.liked.insert(g, at: 0)
-            adjust(g, by: 3)
+            adjust(g, by: 3.5)
         }
     }
 
@@ -76,12 +82,37 @@ final class UserStore: ObservableObject {
         if !isLiked(g) { toggleLike(g) }
     }
 
-    func notInterested(_ g: Gif) {
-        markSeen(g.id)
-        adjust(g, by: -3)
+    // MARK: Saved / Bookmarks
+
+    func isSaved(_ g: Gif) -> Bool { data.saved.contains { $0.id == g.id } }
+
+    func toggleSave(_ g: Gif) {
+        if let i = data.saved.firstIndex(where: { $0.id == g.id }) {
+            data.saved.remove(at: i)
+            adjust(g, by: -1.5)
+        } else {
+            data.saved.insert(g, at: 0)
+            adjust(g, by: 4.0)
+        }
     }
 
-    // MARK: Following
+    // MARK: Interested / Not Interested
+
+    func markInterested(_ g: Gif) {
+        adjust(g, by: 4.5)
+    }
+
+    func markNotInterested(_ g: Gif) {
+        markSeen(g.id)
+        if dislikedSet.insert(g.id).inserted {
+            data.dislikedIDs.append(g.id)
+        }
+        adjust(g, by: -5.0)
+    }
+
+    func isDisliked(_ id: String) -> Bool { dislikedSet.contains(id) }
+
+    // MARK: Following Creators
 
     func isFollowing(_ name: String) -> Bool {
         data.following.contains { $0.username.caseInsensitiveCompare(name) == .orderedSame }
@@ -93,7 +124,7 @@ final class UserStore: ObservableObject {
             data.creatorAff[name, default: 0] -= 4
         } else {
             data.following.insert(user ?? RGUser(username: name), at: 0)
-            data.creatorAff[name, default: 0] += 5
+            data.creatorAff[name, default: 0] += 6
         }
     }
 
@@ -103,42 +134,66 @@ final class UserStore: ObservableObject {
         }
     }
 
-    // MARK: Categories
+    // MARK: Predefined Categories (Fixed 10)
 
-    func isJoined(_ id: String) -> Bool { data.joinedNiches.contains { $0.id == id } }
+    func isFavoriteCategory(_ id: String) -> Bool {
+        data.favoriteCategoryIDs.contains(id)
+    }
 
-    func toggleJoin(_ n: Niche) {
-        if let i = data.joinedNiches.firstIndex(where: { $0.id == n.id }) {
-            data.joinedNiches.remove(at: i)
-            data.nicheAff[n.id, default: 0] -= 4
+    func toggleFavoriteCategory(_ cat: GoonedCategory) {
+        if let i = data.favoriteCategoryIDs.firstIndex(of: cat.id) {
+            data.favoriteCategoryIDs.remove(at: i)
+            data.categoryAff[cat.id, default: 0] -= 4
         } else {
-            data.joinedNiches.insert(n, at: 0)
-            data.nicheAff[n.id, default: 0] += 5
+            data.favoriteCategoryIDs.insert(cat.id, at: 0)
+            data.categoryAff[cat.id, default: 0] += 6
         }
     }
 
-    // MARK: Algorithm
+    var favoriteCategories: [GoonedCategory] {
+        data.favoriteCategoryIDs.compactMap { id in GoonedCategory.all.first { $0.id == id } }
+    }
 
-    /// Nudges your interest in everything about a post (its tags, categories and creator).
+    // MARK: Recent Searches
+
+    func addRecentSearch(_ q: String) {
+        let trimmed = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        data.recentSearches.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        data.recentSearches.insert(trimmed, at: 0)
+        if data.recentSearches.count > 12 {
+            data.recentSearches = Array(data.recentSearches.prefix(12))
+        }
+    }
+
+    func removeRecentSearch(_ q: String) {
+        data.recentSearches.removeAll { $0 == q }
+    }
+
+    func clearRecentSearches() {
+        data.recentSearches = []
+    }
+
+    // MARK: Recommendation Engine
+
     func adjust(_ g: Gif, by w: Double) {
         var d = data
-        for t in g.allTags { d.tagAff[t] = clamp((d.tagAff[t] ?? 0) + w) }
-        for n in g.allNiches { d.nicheAff[n] = clamp((d.nicheAff[n] ?? 0) + w) }
+        let cat = g.category
+        d.categoryAff[cat.id] = clamp((d.categoryAff[cat.id] ?? 0) + w * 1.4)
+        for t in g.allTags { d.tagAff[t] = clamp((d.tagAff[t] ?? 0) + w * 0.8) }
         if let u = g.userName { d.creatorAff[u] = clamp((d.creatorAff[u] ?? 0) + w * 1.2) }
-        prune(&d.tagAff, max: 600)
-        prune(&d.nicheAff, max: 300)
+        prune(&d.tagAff, max: 500)
         prune(&d.creatorAff, max: 400)
         data = d
     }
 
-    /// Called when you scroll away from a post. Watching it through = interest, instant skip = disinterest.
     func recordWatch(_ g: Gif, seconds: Double) {
         markSeen(g.id)
         let dur = max(g.duration ?? 8, 1)
-        if seconds >= min(dur * 0.9, 20) {
-            adjust(g, by: seconds > dur * 1.8 ? 1.5 : 1.0) // rewatched = extra signal
-        } else if seconds < 1.5 {
-            adjust(g, by: -0.4)
+        if seconds >= min(dur * 0.85, 18) {
+            adjust(g, by: seconds > dur * 1.7 ? 1.8 : 1.1)
+        } else if seconds < 1.3 {
+            adjust(g, by: -0.45)
         }
     }
 
@@ -155,47 +210,59 @@ final class UserStore: ObservableObject {
 
     func score(_ g: Gif) -> Double {
         var s = 0.0
+        let cat = g.category
+        s += (data.categoryAff[cat.id] ?? 0) * 1.3
+        if isFavoriteCategory(cat.id) { s += 3.5 }
+
         let tags = g.allTags
         if !tags.isEmpty {
             s += tags.reduce(0) { $0 + (data.tagAff[$1] ?? 0) } / Double(tags.count).squareRoot()
         }
-        let niches = g.allNiches
-        if !niches.isEmpty {
-            s += niches.reduce(0) { $0 + (data.nicheAff[$1] ?? 0) } / Double(niches.count).squareRoot()
-        }
         if let u = g.userName {
             s += data.creatorAff[u] ?? 0
-            if isFollowing(u) { s += 3 }
+            if isFollowing(u) { s += 4.0 }
         }
         return s
+    }
+
+    func topCategories(_ n: Int = 5) -> [(GoonedCategory, Double)] {
+        var aff = data.categoryAff
+        for id in data.favoriteCategoryIDs {
+            aff[id] = max(aff[id] ?? 0, 6.0)
+        }
+        return GoonedCategory.all
+            .compactMap { cat -> (GoonedCategory, Double)? in
+                let val = aff[cat.id] ?? 0
+                return val > 0 ? (cat, val) : nil
+            }
+            .sorted { $0.1 > $1.1 }
+            .prefix(n)
+            .map { $0 }
     }
 
     func topTags(_ n: Int) -> [(String, Double)] {
         data.tagAff.filter { $0.value > 0 }.sorted { $0.value > $1.value }.prefix(n).map { ($0.key, $0.value) }
     }
 
-    func topNiches(_ n: Int) -> [(String, Double)] {
-        var aff = data.nicheAff
-        for j in data.joinedNiches { aff[j.id] = max(aff[j.id] ?? 0, 5) }
-        return aff.filter { $0.value > 0 }.sorted { $0.value > $1.value }.prefix(n).map { ($0.key, $0.value) }
-    }
-
     func resetAlgorithm() {
+        data.categoryAff = [:]
         data.tagAff = [:]
-        data.nicheAff = [:]
         data.creatorAff = [:]
+        data.dislikedIDs = []
         data.seen = []
         seenSet = []
+        dislikedSet = []
     }
 
     func eraseAll() {
         saveTask?.cancel()
         data = UserData()
         seenSet = []
+        dislikedSet = []
         try? FileManager.default.removeItem(at: Self.fileURL)
     }
 
-    private func clamp(_ v: Double) -> Double { min(max(v, -15), 60) }
+    private func clamp(_ v: Double) -> Double { min(max(v, -20), 75) }
 
     private func prune(_ dict: inout [String: Double], max count: Int) {
         guard dict.count > count else { return }
@@ -204,7 +271,7 @@ final class UserStore: ObservableObject {
     }
 }
 
-func weightedPick(_ items: [(String, Double)]) -> String? {
+func weightedPick<T>(_ items: [(T, Double)]) -> T? {
     guard !items.isEmpty else { return nil }
     let total = items.reduce(0) { $0 + max($1.1, 0.1) }
     var r = Double.random(in: 0..<total)
@@ -214,4 +281,3 @@ func weightedPick(_ items: [(String, Double)]) -> String? {
     }
     return items.last?.0
 }
-

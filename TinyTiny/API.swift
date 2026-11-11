@@ -79,24 +79,21 @@ actor RedGifsAPI {
         try await get("gifs/search", ["order": "trending", "count": "\(count)", "page": "\(page)"])
     }
 
-    /// order: "top" or "latest"
+    /// order: "top", "latest", or "trending"
     func search(_ text: String, order: String = "top", page: Int, count: Int = 30) async throws -> GifPage {
         try await get("gifs/search", ["search_text": text, "order": order, "count": "\(count)", "page": "\(page)"])
     }
 
-    /// order: nil (hot), "new" or "top"
-    func niche(_ id: String, order: String? = nil, page: Int, count: Int = 30) async throws -> GifPage {
-        var q = ["count": "\(count)", "page": "\(page)"]
-        if let order { q["order"] = order }
-        return try await get("niches/\(enc(id))/gifs", q)
+    func category(_ cat: GoonedCategory, order: String = "top", page: Int, count: Int = 30) async throws -> GifPage {
+        if cat.id == "other" && order == "trending" {
+            return try await trending(page: page, count: count)
+        }
+        let apiOrder = (order == "trending") ? "top" : order
+        return try await search(cat.query, order: apiOrder, page: page, count: count)
     }
 
     func user(_ username: String, page: Int, count: Int = 30) async throws -> GifPage {
         try await get("users/\(enc(username))/search", ["order": "new", "count": "\(count)", "page": "\(page)"])
-    }
-
-    func niches(page: Int, count: Int = 40) async throws -> NichePage {
-        try await get("niches", ["count": "\(count)", "page": "\(page)"])
     }
 
     func trendingTags() async throws -> TagsResponse {
@@ -107,4 +104,3 @@ actor RedGifsAPI {
         try await get("search/suggest", ["query": query])
     }
 }
-

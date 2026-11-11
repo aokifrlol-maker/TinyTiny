@@ -45,6 +45,9 @@ struct Gif: Codable, Identifiable, Hashable {
         guard let w = width, let h = height, w > 0, h > 0 else { return 9.0 / 16.0 }
         return Double(w) / Double(h)
     }
+    var clampedFeedAspect: CGFloat {
+        CGFloat(min(max(aspect, 0.72), 1.35))
+    }
     func videoURL(hd: Bool) -> URL? {
         let s = hd ? (urls.hd ?? urls.sd) : (urls.sd ?? urls.hd)
         return URL(string: s ?? "")
@@ -55,6 +58,20 @@ struct Gif: Codable, Identifiable, Hashable {
     var webURL: URL { URL(string: "https://www.redgifs.com/watch/\(id)")! }
     var allTags: [String] { tags ?? [] }
     var allNiches: [String] { niches ?? [] }
+
+    /// Assigned deterministic predefined category (never dynamic or AI-created).
+    var category: GoonedCategory {
+        GoonedCategory.categorize(self)
+    }
+
+    var relativeTime: String {
+        guard let ts = createDate, ts > 0 else { return "Recently" }
+        let delta = max(0, Int(Date().timeIntervalSince1970) - ts)
+        if delta < 3600 { return "\(max(1, delta / 60))m ago" }
+        if delta < 86_400 { return "\(delta / 3600)h ago" }
+        if delta < 2_592_000 { return "\(delta / 86_400)d ago" }
+        return "\(delta / 2_592_000)mo ago"
+    }
 }
 
 struct RGUser: Codable, Identifiable, Hashable {
@@ -69,16 +86,6 @@ struct RGUser: Codable, Identifiable, Hashable {
     var id: String { username }
 }
 
-struct Niche: Codable, Identifiable, Hashable {
-    var id: String
-    var name: String
-    var gifs: Int? = nil
-    var subscribers: Int? = nil
-    var thumbnail: String? = nil
-    var cover: String? = nil
-    var description: String? = nil
-}
-
 struct GifPage: Decodable {
     var gifs: [Gif]
     var users: [RGUser]
@@ -91,21 +98,6 @@ struct GifPage: Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         gifs = ((try? c.decode([Lossy<Gif>].self, forKey: .gifs)) ?? []).compactMap { $0.value }
         users = ((try? c.decode([Lossy<RGUser>].self, forKey: .users)) ?? []).compactMap { $0.value }
-        page = (try? c.decode(Int.self, forKey: .page)) ?? 1
-        pages = (try? c.decode(Int.self, forKey: .pages)) ?? 1
-    }
-}
-
-struct NichePage: Decodable {
-    var niches: [Niche]
-    var page: Int
-    var pages: Int
-
-    enum CodingKeys: String, CodingKey { case niches, page, pages }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        niches = ((try? c.decode([Lossy<Niche>].self, forKey: .niches)) ?? []).compactMap { $0.value }
         page = (try? c.decode(Int.self, forKey: .page)) ?? 1
         pages = (try? c.decode(Int.self, forKey: .pages)) ?? 1
     }
@@ -132,4 +124,3 @@ func shortCount(_ n: Int?) -> String {
     if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
     return "\(n)"
 }
-
