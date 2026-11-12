@@ -245,11 +245,10 @@ final class FeedModel: ObservableObject {
         let api = GoonedAPI.shared
         let store = UserStore.shared
         do {
-            var collectedUnseen: [Gif] = []
-            var fallbackSeen: [Gif] = []
+            var totalAddedThisCall = 0
             var attempts = 0
 
-            while collectedUnseen.count < 10 && attempts < 3 && hasMore {
+            while totalAddedThisCall < 8 && attempts < 2 && hasMore {
                 if Task.isCancelled { return }
                 attempts += 1
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
@@ -261,7 +260,6 @@ final class FeedModel: ObservableObject {
 
                 if playablePosts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
                     if isInfiniteSource {
-                        // Rotate cursor so infinite feeds never hit a dead end
                         if case .forYou = source {
                             afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...8) * 25)
                         } else if case .rule34 = source {
@@ -270,10 +268,6 @@ final class FeedModel: ObservableObject {
                         } else {
                             store.setSavedCursor(nil, for: cursorKey)
                             afterCursor = nil
-                        }
-                        if source.isXFeed || source.isIGFeed {
-                            // Give WebView engine a short beat if it returned 0 on warm-up
-                            try? await Task.sleep(nanoseconds: 450_000_000)
                         }
                         continue
                     } else if attempts == 1 && store.savedCursor(for: cursorKey) != nil {
@@ -285,50 +279,54 @@ final class FeedModel: ObservableObject {
                     }
                 }
 
+                var batchUnseen: [Gif] = []
+                var batchSeen: [Gif] = []
                 for post in playablePosts {
                     guard ids.insert(post.id).inserted else { continue }
                     if store.isSeen(post.id) {
-                        fallbackSeen.append(post)
+                        batchSeen.append(post)
                     } else {
-                        collectedUnseen.append(post)
+                        batchUnseen.append(post)
                     }
                 }
 
-                // If everything on this page was already seen/in-feed, force cursor rotation on next attempt
-                if collectedUnseen.isEmpty && isInfiniteSource {
-                    if case .forYou = source {
-                        afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...10) * 25)
-                    } else if resp.after == nil || resp.after?.isEmpty == true {
-                        afterCursor = nil
+                switch source {
+                case .forYou:
+                    batchUnseen = store.rankWithAlgorithm(batchUnseen)
+                case .category, .rule34:
+                    batchUnseen.shuffle()
+                default:
+                    break
+                }
+
+                // Stream items into the feed immediately on the first response instead of blocking!
+                if !batchUnseen.isEmpty {
+                    emptyPageStreak = 0
+                    items.append(contentsOf: batchUnseen)
+                    totalAddedThisCall += batchUnseen.count
+                    isSwitching = false
+                } else if !batchSeen.isEmpty {
+                    emptyPageStreak = 0
+                    items.append(contentsOf: batchSeen.shuffled())
+                    totalAddedThisCall += batchSeen.count
+                    isSwitching = false
+                } else {
+                    emptyPageStreak += 1
+                    if !isInfiniteSource && emptyPageStreak >= 2 {
+                        hasMore = false
+                    }
+                    if isInfiniteSource {
+                        if case .forYou = source {
+                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...10) * 25)
+                        } else if resp.after == nil || resp.after?.isEmpty == true {
+                            afterCursor = nil
+                        }
                     }
                 }
 
                 if (source.isXFeed || source.isIGFeed) && !playablePosts.isEmpty { break }
                 if resp.after == nil || resp.after?.isEmpty == true {
                     if !isInfiniteSource { break }
-                }
-            }
-
-            // Apply smart on-device algorithm on For You (or shuffle for discovery)
-            switch source {
-            case .forYou:
-                collectedUnseen = store.rankWithAlgorithm(collectedUnseen)
-            case .category, .rule34:
-                collectedUnseen.shuffle()
-            default:
-                break
-            }
-
-            if !collectedUnseen.isEmpty {
-                emptyPageStreak = 0
-                items.append(contentsOf: collectedUnseen)
-            } else if !fallbackSeen.isEmpty {
-                emptyPageStreak = 0
-                items.append(contentsOf: fallbackSeen.shuffled())
-            } else {
-                emptyPageStreak += 1
-                if !isInfiniteSource && emptyPageStreak >= 2 {
-                    hasMore = false
                 }
             }
 

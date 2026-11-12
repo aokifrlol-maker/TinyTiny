@@ -66,33 +66,62 @@ enum GoonedDockTab: Int, CaseIterable {
     case profile = 3
 }
 
+enum HomeChannel: Hashable {
+    case following, forYou, x, rule34, ig, custom
+}
+
 struct GoonedMainShell: View {
     @EnvironmentObject var store: UserStore
-    @StateObject private var feedModel = FeedModel(source: .forYou)
+    @StateObject private var followingModel = FeedModel(source: .following)
+    @StateObject private var forYouModel = FeedModel(source: .forYou)
+    @StateObject private var xModel = FeedModel(source: .xForYou)
+    @StateObject private var r34Model = FeedModel(source: .rule34(""))
+    @StateObject private var igModel = FeedModel(source: .igReels)
+    @StateObject private var customModel = FeedModel(source: .forYou)
+
+    @State private var activeChannel: HomeChannel = .forYou
+    @State private var slotPostIDs: [HomeChannel: String] = [:]
     @State private var activeTab: GoonedDockTab = .home
-    @State private var currentPostID: String? = nil
     @State private var showSettingsModal = false
     @State private var showXLoginSheet = false
     @State private var showIGLoginSheet = false
     @State private var showR34KeySheet = false
     @State private var pendingFeedAfterLogin: FeedSource? = nil
+    @State private var didPrewarm = false
 
     private var tinted: Bool { store.data.settings.tintedGlass }
 
+    private var activeModel: FeedModel {
+        switch activeChannel {
+        case .following: return followingModel
+        case .forYou: return forYouModel
+        case .x: return xModel
+        case .rule34: return r34Model
+        case .ig: return igModel
+        case .custom: return customModel
+        }
+    }
+
+    private var currentPostIDBinding: Binding<String?> {
+        Binding(
+            get: { slotPostIDs[activeChannel] },
+            set: { slotPostIDs[activeChannel] = $0 }
+        )
+    }
+
     private var isFollowingFeed: Bool {
-        if case .following = feedModel.source { return true }
-        return false
+        activeChannel == .following
     }
 
     var body: some View {
         ZStack {
-            // 1. Main Full-Screen Feed Scroller (with Horizontal Swipe between Following · For You · 𝕏 · R34 · IG)
+            // 1. Main Full-Screen Feed Scroller (persistent per-channel models + instant horizontal swipe)
             FeedView(
-                model: feedModel,
+                model: activeModel,
                 isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
-                currentID: $currentPostID,
+                currentID: currentPostIDBinding,
                 onOpenCategories: {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
                         activeTab = .browse
                     }
                 },
@@ -112,14 +141,15 @@ struct GoonedMainShell: View {
                     selectFeed(.rule34(tag))
                 },
                 onConnectX: {
-                    pendingFeedAfterLogin = feedModel.source.isXFeed ? feedModel.source : .xForYou
+                    pendingFeedAfterLogin = activeModel.source.isXFeed ? activeModel.source : .xForYou
                     showXLoginSheet = true
                 },
                 onConnectIG: {
-                    pendingFeedAfterLogin = feedModel.source.isIGFeed ? feedModel.source : .igReels
+                    pendingFeedAfterLogin = activeModel.source.isIGFeed ? activeModel.source : .igReels
                     showIGLoginSheet = true
                 }
             )
+            .id(activeChannel)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 30)
                     .onEnded { val in
@@ -155,16 +185,18 @@ struct GoonedMainShell: View {
                         }
                     },
                     onPlayLikedPost: { post in
-                        feedModel.switchSource(.list(title: "Liked"), initialItems: store.data.liked)
-                        currentPostID = post.id
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        customModel.switchSource(.list(title: "Liked"), initialItems: store.data.liked)
+                        slotPostIDs[.custom] = post.id
+                        activeChannel = .custom
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
                             activeTab = .home
                         }
                     },
                     onPlayOfflinePost: { post in
-                        feedModel.switchSource(.list(title: "Offline Vault"), initialItems: store.data.downloaded)
-                        currentPostID = post.id
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        customModel.switchSource(.list(title: "Offline Vault"), initialItems: store.data.downloaded)
+                        slotPostIDs[.custom] = post.id
+                        activeChannel = .custom
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
                             activeTab = .home
                         }
                     }
@@ -274,15 +306,29 @@ struct GoonedMainShell: View {
                 .zIndex(30)
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: activeTab)
-        .animation(.easeInOut(duration: 0.18), value: showSettingsModal)
-        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: store.data.settings.controlsCollapsed)
+        .animation(.easeOut(duration: 0.14), value: activeTab)
+        .animation(.easeOut(duration: 0.14), value: showSettingsModal)
+        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.data.settings.controlsCollapsed)
+        .task {
+            guard !didPrewarm else { return }
+            didPrewarm = true
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            // Silently pre-warm Rule34, X, and Instagram so swiping left is instant!
+            if r34Model.items.isEmpty {
+                Task { await r34Model.loadMore() }
+            }
+            if store.data.xSession.isConnected && xModel.items.isEmpty {
+                Task { await xModel.loadMore() }
+            }
+            if store.data.igSession.isConnected && igModel.items.isEmpty {
+                Task { await igModel.loadMore() }
+            }
+        }
         .sheet(isPresented: $showXLoginSheet) {
             XLoginSheet {
                 let target = pendingFeedAfterLogin ?? .xForYou
                 pendingFeedAfterLogin = nil
-                selectFeed(target)
-                Task { await feedModel.refresh(rotateCursor: true) }
+                selectFeed(target, forceReload: true)
             }
             .environmentObject(store)
         }
@@ -290,8 +336,7 @@ struct GoonedMainShell: View {
             InstagramLoginSheet {
                 let target = pendingFeedAfterLogin ?? .igReels
                 pendingFeedAfterLogin = nil
-                selectFeed(target)
-                Task { await feedModel.refresh(rotateCursor: true) }
+                selectFeed(target, forceReload: true)
             }
             .environmentObject(store)
         }
@@ -301,11 +346,50 @@ struct GoonedMainShell: View {
         }
     }
 
-    private func selectFeed(_ src: FeedSource) {
-        currentPostID = nil
-        feedModel.switchSource(src)
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-            activeTab = .home
+    private func selectFeed(_ src: FeedSource, forceReload: Bool = false) {
+        switch src {
+        case .following:
+            activeChannel = .following
+            if forceReload {
+                slotPostIDs[.following] = nil
+                Task { await followingModel.refresh(rotateCursor: true) }
+            }
+        case .forYou:
+            activeChannel = .forYou
+            if forceReload {
+                slotPostIDs[.forYou] = nil
+                Task { await forYouModel.refresh(rotateCursor: true) }
+            }
+        case .xForYou, .xFollowing, .xBookmarks:
+            activeChannel = .x
+            if xModel.source != src || forceReload {
+                slotPostIDs[.x] = nil
+                xModel.switchSource(src)
+            }
+        case .rule34(let tag) where tag.isEmpty:
+            activeChannel = .rule34
+            if forceReload {
+                slotPostIDs[.rule34] = nil
+                Task { await r34Model.refresh(rotateCursor: true) }
+            }
+        case .igReels, .igFollowing, .igSaved:
+            activeChannel = .ig
+            if igModel.source != src || forceReload {
+                slotPostIDs[.ig] = nil
+                igModel.switchSource(src)
+            }
+        default:
+            activeChannel = .custom
+            if customModel.source != src || forceReload {
+                slotPostIDs[.custom] = nil
+                customModel.switchSource(src)
+            }
+        }
+
+        if activeTab != .home {
+            withAnimation(.easeOut(duration: 0.16)) {
+                activeTab = .home
+            }
         }
     }
 
@@ -328,13 +412,12 @@ struct GoonedMainShell: View {
     }
 
     private var homeChannelIndex: Int {
-        switch feedModel.source {
+        switch activeChannel {
         case .following: return 0
-        case .forYou: return 1
-        case .xForYou, .xFollowing, .xBookmarks, .xLikes: return 2
+        case .forYou, .custom: return 1
+        case .x: return 2
         case .rule34: return 3
-        case .igReels, .igFollowing, .igSaved: return 4
-        default: return 1
+        case .ig: return 4
         }
     }
 
@@ -377,27 +460,17 @@ struct GoonedMainShell: View {
 
                 Spacer(minLength: 2)
 
-                if case .category = feedModel.source {
-                    customFeedTitlePill
-                } else if case .subreddit = feedModel.source {
-                    customFeedTitlePill
-                } else if case .user = feedModel.source {
-                    customFeedTitlePill
-                } else if case .xSearch = feedModel.source {
-                    customFeedTitlePill
-                } else if case .xUser = feedModel.source {
-                    customFeedTitlePill
-                } else if case .igUser = feedModel.source {
-                    customFeedTitlePill
-                } else if case .list = feedModel.source {
-                    customFeedTitlePill
-                } else if case .rule34(let t) = feedModel.source, !t.isEmpty {
+                if activeChannel == .custom {
                     customFeedTitlePill
                 } else {
                     HStack(spacing: 10) {
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectFeed(.following)
+                            if activeChannel == .following {
+                                selectFeed(.following, forceReload: true)
+                            } else {
+                                selectFeed(.following)
+                            }
                         } label: {
                             Text("Following")
                                 .font(.system(size: 13.5, weight: isFollowingFeed ? .bold : .medium))
@@ -407,17 +480,13 @@ struct GoonedMainShell: View {
 
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            if case .forYou = feedModel.source {
-                                currentPostID = nil
-                                Task { await feedModel.refresh(rotateCursor: true) }
+                            if activeChannel == .forYou {
+                                selectFeed(.forYou, forceReload: true)
                             } else {
                                 selectFeed(.forYou)
                             }
                         } label: {
-                            let isForYou: Bool = {
-                                if case .forYou = feedModel.source { return true }
-                                return false
-                            }()
+                            let isForYou = activeChannel == .forYou
                             Text("For You")
                                 .font(.system(size: 13.5, weight: isForYou ? .bold : .medium))
                                 .foregroundStyle(isForYou ? .white : .white.opacity(0.60))
@@ -428,40 +497,37 @@ struct GoonedMainShell: View {
                         HStack(spacing: 6) {
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if feedModel.source.isXFeed {
-                                    currentPostID = nil
-                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                if activeChannel == .x {
+                                    selectFeed(xModel.source, forceReload: true)
                                 } else {
-                                    selectXFeedOrLogin(.xForYou)
+                                    selectXFeedOrLogin(xModel.source)
                                 }
                             } label: {
-                                BrandLogoX(active: feedModel.source.isXFeed, connected: store.data.xSession.isConnected)
+                                BrandLogoX(active: activeChannel == .x, connected: store.data.xSession.isConnected)
                             }
                             .buttonStyle(ScalePressButtonStyle())
 
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if case .rule34 = feedModel.source {
-                                    currentPostID = nil
-                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                if activeChannel == .rule34 {
+                                    selectFeed(.rule34(""), forceReload: true)
                                 } else {
                                     selectFeed(.rule34(""))
                                 }
                             } label: {
-                                BrandLogoRule34(active: feedModel.source.isRule34Feed)
+                                BrandLogoRule34(active: activeChannel == .rule34)
                             }
                             .buttonStyle(ScalePressButtonStyle())
 
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if feedModel.source.isIGFeed {
-                                    currentPostID = nil
-                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                if activeChannel == .ig {
+                                    selectFeed(igModel.source, forceReload: true)
                                 } else {
-                                    selectIGFeedOrLogin(.igReels)
+                                    selectIGFeedOrLogin(igModel.source)
                                 }
                             } label: {
-                                BrandLogoInstagram(active: feedModel.source.isIGFeed, connected: store.data.igSession.isConnected)
+                                BrandLogoInstagram(active: activeChannel == .ig, connected: store.data.igSession.isConnected)
                             }
                             .buttonStyle(ScalePressButtonStyle())
                         }
@@ -490,14 +556,14 @@ struct GoonedMainShell: View {
             .padding(.top, 8)
 
             // Secondary sub-feed switcher when inside X or IG
-            if feedModel.source.isXFeed && (feedModel.source == .xForYou || feedModel.source == .xFollowing || feedModel.source == .xBookmarks) {
+            if activeChannel == .x {
                 HStack(spacing: 12) {
                     ForEach([
                         (FeedSource.xForYou, "For You"),
                         (FeedSource.xFollowing, "Following"),
                         (FeedSource.xBookmarks, "Bookmarks")
                     ], id: \.1) { src, label in
-                        let active = feedModel.source == src
+                        let active = xModel.source == src
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectXFeedOrLogin(src)
@@ -511,14 +577,14 @@ struct GoonedMainShell: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
                 .liquidGlassCapsule(tinted: tinted)
-            } else if feedModel.source.isIGFeed && (feedModel.source == .igReels || feedModel.source == .igFollowing || feedModel.source == .igSaved) {
+            } else if activeChannel == .ig {
                 HStack(spacing: 12) {
                     ForEach([
                         (FeedSource.igReels, "Reels"),
                         (FeedSource.igFollowing, "Following"),
                         (FeedSource.igSaved, "Saved")
                     ], id: \.1) { src, label in
-                        let active = feedModel.source == src
+                        let active = igModel.source == src
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectIGFeedOrLogin(src)
@@ -550,7 +616,7 @@ struct GoonedMainShell: View {
             Button {
                 activeTab = .browse
             } label: {
-                Text(feedModel.source.displayTitle)
+                Text(customModel.source.displayTitle)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)

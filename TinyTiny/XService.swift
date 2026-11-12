@@ -438,7 +438,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
             if let postLoadJS {
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 2_200_000_000)
+                    try? await Task.sleep(nanoseconds: 1_100_000_000)
                     _ = try? await wv.evaluateJavaScript(postLoadJS)
                 }
             }
@@ -459,16 +459,15 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
         }
 
-        // Otherwise wait up to 7.5 seconds for X's GraphQL response to arrive
+        // Otherwise wait up to 4.5 seconds for X's GraphQL response to arrive (nudging early)
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append(cont)
             Task { @MainActor in
-                // Nudge scroll halfway through if still waiting
-                try? await Task.sleep(nanoseconds: 3_200_000_000)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
                 if !self.waiters.isEmpty {
                     _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400);")
                 }
-                try? await Task.sleep(nanoseconds: 4_300_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if !self.waiters.isEmpty {
                     let pending = self.waiters
                     self.waiters.removeAll()

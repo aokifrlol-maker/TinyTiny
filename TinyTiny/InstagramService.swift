@@ -342,7 +342,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
             if let apiTriggerJS {
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 1_800_000_000)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                     _ = try? await wv.evaluateJavaScript(apiTriggerJS)
                 }
             }
@@ -367,11 +367,11 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append(cont)
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: 1_400_000_000)
                 if !self.waiters.isEmpty {
                     _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400);")
                 }
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                try? await Task.sleep(nanoseconds: 2_800_000_000)
                 if !self.waiters.isEmpty {
                     let pending = self.waiters
                     self.waiters.removeAll()
