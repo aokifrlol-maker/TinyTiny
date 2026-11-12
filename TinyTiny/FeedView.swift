@@ -58,10 +58,15 @@ final class VideoPreloader {
             guard !gif.isImage, let url = gif.videoURL(hd: hd) else { continue }
             let key = url.absoluteString
             guard cachedAssets[key] == nil else { continue }
-            let asset = AVURLAsset(
-                url: url,
-                options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
-            )
+            let asset: AVURLAsset
+            if url.isFileURL {
+                asset = AVURLAsset(url: url)
+            } else {
+                asset = AVURLAsset(
+                    url: url,
+                    options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
+                )
+            }
             cachedAssets[key] = asset
             order.append(key)
             if order.count > 8, let oldest = order.first {
@@ -77,6 +82,9 @@ final class VideoPreloader {
     func asset(for url: URL) -> AVURLAsset {
         if let existing = cachedAssets[url.absoluteString] {
             return existing
+        }
+        if url.isFileURL {
+            return AVURLAsset(url: url)
         }
         return AVURLAsset(
             url: url,
@@ -142,7 +150,6 @@ final class PlayerModel: ObservableObject {
         player.removeAllItems()
         looper = AVPlayerLooper(player: player, templateItem: item)
 
-        // Observe real video track dimensions so we never crop landscape/square videos by mistake
         sizeObservation = player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
             MainActor.assumeIsolated {
                 guard let self, let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 else { return }
@@ -150,7 +157,6 @@ final class PlayerModel: ObservableObject {
             }
         }
 
-        // Observe playback failures and automatically fall back to secondary MP4/HLS URL
         statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -232,7 +238,10 @@ struct FeedView: View {
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
     var onSelectXUser: (String) -> Void
+    var onSelectIGUser: (String) -> Void
+    var onSelectRule34Tag: (String) -> Void
     var onConnectX: () -> Void
+    var onConnectIG: () -> Void
 
     @EnvironmentObject var store: UserStore
     @State private var onScreen = false
@@ -256,6 +265,8 @@ struct FeedView: View {
                         onSelectSubreddit: onSelectSubreddit,
                         onSelectUser: onSelectUser,
                         onSelectXUser: onSelectXUser,
+                        onSelectIGUser: onSelectIGUser,
+                        onSelectRule34Tag: onSelectRule34Tag,
                         onClipFinished: {
                             if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
                                 advanceToNext(from: gif.id)
@@ -271,7 +282,8 @@ struct FeedView: View {
                     FeedStateView(
                         model: model,
                         onOpenCategories: onOpenCategories,
-                        onConnectX: onConnectX
+                        onConnectX: onConnectX,
+                        onConnectIG: onConnectIG
                     )
                     .containerRelativeFrame([.horizontal, .vertical])
                 }
@@ -359,6 +371,7 @@ struct FeedStateView: View {
     @ObservedObject var model: FeedModel
     var onOpenCategories: () -> Void
     var onConnectX: () -> Void
+    var onConnectIG: () -> Void
     @EnvironmentObject var store: UserStore
 
     var body: some View {
@@ -386,6 +399,38 @@ struct FeedStateView: View {
                         .padding(.vertical, 12)
                         .liquidGlassCapsule(tinted: true, active: true)
                 }
+            } else if model.source.isIGFeed && !store.data.igSession.isConnected {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.98, green: 0.35, blue: 0.35),
+                                    Color(red: 0.85, green: 0.18, blue: 0.56),
+                                    Color(red: 0.55, green: 0.22, blue: 0.85)
+                                ],
+                                startPoint: .bottomLeading,
+                                endPoint: .topTrailing
+                            )
+                        )
+                        .frame(width: 68, height: 68)
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 28, weight: .bold))
+                }
+                Text("Connect Instagram")
+                    .font(.title3.bold())
+                Text("Sign in once to stream your personal Instagram Reels, Following, Saved Reels, and creator feeds.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+                Button(action: onConnectIG) {
+                    Text("Sign in with Instagram")
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 12)
+                        .liquidGlassCapsule(tinted: true, active: true)
+                }
             } else if let err = model.errorText {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.system(size: 36, weight: .light))
@@ -408,7 +453,7 @@ struct FeedStateView: View {
                 ProgressView()
                     .tint(Theme.accent)
                     .controlSize(.large)
-                if model.source.isXFeed {
+                if model.source.isXFeed || model.source.isIGFeed || model.source.isRule34Feed {
                     Text("Loading \(model.source.displayTitle)...")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.6))
@@ -448,7 +493,7 @@ struct FeedStateView: View {
     }
 }
 
-// MARK: - Exact gooned.app Reel Cell (Collapsible Controls, Proper Video Fit, Hold for Details)
+// MARK: - Exact gooned.app Reel Cell (Collapsible Controls, Proper Video Fit, Offline Download, Hold for Details)
 
 struct GoonedReelCell: View {
     let gif: Gif
@@ -460,10 +505,13 @@ struct GoonedReelCell: View {
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
     var onSelectXUser: (String) -> Void
+    var onSelectIGUser: (String) -> Void
+    var onSelectRule34Tag: (String) -> Void
     var onClipFinished: () -> Void
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
+    @ObservedObject private var offline = OfflineManager.shared
     @StateObject private var player = PlayerModel()
     @State private var userPaused = false
     @State private var showHeart = false
@@ -471,19 +519,18 @@ struct GoonedReelCell: View {
     @State private var isHolding = false
     @State private var showMoreSheet = false
     @State private var isScrubbing = false
-    @State private var localFitOverride: Bool? = nil // nil = use store.data.settings.videoFitScreen
+    @State private var localFitOverride: Bool? = nil
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused }
     private var liked: Bool { store.isLiked(gif) }
+    private var downloaded: Bool { offline.isDownloaded(gif) }
+    private var downloadProgress: Double? { offline.activeDownloads[gif.id] }
     private var tinted: Bool { store.data.settings.tintedGlass }
     private var collapsed: Bool { store.data.settings.controlsCollapsed }
 
-    /// Determines whether the video should Fit inside the screen (`false`) or Fill edge-to-edge (`true`).
-    /// By default (`videoFitScreen == true`), every video fits completely inside the screen with zero cropping.
     private var fill: Bool {
         let fitMode = localFitOverride ?? store.data.settings.videoFitScreen
         if fitMode { return false }
-        // Even in Fill mode, only fill when we know the video is genuinely vertical (9:16 portrait < 0.68)
         let ratio = player.detectedAspect ?? gif.knownAspect
         guard let ratio else { return false }
         return ratio < 0.68
@@ -492,6 +539,9 @@ struct GoonedReelCell: View {
     private var isFollowed: Bool {
         if gif.isXPost, let u = gif.author {
             return store.isFollowingXUser(u)
+        }
+        if gif.isIGPost, let u = gif.author {
+            return store.isFollowingIGUser(u)
         }
         if let sub = gif.subreddit, store.isFollowingSubreddit(sub) { return true }
         if let u = gif.author, store.isFollowingUser(u) { return true }
@@ -504,10 +554,8 @@ struct GoonedReelCell: View {
                 Color.black
                 mediaView(geo.size)
 
-                // Gesture Zones: Left Double-Tap = -5s, Center Double-Tap = Like, Right Double-Tap = +5s, Single Tap = Pause, Hold = 2x Speed + Details
                 gestureZones(size: geo.size)
 
-                // Center Play Icon when paused
                 if userPaused && !isHolding {
                     Circle()
                         .fill(.black.opacity(0.42))
@@ -521,7 +569,6 @@ struct GoonedReelCell: View {
                         .allowsHitTesting(false)
                 }
 
-                // Double-Tap Heart Animation
                 if showHeart {
                     Image(systemName: "heart.fill")
                         .font(.system(size: 104))
@@ -531,7 +578,6 @@ struct GoonedReelCell: View {
                         .allowsHitTesting(false)
                 }
 
-                // Double-Tap Left/Right -5s / +5s Indicator
                 if let skip = skipIndicator {
                     HStack {
                         if skip > 0 { Spacer() }
@@ -552,17 +598,15 @@ struct GoonedReelCell: View {
                 }
 
                 if isHolding {
-                    // Hold Overlay: 2x Speed Pill + Full Post Details (`author · /r/Subreddit · time` + Title)
                     holdDetailsHUD
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 } else if collapsed {
-                    // Collapsed Clean View: Bottom UI is pushed down out of the way so 100% of the video is visible!
+                    // Collapsed Clean View: Bottom UI pushed down out of the way
                     VStack(spacing: 6) {
                         Spacer()
 
                         HStack {
-                            // Discreet button to bring the bottom-left UI & dock back up
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
@@ -584,8 +628,18 @@ struct GoonedReelCell: View {
 
                             Spacer()
 
-                            // Minimal Mute & Like pills in the corner when collapsed
                             HStack(spacing: 8) {
+                                Button {
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    offline.toggleDownload(gif)
+                                } label: {
+                                    Image(systemName: downloaded ? "checkmark.circle.fill" : "arrow.down.to.line")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(downloaded ? Theme.accentBright : .white.opacity(0.85))
+                                        .frame(width: 34, height: 34)
+                                        .liquidGlassCircle(tinted: tinted)
+                                }
+
                                 Button {
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                     store.toggleLike(gif)
@@ -617,7 +671,6 @@ struct GoonedReelCell: View {
                     .foregroundStyle(.white)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
-                    // Full gooned.app Liquid Glass Controls (with `⌄` button to collapse down!)
                     VStack(spacing: 10) {
                         Spacer()
 
@@ -628,7 +681,6 @@ struct GoonedReelCell: View {
                         }
                         .padding(.horizontal, 14)
 
-                        // Interactive Pink Scrubber Progress Line right above the bottom dock
                         scrubberBar(width: geo.size.width)
                     }
                     .padding(.bottom, 84)
@@ -652,9 +704,17 @@ struct GoonedReelCell: View {
                 onSelectXUser: { u in
                     showMoreSheet = false
                     onSelectXUser(u)
+                },
+                onSelectIGUser: { u in
+                    showMoreSheet = false
+                    onSelectIGUser(u)
+                },
+                onSelectRule34Tag: { tag in
+                    showMoreSheet = false
+                    onSelectRule34Tag(tag)
                 }
             )
-            .presentationDetents([.medium])
+            .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
         .onAppear {
@@ -679,12 +739,11 @@ struct GoonedReelCell: View {
         }
     }
 
-    // MARK: - Left Control Cluster (`🔥 Hot` pill + `⌄` Collapse Down + `⊞` `🔀` `︾` `+` circles)
+    // MARK: - Left Control Cluster (`🔥 Hot` pill + Fit/Fill + `⌄` Collapse Down + `⊞` `🔀` `︾` `+` circles)
 
     private var leftControlCluster: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                // `🔥 Hot` Sort Pill
                 Menu {
                     ForEach(FeedSort.allCases) { s in
                         Button {
@@ -720,7 +779,7 @@ struct GoonedReelCell: View {
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
-                // Collapse Down (`⌄`) Button — pushes bottom-left UI and dock down out of the way!
+                // Collapse Down (`⌄`) Button
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
@@ -736,7 +795,6 @@ struct GoonedReelCell: View {
                 .buttonStyle(ScalePressButtonStyle())
             }
 
-            // 4 Liquid Glass Circle Buttons: Categories (`⊞`), Shuffle (`🔀`), Auto-Scroll (`︾`), Follow (`+`)
             HStack(spacing: 10) {
                 Button(action: onOpenCategories) {
                     Image(systemName: "square.grid.2x2")
@@ -769,6 +827,8 @@ struct GoonedReelCell: View {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     if gif.isXPost, let u = gif.author {
                         store.toggleFollowXUser(u)
+                    } else if gif.isIGPost, let u = gif.author {
+                        store.toggleFollowIGUser(u)
                     } else if let sub = gif.subreddit {
                         store.toggleFollowSubreddit(sub)
                     } else if let u = gif.author {
@@ -785,14 +845,18 @@ struct GoonedReelCell: View {
         }
     }
 
-    // MARK: - Exact gooned.app Right Action Stack (Source Badge `r/` or `𝕏`, Heart + Count, Mute + Label, `•••`)
+    // MARK: - Right Action Stack (Source Badge `r/` / `𝕏` / `IG` / `34`, Heart, Mute, Offline Download, `•••`)
 
     private var rightActionStack: some View {
-        VStack(spacing: 14) {
-            // Source Badge Circle (`𝕏` for X posts, Pink `r/` for Reddit posts)
+        VStack(spacing: 12) {
+            // Source Badge Circle
             Button {
                 if gif.isXPost, let u = gif.author {
                     onSelectXUser(u)
+                } else if gif.isIGPost, let u = gif.author {
+                    onSelectIGUser(u)
+                } else if gif.isRule34Post {
+                    onSelectRule34Tag("")
                 } else if let sub = gif.subreddit {
                     onSelectSubreddit(sub)
                 } else if let u = gif.author {
@@ -802,18 +866,48 @@ struct GoonedReelCell: View {
                 if gif.isXPost {
                     ZStack {
                         Circle()
+                            .fill(LinearGradient(colors: [Color(white: 0.18), Color.black], startPoint: .top, endPoint: .bottom))
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
+                        Text("𝕏")
+                            .font(.system(size: 18, weight: .black))
+                            .foregroundStyle(.white)
+                    }
+                } else if gif.isIGPost {
+                    ZStack {
+                        Circle()
                             .fill(
                                 LinearGradient(
-                                    colors: [Color(white: 0.18), Color.black],
+                                    colors: [
+                                        Color(red: 0.98, green: 0.35, blue: 0.35),
+                                        Color(red: 0.85, green: 0.18, blue: 0.56),
+                                        Color(red: 0.55, green: 0.22, blue: 0.85)
+                                    ],
+                                    startPoint: .bottomLeading,
+                                    endPoint: .topTrailing
+                                )
+                            )
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                } else if gif.isRule34Post {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 0.67, green: 0.90, blue: 0.64), Color(red: 0.42, green: 0.72, blue: 0.40)],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
                             .frame(width: 44, height: 44)
                             .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
-                        Text("𝕏")
-                            .font(.system(size: 18, weight: .black))
-                            .foregroundStyle(.white)
+                        Text("34")
+                            .font(.system(size: 15, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.08, green: 0.24, blue: 0.08))
                     }
                 } else {
                     ZStack {
@@ -836,7 +930,7 @@ struct GoonedReelCell: View {
             .buttonStyle(ScalePressButtonStyle())
 
             // Heart Circle + Upvote Count
-            VStack(spacing: 4) {
+            VStack(spacing: 3) {
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     store.toggleLike(gif)
@@ -850,24 +944,56 @@ struct GoonedReelCell: View {
                 .buttonStyle(ScalePressButtonStyle())
 
                 Text(shortCount((gif.upvotes ?? 0) + (liked ? 1 : 0)))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
             }
 
             // Mute Circle + Label
-            VStack(spacing: 4) {
+            VStack(spacing: 3) {
                 Button {
                     store.data.settings.muted.toggle()
                     UserStore.configureAudioSession(muted: store.data.settings.muted)
                 } label: {
                     Image(systemName: store.data.settings.muted ? "speaker.slash" : "speaker.wave.2")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 17, weight: .semibold))
                         .frame(width: 44, height: 44)
                         .liquidGlassCircle(tinted: tinted)
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
                 Text(store.data.settings.muted ? "Muted" : "Sound")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
+            }
+
+            // Offline Download Circle + Label
+            VStack(spacing: 3) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    offline.toggleDownload(gif)
+                } label: {
+                    ZStack {
+                        if let prog = downloadProgress {
+                            Circle()
+                                .stroke(Color.white.opacity(0.25), lineWidth: 2.5)
+                                .frame(width: 38, height: 38)
+                            Circle()
+                                .trim(from: 0, to: prog)
+                                .stroke(Theme.accentBright, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                                .frame(width: 38, height: 38)
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 13, weight: .bold))
+                        } else {
+                            Image(systemName: downloaded ? "checkmark" : "arrow.down.to.line")
+                                .font(.system(size: 16, weight: .bold))
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                    .liquidGlassCircle(tinted: tinted, active: downloaded)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                Text(downloaded ? "Saved" : (downloadProgress != nil ? "Saving" : "Save"))
+                    .font(.system(size: 11, weight: .semibold))
             }
 
             // More (`•••`) Circle
@@ -904,29 +1030,26 @@ struct GoonedReelCell: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
                     if let author = gif.author {
-                        Text(gif.isXPost ? "@\(author)" : author)
+                        Text((gif.isXPost || gif.isIGPost) ? "@\(author)" : author)
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
                     }
                     if gif.isXPost {
-                        Text("·")
-                            .foregroundStyle(.white.opacity(0.65))
-                        Text("𝕏")
-                            .font(.system(size: 14, weight: .black))
-                            .foregroundStyle(.white.opacity(0.9))
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text("𝕏").font(.system(size: 14, weight: .black)).foregroundStyle(.white.opacity(0.9))
+                    } else if gif.isIGPost {
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text("Instagram").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white.opacity(0.9))
+                    } else if gif.isRule34Post {
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text("rule34.xxx").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(red: 0.67, green: 0.90, blue: 0.64))
                     } else if let sub = gif.subreddit {
-                        Text("·")
-                            .foregroundStyle(.white.opacity(0.65))
-                        Text("/r/\(sub)")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.85))
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text("/r/\(sub)").font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.85))
                     }
                     if !gif.relativeTime.isEmpty {
-                        Text("·")
-                            .foregroundStyle(.white.opacity(0.65))
-                        Text(gif.relativeTime)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.white.opacity(0.75))
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text(gif.relativeTime).font(.system(size: 14)).foregroundStyle(.white.opacity(0.75))
                     }
                 }
 
@@ -944,6 +1067,10 @@ struct GoonedReelCell: View {
                     }
                     if let w = gif.width, let h = gif.height {
                         Text("\(w)×\(h)")
+                    }
+                    if downloaded {
+                        Label("Offline", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.accentBright)
                     }
                 }
                 .font(.caption.bold())
@@ -1055,8 +1182,6 @@ struct GoonedReelCell: View {
         }
     }
 
-    // MARK: - Interactive Touch-Scrubbable Progress Bar
-
     private func scrubberBar(width: CGFloat) -> some View {
         VStack(spacing: 4) {
             if isScrubbing && player.durationSeconds > 0 {
@@ -1098,116 +1223,198 @@ struct GoonedReelCell: View {
     }
 }
 
-// MARK: - More (`•••`) Sheet
+// MARK: - More (`•••`) Sheet (Offline Download, Creator Links, Rule34 Tags, File Share)
 
 struct PostMoreSheet: View {
     let gif: Gif
     var onSelectSubreddit: (String) -> Void
     var onSelectUser: (String) -> Void
     var onSelectXUser: (String) -> Void
+    var onSelectIGUser: (String) -> Void
+    var onSelectRule34Tag: (String) -> Void
     @EnvironmentObject var store: UserStore
+    @ObservedObject private var offline = OfflineManager.shared
     @Environment(\.dismiss) private var dismiss
+
+    private var r34Tags: [String] {
+        guard gif.isRule34Post, let t = gif.title else { return [] }
+        return t.split(separator: " ")
+            .map { $0.replacingOccurrences(of: "#", with: "") }
+            .filter { !$0.isEmpty }
+    }
 
     var body: some View {
         ZStack {
             Theme.modalGradient.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Post Info")
-                        .font(.title3.bold())
-                    Spacer()
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .bold))
-                            .frame(width: 34, height: 34)
-                            .liquidGlassCircle()
-                    }
-                }
-
-                if let title = gif.title, !title.isEmpty {
-                    Text(title)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.92))
-                }
-
-                if let sub = gif.subreddit {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
                     HStack {
-                        Button {
-                            onSelectSubreddit(sub)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text("/r/\(sub)")
-                                    .font(.headline)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.bold())
+                        Text("Post Info & Offline")
+                            .font(.title3.bold())
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 34, height: 34)
+                                .liquidGlassCircle()
+                        }
+                    }
+
+                    if let title = gif.title, !title.isEmpty {
+                        Text(title)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+
+                    // Offline Download Action Card
+                    let isSaved = offline.isDownloaded(gif)
+                    let isSaving = offline.isDownloading(gif)
+                    Button {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        offline.toggleDownload(gif)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: isSaved ? "checkmark.circle.fill" : (isSaving ? "arrow.down.circle" : "arrow.down.to.line.circle.fill"))
+                                .font(.system(size: 22))
+                                .foregroundStyle(isSaved ? Theme.accentBright : .white)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(isSaved ? "Saved in Offline Vault" : (isSaving ? "Downloading for Offline View..." : "Download for Offline View"))
+                                    .font(.system(size: 15, weight: .bold))
+                                Text(isSaved ? "Tap to remove from offline storage" : "Watch anytime without internet connection")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Spacer()
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+
+                    // Export local file if downloaded
+                    if let localFile = offline.localMediaURL(for: gif) {
+                        ShareLink(item: localFile) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "folder.badge.plus")
+                                    .font(.system(size: 18))
+                                Text("Export Downloaded File to Files / Photos")
+                                    .font(.subheadline.bold())
+                                Spacer()
+                            }
+                            .padding(14)
+                            .liquidGlassCard(cornerRadius: 16)
+                        }
+                    }
+
+                    // Rule34 Tappable Tag Pills
+                    if !r34Tags.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("RULE34 TAGS")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.6))
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 6)], spacing: 6) {
+                                ForEach(r34Tags, id: \.self) { tag in
+                                    Button {
+                                        onSelectRule34Tag(tag)
+                                    } label: {
+                                        Text("#\(tag)")
+                                            .font(.caption.bold())
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 7)
+                                            .frame(maxWidth: .infinity)
+                                            .liquidGlassCapsule()
+                                    }
+                                }
                             }
                         }
-                        Spacer()
-                        Button {
-                            store.toggleFollowSubreddit(sub)
-                        } label: {
-                            Text(store.isFollowingSubreddit(sub) ? "Joined" : "Join")
+                    }
+
+                    if let sub = gif.subreddit, !gif.isRule34Post {
+                        HStack {
+                            Button {
+                                onSelectSubreddit(sub)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text("/r/\(sub)")
+                                        .font(.headline)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.bold())
+                                }
+                            }
+                            Spacer()
+                            Button {
+                                store.toggleFollowSubreddit(sub)
+                            } label: {
+                                Text(store.isFollowingSubreddit(sub) ? "Joined" : "Join")
+                                    .font(.subheadline.bold())
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .liquidGlassCapsule(active: store.isFollowingSubreddit(sub))
+                            }
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+
+                    if let u = gif.author {
+                        HStack {
+                            Button {
+                                if gif.isXPost {
+                                    onSelectXUser(u)
+                                } else if gif.isIGPost {
+                                    onSelectIGUser(u)
+                                } else if gif.isRule34Post {
+                                    onSelectRule34Tag(u)
+                                } else {
+                                    onSelectUser(u)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text(gif.isXPost ? "𝕏  @\(u)" : (gif.isIGPost ? "IG  @\(u)" : "u/\(u)"))
+                                        .font(.headline)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.bold())
+                                }
+                            }
+                            Spacer()
+                            Button {
+                                if gif.isXPost {
+                                    store.toggleFollowXUser(u)
+                                } else if gif.isIGPost {
+                                    store.toggleFollowIGUser(u)
+                                } else {
+                                    store.toggleFollowUser(u)
+                                }
+                            } label: {
+                                let following = gif.isXPost
+                                    ? store.isFollowingXUser(u)
+                                    : (gif.isIGPost ? store.isFollowingIGUser(u) : store.isFollowingUser(u))
+                                Text(following ? "Following" : "Follow")
+                                    .font(.subheadline.bold())
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .liquidGlassCapsule(active: following)
+                            }
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+
+                    ShareLink(item: gif.webURL) {
+                        HStack {
+                            Image(systemName: "square.and.arrow.up")
+                            Text("Share Original Post Link")
                                 .font(.subheadline.bold())
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .liquidGlassCapsule(active: store.isFollowingSubreddit(sub))
+                            Spacer()
                         }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
                     }
-                    .padding(14)
-                    .liquidGlassCard(cornerRadius: 16)
                 }
-
-                if let u = gif.author {
-                    HStack {
-                        Button {
-                            if gif.isXPost {
-                                onSelectXUser(u)
-                            } else {
-                                onSelectUser(u)
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(gif.isXPost ? "𝕏  @\(u)" : "u/\(u)")
-                                    .font(.headline)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.bold())
-                            }
-                        }
-                        Spacer()
-                        Button {
-                            if gif.isXPost {
-                                store.toggleFollowXUser(u)
-                            } else {
-                                store.toggleFollowUser(u)
-                            }
-                        } label: {
-                            let following = gif.isXPost ? store.isFollowingXUser(u) : store.isFollowingUser(u)
-                            Text(following ? "Following" : "Follow")
-                                .font(.subheadline.bold())
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .liquidGlassCapsule(active: following)
-                        }
-                    }
-                    .padding(14)
-                    .liquidGlassCard(cornerRadius: 16)
-                }
-
-                ShareLink(item: gif.webURL) {
-                    HStack {
-                        Image(systemName: "square.and.arrow.up")
-                        Text(gif.isXPost ? "Share X Post Link" : "Share Post Link")
-                            .font(.subheadline.bold())
-                        Spacer()
-                    }
-                    .padding(14)
-                    .liquidGlassCard(cornerRadius: 16)
-                }
-
-                Spacer()
+                .padding(20)
+                .foregroundStyle(.white)
             }
-            .padding(20)
-            .foregroundStyle(.white)
         }
     }
 }

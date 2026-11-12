@@ -12,6 +12,11 @@ enum FeedSource: Hashable {
     case xLikes
     case xSearch(String)
     case xUser(String)
+    case igReels
+    case igFollowing
+    case igSaved
+    case igUser(String)
+    case rule34(String) // "" for general Rule34.xxx feed, or tag name
     case list(title: String)
 
     var displayTitle: String {
@@ -27,6 +32,12 @@ enum FeedSource: Hashable {
         case .xLikes: return "𝕏 Likes"
         case .xSearch(let q): return "𝕏: \(q)"
         case .xUser(let u): return "@\(u.replacingOccurrences(of: "@", with: ""))"
+        case .igReels: return "IG Reels"
+        case .igFollowing: return "IG Following"
+        case .igSaved: return "IG Saved"
+        case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
+        case .rule34(let tag):
+            return tag.isEmpty ? "Rule34.xxx" : "R34: \(tag)"
         case .list(let t): return t
         }
     }
@@ -38,6 +49,20 @@ enum FeedSource: Hashable {
         default:
             return false
         }
+    }
+
+    var isIGFeed: Bool {
+        switch self {
+        case .igReels, .igFollowing, .igSaved, .igUser:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var isRule34Feed: Bool {
+        if case .rule34 = self { return true }
+        return false
     }
 
     var swipeKey: (kind: String, name: String) {
@@ -53,6 +78,11 @@ enum FeedSource: Hashable {
         case .xLikes: return ("xlikes", "xlikes")
         case .xSearch(let q): return ("xsearch", q)
         case .xUser(let u): return ("xuser", u)
+        case .igReels: return ("igreels", "igreels")
+        case .igFollowing: return ("igfollowing", "igfollowing")
+        case .igSaved: return ("igsaved", "igsaved")
+        case .igUser(let u): return ("iguser", u)
+        case .rule34(let tag): return ("rule34", tag.isEmpty ? "all" : tag)
         case .list(let t): return ("list", t)
         }
     }
@@ -90,6 +120,7 @@ final class FeedModel: ObservableObject {
 
     private var afterCursor: String? = nil
     private var xMixAfterCursor: String? = nil
+    private var igMixAfterCursor: String? = nil
     private var hasMore = true
     private var ids = Set<String>()
 
@@ -112,7 +143,6 @@ final class FeedModel: ObservableObject {
 
     func switchSource(_ newSource: FeedSource, initialItems: [Gif] = []) {
         guard newSource != source || !initialItems.isEmpty else {
-            // If user re-selects the same feed, rotate/refresh with fresh unseen items
             Task { await refresh(rotateCursor: true) }
             return
         }
@@ -123,9 +153,9 @@ final class FeedModel: ObservableObject {
             hasMore = false
             afterCursor = nil
             xMixAfterCursor = nil
+            igMixAfterCursor = nil
             errorText = nil
         } else {
-            // Restore saved cursor if available so returning to a category/subreddit picks up with new videos
             afterCursor = UserStore.shared.savedCursor(for: cursorKey)
             Task { await refresh(keepSavedCursor: true) }
         }
@@ -138,7 +168,6 @@ final class FeedModel: ObservableObject {
         Task { await refresh(keepSavedCursor: true) }
     }
 
-    /// Shuffles current items and pulls fresh unseen posts to the front.
     func shuffleItems() {
         let store = UserStore.shared
         if items.count > 2 {
@@ -159,7 +188,6 @@ final class FeedModel: ObservableObject {
         items = []
         ids = []
         if rotateCursor {
-            // Advance or randomize cursor so refresh always shows brand new videos
             if case .forYou = source {
                 afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...4) * 50)
             } else if afterCursor == nil {
@@ -169,6 +197,7 @@ final class FeedModel: ObservableObject {
             afterCursor = UserStore.shared.savedCursor(for: cursorKey)
         }
         xMixAfterCursor = nil
+        igMixAfterCursor = nil
         hasMore = true
         errorText = nil
         if case .list = source { hasMore = false; return }
@@ -187,7 +216,6 @@ final class FeedModel: ObservableObject {
             var fallbackSeen: [Gif] = []
             var attempts = 0
 
-            // Up to 2 page hops if page 1 had mostly already-seen videos
             while collectedUnseen.count < 8 && attempts < 2 && hasMore {
                 attempts += 1
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
@@ -196,7 +224,6 @@ final class FeedModel: ObservableObject {
                 store.setSavedCursor(resp.after, for: cursorKey)
 
                 if resp.posts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
-                    // If we hit the end of a saved cursor, wrap around once with a fresh cursor
                     if attempts == 1 && store.savedCursor(for: cursorKey) != nil {
                         store.setSavedCursor(nil, for: cursorKey)
                         afterCursor = nil
@@ -214,14 +241,12 @@ final class FeedModel: ObservableObject {
                     }
                 }
 
-                // For X feeds (which stream via WebView), 1 hop per scroll is sufficient
-                if source.isXFeed { break }
+                if source.isXFeed || source.isIGFeed { break }
                 if resp.after == nil || resp.after?.isEmpty == true { break }
             }
 
-            // Rotate/shuffle incoming batch on For You and Category feeds so order is always fresh
             switch source {
-            case .forYou, .category:
+            case .forYou, .category, .rule34:
                 collectedUnseen.shuffle()
             default:
                 break
@@ -230,11 +255,10 @@ final class FeedModel: ObservableObject {
             if !collectedUnseen.isEmpty {
                 items.append(contentsOf: collectedUnseen)
             } else if items.isEmpty && !fallbackSeen.isEmpty {
-                // Only if a small subreddit/creator has zero unseen videos left, rotate their posts in random order
                 items.append(contentsOf: fallbackSeen.shuffled())
             }
 
-            // If personal X is connected and Mix is enabled on For You, asynchronously blend X videos
+            // Blend X For You if enabled
             if case .forYou = source, store.data.xSession.isConnected && store.data.xSession.mixIntoForYou {
                 let currentXCursor = xMixAfterCursor
                 Task { @MainActor [weak self] in
@@ -257,13 +281,43 @@ final class FeedModel: ObservableObject {
                 }
             }
 
+            // Blend Instagram Reels if enabled
+            if case .forYou = source, store.data.igSession.isConnected && store.data.igSession.mixIntoForYou {
+                let currentIGCursor = igMixAfterCursor
+                Task { @MainActor [weak self] in
+                    let igResp = await InstagramAPI.reels(after: currentIGCursor)
+                    guard let self, case .forYou = self.source else { return }
+                    self.igMixAfterCursor = igResp.after
+                    let freshIG = igResp.posts.filter { !store.isSeen($0.id) && self.ids.insert($0.id).inserted }
+                    guard !freshIG.isEmpty else { return }
+                    var combined = self.items
+                    var insertIdx = max(3, combined.count - 6)
+                    for igPost in freshIG {
+                        if insertIdx <= combined.count {
+                            combined.insert(igPost, at: insertIdx)
+                            insertIdx += 4
+                        } else {
+                            combined.append(igPost)
+                        }
+                    }
+                    self.items = combined
+                }
+            }
+
             if items.isEmpty && source.isXFeed && !store.data.xSession.isConnected {
                 errorText = "Connect your personal X account to load X videos."
+            } else if items.isEmpty && source.isIGFeed && !store.data.igSession.isConnected {
+                errorText = "Connect your personal Instagram account to load Instagram Reels."
             } else {
                 errorText = nil
             }
         } catch {
-            errorText = "Couldn't load posts. Tap to retry."
+            // If offline and user has downloaded videos, let them know or fallback cleanly
+            if !store.data.downloaded.isEmpty && items.isEmpty {
+                errorText = "Offline — tap Likes/Vault tab to watch your \(store.data.downloaded.count) downloaded videos."
+            } else {
+                errorText = "Couldn't load posts. Tap to retry."
+            }
         }
     }
 
@@ -275,7 +329,8 @@ final class FeedModel: ObservableObject {
             let subs = store.data.followedSubreddits
             let users = store.data.followedUsers
             let xUsers = store.data.followedXUsers
-            if subs.isEmpty && users.isEmpty && xUsers.isEmpty && !store.data.xSession.isConnected {
+            let igUsers = store.data.followedIGUsers
+            if subs.isEmpty && users.isEmpty && xUsers.isEmpty && igUsers.isEmpty && !store.data.xSession.isConnected && !store.data.igSession.isConnected {
                 hasMore = false
                 return GoonedFeedResponse(posts: [], after: nil)
             }
@@ -283,8 +338,12 @@ final class FeedModel: ObservableObject {
                 return try await api.following(subreddits: subs, users: users, after: cursor)
             } else if let firstXUser = xUsers.first {
                 return await XAPI.userMedia(firstXUser, after: cursor)
-            } else {
+            } else if let firstIGUser = igUsers.first {
+                return await InstagramAPI.userReels(firstIGUser, after: cursor)
+            } else if store.data.xSession.isConnected {
                 return await XAPI.following(after: cursor)
+            } else {
+                return await InstagramAPI.following(after: cursor)
             }
         case .category(let name):
             let recentSeen = Array(store.data.seenIDs.suffix(120))
@@ -295,7 +354,6 @@ final class FeedModel: ObservableObject {
                 excludedHead: recentSeen,
                 limit: 25
             )
-            // If category endpoint returned empty, rotate into one of the category's constituent subreddits
             if resp.posts.isEmpty,
                let cat = store.categories.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }),
                let randomSub = cat.subreddits.randomElement() {
@@ -318,6 +376,21 @@ final class FeedModel: ObservableObject {
             return await XAPI.search(query, sort: sort.rawValue, after: cursor)
         case .xUser(let handle):
             return await XAPI.userMedia(handle, after: cursor)
+        case .igReels:
+            return await InstagramAPI.reels(after: cursor)
+        case .igFollowing:
+            return await InstagramAPI.following(after: cursor)
+        case .igSaved:
+            return await InstagramAPI.saved(after: cursor)
+        case .igUser(let handle):
+            return await InstagramAPI.userReels(handle, after: cursor)
+        case .rule34(let tag):
+            return await Rule34API.shared.fetchFeed(
+                tag: tag,
+                sort: sort.rawValue,
+                after: cursor,
+                credentials: store.data.r34Credentials
+            )
         case .list:
             return GoonedFeedResponse(posts: [], after: nil)
         }

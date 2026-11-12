@@ -73,7 +73,9 @@ struct GoonedMainShell: View {
     @State private var currentPostID: String? = nil
     @State private var showSettingsModal = false
     @State private var showXLoginSheet = false
-    @State private var pendingXFeedAfterLogin: FeedSource? = nil
+    @State private var showIGLoginSheet = false
+    @State private var showR34KeySheet = false
+    @State private var pendingFeedAfterLogin: FeedSource? = nil
 
     private var tinted: Bool { store.data.settings.tintedGlass }
 
@@ -84,10 +86,10 @@ struct GoonedMainShell: View {
 
     var body: some View {
         ZStack {
-            // 1. Main Full-Screen Feed Scroller (always mounted for instant responsiveness)
+            // 1. Main Full-Screen Feed Scroller
             FeedView(
                 model: feedModel,
-                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet,
+                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
                 currentID: $currentPostID,
                 onOpenCategories: {
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) {
@@ -103,15 +105,25 @@ struct GoonedMainShell: View {
                 onSelectXUser: { handle in
                     selectXFeedOrLogin(.xUser(handle))
                 },
+                onSelectIGUser: { handle in
+                    selectIGFeedOrLogin(.igUser(handle))
+                },
+                onSelectRule34Tag: { tag in
+                    selectFeed(.rule34(tag))
+                },
                 onConnectX: {
-                    pendingXFeedAfterLogin = feedModel.source.isXFeed ? feedModel.source : .xForYou
+                    pendingFeedAfterLogin = feedModel.source.isXFeed ? feedModel.source : .xForYou
                     showXLoginSheet = true
+                },
+                onConnectIG: {
+                    pendingFeedAfterLogin = feedModel.source.isIGFeed ? feedModel.source : .igReels
+                    showIGLoginSheet = true
                 }
             )
             .opacity(activeTab == .home ? 1 : 0)
             .allowsHitTesting(activeTab == .home)
 
-            // 2. Top Bar on Home: Search Circle (left) | Following / For You / 𝕏 | Gear Circle (right)
+            // 2. Top Bar on Home
             if activeTab == .home {
                 VStack {
                     homeTopBar
@@ -119,7 +131,7 @@ struct GoonedMainShell: View {
                 }
             }
 
-            // 3. Likes / Stash Overlay (Screenshot 2)
+            // 3. Likes & Offline Vault Overlay
             if activeTab == .likes {
                 GoonedLikesView(
                     onOpenSettings: { showSettingsModal = true },
@@ -134,12 +146,19 @@ struct GoonedMainShell: View {
                         withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                             activeTab = .home
                         }
+                    },
+                    onPlayOfflinePost: { post in
+                        feedModel.switchSource(.list(title: "Offline Vault"), initialItems: store.data.downloaded)
+                        currentPostID = post.id
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                            activeTab = .home
+                        }
                     }
                 )
                 .transition(.opacity)
             }
 
-            // 4. Browse / Search / Categories Fullscreen Overlay (Screenshot 3)
+            // 4. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
             if activeTab == .browse {
                 GoonedBrowseOverlay(
                     onClose: {
@@ -150,13 +169,22 @@ struct GoonedMainShell: View {
                     onSelectFeed: { src in
                         if src.isXFeed {
                             selectXFeedOrLogin(src)
+                        } else if src.isIGFeed {
+                            selectIGFeedOrLogin(src)
                         } else {
                             selectFeed(src)
                         }
                     },
                     onConnectX: {
-                        pendingXFeedAfterLogin = .xForYou
+                        pendingFeedAfterLogin = .xForYou
                         showXLoginSheet = true
+                    },
+                    onConnectIG: {
+                        pendingFeedAfterLogin = .igReels
+                        showIGLoginSheet = true
+                    },
+                    onSetupR34Key: {
+                        showR34KeySheet = true
                     }
                 )
                 .transition(.opacity)
@@ -169,19 +197,25 @@ struct GoonedMainShell: View {
                     onSelectFeed: { src in
                         if src.isXFeed {
                             selectXFeedOrLogin(src)
+                        } else if src.isIGFeed {
+                            selectIGFeedOrLogin(src)
                         } else {
                             selectFeed(src)
                         }
                     },
                     onConnectX: {
-                        pendingXFeedAfterLogin = .xForYou
+                        pendingFeedAfterLogin = .xForYou
                         showXLoginSheet = true
+                    },
+                    onConnectIG: {
+                        pendingFeedAfterLogin = .igReels
+                        showIGLoginSheet = true
                     }
                 )
                 .transition(.opacity)
             }
 
-            // 6. Floating Liquid Glass Bottom Dock (Slides down when controlsCollapsed is active on Home, or swipe down on dock to collapse!)
+            // 6. Floating Liquid Glass Bottom Dock
             if activeTab != .browse && !(activeTab == .home && store.data.settings.controlsCollapsed) {
                 VStack {
                     Spacer()
@@ -203,14 +237,23 @@ struct GoonedMainShell: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            // 7. Liquid Glass Settings Modal (Screenshot 4)
+            // 7. Liquid Glass Settings Modal
             if showSettingsModal {
                 GoonedSettingsModal(
                     isPresented: $showSettingsModal,
                     onConnectX: {
                         showSettingsModal = false
-                        pendingXFeedAfterLogin = nil
+                        pendingFeedAfterLogin = nil
                         showXLoginSheet = true
+                    },
+                    onConnectIG: {
+                        showSettingsModal = false
+                        pendingFeedAfterLogin = nil
+                        showIGLoginSheet = true
+                    },
+                    onSetupR34Key: {
+                        showSettingsModal = false
+                        showR34KeySheet = true
                     }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
@@ -222,12 +265,25 @@ struct GoonedMainShell: View {
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: store.data.settings.controlsCollapsed)
         .sheet(isPresented: $showXLoginSheet) {
             XLoginSheet {
-                let target = pendingXFeedAfterLogin ?? .xForYou
-                pendingXFeedAfterLogin = nil
+                let target = pendingFeedAfterLogin ?? .xForYou
+                pendingFeedAfterLogin = nil
                 selectFeed(target)
                 Task { await feedModel.refresh(rotateCursor: true) }
             }
             .environmentObject(store)
+        }
+        .sheet(isPresented: $showIGLoginSheet) {
+            InstagramLoginSheet {
+                let target = pendingFeedAfterLogin ?? .igReels
+                pendingFeedAfterLogin = nil
+                selectFeed(target)
+                Task { await feedModel.refresh(rotateCursor: true) }
+            }
+            .environmentObject(store)
+        }
+        .sheet(isPresented: $showR34KeySheet) {
+            Rule34KeySheet()
+                .environmentObject(store)
         }
     }
 
@@ -243,15 +299,24 @@ struct GoonedMainShell: View {
         if store.data.xSession.isConnected {
             selectFeed(src)
         } else {
-            pendingXFeedAfterLogin = src
+            pendingFeedAfterLogin = src
             showXLoginSheet = true
         }
     }
 
-    // MARK: - Home Top Bar (`🔍` | `Following   For You   𝕏` | `⚙️`)
+    private func selectIGFeedOrLogin(_ src: FeedSource) {
+        if store.data.igSession.isConnected {
+            selectFeed(src)
+        } else {
+            pendingFeedAfterLogin = src
+            showIGLoginSheet = true
+        }
+    }
+
+    // MARK: - Home Top Bar (`🔍` | `Following  For You  𝕏  IG  34` | `⚙️`)
 
     private var homeTopBar: some View {
-        HStack {
+        HStack(spacing: 8) {
             // Left: Search Circle Button
             Button {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -265,18 +330,17 @@ struct GoonedMainShell: View {
             }
             .buttonStyle(ScalePressButtonStyle())
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            // Center: `Following   For You   𝕏` or active X / Category / Subreddit breadcrumb pill
             switch feedModel.source {
             case .forYou, .following:
-                HStack(spacing: 16) {
+                HStack(spacing: 12) {
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         selectFeed(.following)
                     } label: {
                         Text("Following")
-                            .font(.system(size: 16, weight: isFollowingFeed ? .bold : .medium))
+                            .font(.system(size: 15, weight: isFollowingFeed ? .bold : .medium))
                             .foregroundStyle(isFollowingFeed ? .white : .white.opacity(0.62))
                     }
 
@@ -290,27 +354,57 @@ struct GoonedMainShell: View {
                         }
                     } label: {
                         Text("For You")
-                            .font(.system(size: 16, weight: !isFollowingFeed ? .bold : .medium))
+                            .font(.system(size: 15, weight: !isFollowingFeed ? .bold : .medium))
                             .foregroundStyle(!isFollowingFeed ? .white : .white.opacity(0.62))
                     }
 
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        selectXFeedOrLogin(.xForYou)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("𝕏")
-                                .font(.system(size: 15, weight: .black))
-                            if store.data.xSession.isConnected {
-                                Circle()
-                                    .fill(Theme.accentBright)
-                                    .frame(width: 5, height: 5)
+                    // Quick Platform Pills: 𝕏, IG, R34
+                    HStack(spacing: 5) {
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            selectXFeedOrLogin(.xForYou)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text("𝕏")
+                                    .font(.system(size: 13, weight: .black))
+                                if store.data.xSession.isConnected {
+                                    Circle().fill(Theme.accentBright).frame(width: 4, height: 4)
+                                }
                             }
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .liquidGlassCapsule(tinted: tinted)
                         }
-                        .foregroundStyle(.white.opacity(0.78))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .liquidGlassCapsule(tinted: tinted)
+
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            selectIGFeedOrLogin(.igReels)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                if store.data.igSession.isConnected {
+                                    Circle().fill(Theme.accentBright).frame(width: 4, height: 4)
+                                }
+                            }
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .liquidGlassCapsule(tinted: tinted)
+                        }
+
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            selectFeed(.rule34(""))
+                        } label: {
+                            Text("34")
+                                .font(.system(size: 12, weight: .black, design: .rounded))
+                                .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .liquidGlassCapsule(tinted: tinted)
+                        }
                     }
                 }
                 .shadow(color: .black.opacity(0.5), radius: 4)
@@ -351,6 +445,42 @@ struct GoonedMainShell: View {
                 .padding(.vertical, 8)
                 .liquidGlassCapsule(tinted: tinted)
 
+            case .igReels, .igFollowing, .igSaved:
+                HStack(spacing: 10) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        selectFeed(.forYou)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    ForEach([
+                        (FeedSource.igReels, "IG Reels"),
+                        (FeedSource.igFollowing, "Following"),
+                        (FeedSource.igSaved, "Saved")
+                    ], id: \.1) { src, title in
+                        let active = feedModel.source == src
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            if active {
+                                currentPostID = nil
+                                Task { await feedModel.refresh(rotateCursor: true) }
+                            } else {
+                                selectIGFeedOrLogin(src)
+                            }
+                        } label: {
+                            Text(title)
+                                .font(.system(size: 14, weight: active ? .bold : .medium))
+                                .foregroundStyle(active ? .white : .white.opacity(0.62))
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .liquidGlassCapsule(tinted: tinted)
+
             default:
                 HStack(spacing: 8) {
                     Button {
@@ -376,7 +506,7 @@ struct GoonedMainShell: View {
                 .liquidGlassCapsule(tinted: tinted)
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
             // Right: Gear Settings Circle Button
             Button {

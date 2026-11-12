@@ -12,7 +12,7 @@ struct Lossy<T: Decodable>: Decodable {
     init(from decoder: Decoder) throws { value = try? T(from: decoder) }
 }
 
-/// Exact post model returned by `api.gooned.app` and `XService`.
+/// Unified post model supporting `api.gooned.app`, Personal X.com, Personal Instagram, Rule34.xxx, and Offline Vault.
 struct Gif: Codable, Identifiable, Hashable {
     let id: String
     var title: String?
@@ -40,9 +40,17 @@ struct Gif: Codable, Identifiable, Hashable {
         id.hasPrefix("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
     }
 
+    var isIGPost: Bool {
+        id.hasPrefix("ig_") || (sourceUrl?.contains("instagram.com") == true) || (permalink?.contains("instagram.com") == true)
+    }
+
+    var isRule34Post: Bool {
+        id.hasPrefix("r34") || (subreddit?.lowercased().contains("rule34") == true) || (sourceUrl?.contains("rule34.xxx") == true)
+    }
+
     var isImage: Bool {
         if mediaType == "image" { return true }
-        return videoURL(hd: true) == nil
+        return remoteOrLocalVideoURLs(hd: true).isEmpty
     }
 
     /// Returns the actual width/height ratio only when real dimensions are known.
@@ -55,12 +63,18 @@ struct Gif: Codable, Identifiable, Hashable {
         knownAspect ?? 1.0
     }
 
-    func allVideoURLs(hd: Bool) -> [URL] {
+    private func remoteOrLocalVideoURLs(hd: Bool) -> [URL] {
         guard mediaType != "image" else { return [] }
+        var urls: [URL] = []
+        // 1. Prefer offline local file if downloaded!
+        if let local = OfflineManager.localMediaURL(forId: id),
+           local.pathExtension.lowercased() != "jpg" && local.pathExtension.lowercased() != "png" {
+            urls.append(local)
+        }
+        // 2. Remote stream candidates
         let candidates: [String?] = hd
             ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
             : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
-        var urls: [URL] = []
         var seen = Set<String>()
         for c in candidates {
             if let s = c, !s.isEmpty, seen.insert(s).inserted, let u = URL(string: s) {
@@ -70,11 +84,18 @@ struct Gif: Codable, Identifiable, Hashable {
         return urls
     }
 
+    func allVideoURLs(hd: Bool) -> [URL] {
+        remoteOrLocalVideoURLs(hd: hd)
+    }
+
     func videoURL(hd: Bool) -> URL? {
-        allVideoURLs(hd: hd).first
+        remoteOrLocalVideoURLs(hd: hd).first
     }
 
     var imageURL: URL? {
+        if let local = OfflineManager.localMediaURL(forId: id) {
+            return local
+        }
         for c in [mediaUrl, posterUrl, thumbnailUrl, sourceUrl] {
             if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
         }
@@ -82,6 +103,9 @@ struct Gif: Codable, Identifiable, Hashable {
     }
 
     var posterURL: URL? {
+        if let localThumb = OfflineManager.localThumbURL(forId: id) {
+            return localThumb
+        }
         for c in [posterUrl, thumbnailUrl, mediaUrl] {
             if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
         }
@@ -89,6 +113,9 @@ struct Gif: Codable, Identifiable, Hashable {
     }
 
     var thumbURL: URL? {
+        if let localThumb = OfflineManager.localThumbURL(forId: id) {
+            return localThumb
+        }
         for c in [posterUrl, thumbnailUrl, mediaUrl] {
             if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
         }

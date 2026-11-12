@@ -1,15 +1,18 @@
 import SwiftUI
 
-// MARK: - 1. Browse / Search / Categories Fullscreen Overlay (Screenshot 3 Exact Clone + Personal X)
+// MARK: - 1. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
 
 struct GoonedBrowseOverlay: View {
     var onClose: () -> Void
     var onSelectFeed: (FeedSource) -> Void
     var onConnectX: () -> Void
+    var onConnectIG: () -> Void
+    var onSetupR34Key: () -> Void
 
     @EnvironmentObject var store: UserStore
     @State private var query = ""
     @State private var searchResults = GoonedSearchResponsePlaceholder()
+    @State private var r34Suggestions: [Rule34TagSuggestion] = []
     @State private var isSearching = false
 
     struct GoonedSearchResponsePlaceholder {
@@ -51,7 +54,7 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
 
-                        TextField("Search subreddits, categories, or 𝕏", text: $query)
+                        TextField("Search Reddit, 𝕏, IG, or Rule34 tags", text: $query)
                             .font(.system(size: 16))
                             .foregroundStyle(.white)
                             .autocorrectionDisabled()
@@ -60,7 +63,14 @@ struct GoonedBrowseOverlay: View {
                             .onSubmit {
                                 let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !clean.isEmpty else { return }
-                                if clean.hasPrefix("@") {
+                                if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") {
+                                    let tag = clean
+                                        .replacingOccurrences(of: "r34:", with: "", options: .caseInsensitive)
+                                        .replacingOccurrences(of: "#", with: "")
+                                    onSelectFeed(.rule34(tag))
+                                } else if clean.lowercased().hasPrefix("ig:") {
+                                    onSelectFeed(.igUser(clean.replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
+                                } else if clean.hasPrefix("@") {
                                     onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
                                 } else if let cat = matchingCategories.first {
                                     onSelectFeed(.category(cat.name))
@@ -105,19 +115,24 @@ struct GoonedBrowseOverlay: View {
             let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty else {
                 searchResults = GoonedSearchResponsePlaceholder()
+                r34Suggestions = []
                 return
             }
             isSearching = true
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
-            if let res = try? await GoonedAPI.shared.search(q) {
-                searchResults = GoonedSearchResponsePlaceholder(subreddits: res.subreddits, users: res.users)
+            async let redditTask = try? GoonedAPI.shared.search(q)
+            async let r34Task = Rule34API.shared.autocomplete(q)
+            let (redditRes, r34Res) = await (redditTask, r34Task)
+            if let redditRes {
+                searchResults = GoonedSearchResponsePlaceholder(subreddits: redditRes.subreddits, users: redditRes.users)
             }
+            r34Suggestions = r34Res
             isSearching = false
         }
     }
 
-    // MARK: - Default Browse Content (Pick Up Where You Left Off + Personal X + Featured Bento + A-Z Chips)
+    // MARK: - Default Browse Content
 
     private var defaultBrowseContent: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -142,6 +157,11 @@ struct GoonedBrowseOverlay: View {
                         case "xlikes": onSelectFeed(.xLikes)
                         case "xsearch": onSelectFeed(.xSearch(recent.name))
                         case "xuser": onSelectFeed(.xUser(recent.name))
+                        case "igreels": onSelectFeed(.igReels)
+                        case "igfollowing": onSelectFeed(.igFollowing)
+                        case "igsaved": onSelectFeed(.igSaved)
+                        case "iguser": onSelectFeed(.igUser(recent.name))
+                        case "rule34": onSelectFeed(.rule34(recent.name == "all" ? "" : recent.name))
                         default: onSelectFeed(.forYou)
                         }
                     } else {
@@ -157,7 +177,6 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.60))
 
-                        // Progress Bar
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Color.white.opacity(0.16))
@@ -175,36 +194,58 @@ struct GoonedBrowseOverlay: View {
                 .padding(.horizontal, 16)
             }
 
-            // PERSONAL X (TWITTER) SECTION
+            // RULE34.XXX HUB
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("PERSONAL 𝕏")
+                    Text("RULE34.XXX")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .tracking(1.2)
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
                     Spacer()
-                    if store.data.xSession.isConnected {
-                        let sn = store.data.xSession.screenName
-                        Text(sn.isEmpty ? "CONNECTED" : "@\(sn.uppercased())")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .tracking(1.0)
-                            .foregroundStyle(Theme.accentBright)
+                    Button(action: onSetupR34Key) {
+                        Text(store.data.r34Credentials.isConnected ? "API KEY ACTIVE" : "API KEY (OPTIONAL)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.65))
                     }
                 }
                 .padding(.horizontal, 18)
 
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        r34Chip(label: "🔥 Rule34 Feed", tag: "")
+                        r34Chip(label: "🎬 Animated / MP4", tag: "video")
+                        r34Chip(label: "Overwatch", tag: "overwatch")
+                        r34Chip(label: "Genshin Impact", tag: "genshin_impact")
+                        r34Chip(label: "Fortnite", tag: "fortnite")
+                        r34Chip(label: "Futanari", tag: "futanari")
+                        r34Chip(label: "Cyberpunk", tag: "cyberpunk")
+                        r34Chip(label: "Pokemon", tag: "pokemon")
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+
+            // PERSONAL X & INSTAGRAM SECTION
+            VStack(alignment: .leading, spacing: 8) {
+                Text("CONNECTED ACCOUNTS (𝕏 & INSTAGRAM)")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 18)
+
+                // Personal X Row
                 if store.data.xSession.isConnected {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                        xQuickCard(title: "𝕏 For You", subtitle: "Home video feed", icon: "sparkles") {
+                        quickCard(title: "𝕏 For You", subtitle: "Home video feed", icon: "sparkles") {
                             onSelectFeed(.xForYou)
                         }
-                        xQuickCard(title: "𝕏 Following", subtitle: "Creators you follow", icon: "person.2.fill") {
+                        quickCard(title: "𝕏 Following", subtitle: "Creators you follow", icon: "person.2.fill") {
                             onSelectFeed(.xFollowing)
                         }
-                        xQuickCard(title: "𝕏 Bookmarks", subtitle: "Your saved X videos", icon: "bookmark.fill") {
+                        quickCard(title: "𝕏 Bookmarks", subtitle: "Your saved X videos", icon: "bookmark.fill") {
                             onSelectFeed(.xBookmarks)
                         }
-                        xQuickCard(title: "𝕏 Likes", subtitle: "Videos you liked on X", icon: "heart.fill") {
+                        quickCard(title: "𝕏 Likes", subtitle: "Videos you liked on X", icon: "heart.fill") {
                             onSelectFeed(.xLikes)
                         }
                     }
@@ -215,15 +256,15 @@ struct GoonedBrowseOverlay: View {
                             ZStack {
                                 Circle()
                                     .fill(Color.black.opacity(0.55))
-                                    .frame(width: 44, height: 44)
+                                    .frame(width: 42, height: 42)
                                     .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
                                 Text("𝕏")
-                                    .font(.system(size: 20, weight: .black))
+                                    .font(.system(size: 19, weight: .black))
                                     .foregroundStyle(.white)
                             }
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text("Connect Personal X")
-                                    .font(.system(size: 16, weight: .bold))
+                                    .font(.system(size: 15, weight: .bold))
                                     .foregroundStyle(.white)
                                 Text("Stream your X For You, Following, Bookmarks & 18+ creators")
                                     .font(.system(size: 12))
@@ -232,11 +273,67 @@ struct GoonedBrowseOverlay: View {
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.6))
                         }
-                        .padding(14)
-                        .liquidGlassCard(cornerRadius: 20)
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                    .padding(.horizontal, 16)
+                }
+
+                // Personal Instagram Row
+                if store.data.igSession.isConnected {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                        quickCard(title: "IG Reels", subtitle: "Personal Reels feed", icon: "film.stack") {
+                            onSelectFeed(.igReels)
+                        }
+                        quickCard(title: "IG Following", subtitle: "Accounts you follow", icon: "person.2.fill") {
+                            onSelectFeed(.igFollowing)
+                        }
+                        quickCard(title: "IG Saved", subtitle: "Bookmarked Reels", icon: "bookmark.fill") {
+                            onSelectFeed(.igSaved)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                } else {
+                    Button(action: onConnectIG) {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color(red: 0.98, green: 0.35, blue: 0.35),
+                                                Color(red: 0.85, green: 0.18, blue: 0.56),
+                                                Color(red: 0.55, green: 0.22, blue: 0.85)
+                                            ],
+                                            startPoint: .bottomLeading,
+                                            endPoint: .topTrailing
+                                        )
+                                    )
+                                    .frame(width: 42, height: 42)
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Connect Personal Instagram")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(.white)
+                                Text("Stream your personal Instagram Reels, Saved & creators")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.68))
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
                     }
                     .buttonStyle(ScalePressButtonStyle())
                     .padding(.horizontal, 16)
@@ -258,7 +355,6 @@ struct GoonedBrowseOverlay: View {
                 }
                 .padding(.horizontal, 18)
 
-                // Hero Card: Gooning
                 if let hero = featuredCategories.first(where: { $0.name == "Gooning" }) ?? store.categories.first {
                     Button {
                         onSelectFeed(.category(hero.name))
@@ -284,7 +380,6 @@ struct GoonedBrowseOverlay: View {
                     .padding(.horizontal, 16)
                 }
 
-                // 2x2 Grid for TikTok, OnlyFans, Snapchat, Videos
                 let gridTiles: [GoonedCategory] = [
                     store.categories.first { $0.name == "TikTok" },
                     store.categories.first { $0.name == "OnlyFans" },
@@ -328,7 +423,6 @@ struct GoonedBrowseOverlay: View {
             .padding(.horizontal, 18)
             .padding(.top, 4)
 
-            // A-Z Wrapping Pill Grid
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
                 ForEach(azCategories) { cat in
                     Button {
@@ -351,7 +445,21 @@ struct GoonedBrowseOverlay: View {
         }
     }
 
-    private func xQuickCard(title: String, subtitle: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func r34Chip(label: String, tag: String) -> some View {
+        Button {
+            onSelectFeed(.rule34(tag))
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .liquidGlassCapsule()
+        }
+        .buttonStyle(ScalePressButtonStyle())
+    }
+
+    private func quickCard(title: String, subtitle: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
@@ -392,7 +500,7 @@ struct GoonedBrowseOverlay: View {
         .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 0.7))
     }
 
-    // MARK: - Live Search Results Content (X Search + X Creator + Categories + Subreddits + Users)
+    // MARK: - Live Search Results Content (Reddit, Rule34 Tags, X, Instagram)
 
     private var liveSearchResultsContent: some View {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -401,7 +509,6 @@ struct GoonedBrowseOverlay: View {
             .replacingOccurrences(of: "@", with: "")
 
         return VStack(alignment: .leading, spacing: 14) {
-            // Direct Actions: Open r/<query>, Search X Videos, Open @<query> on X
             VStack(spacing: 8) {
                 Button {
                     onSelectFeed(.subreddit(clean))
@@ -413,7 +520,36 @@ struct GoonedBrowseOverlay: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Open r/\(clean)")
                                 .font(.system(size: 15, weight: .bold))
-                            Text("Go directly to subreddit feed")
+                            Text("Go directly to Reddit subreddit feed")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+
+                Button {
+                    onSelectFeed(.rule34(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color(red: 0.42, green: 0.72, blue: 0.40))
+                                .frame(width: 28, height: 28)
+                            Text("34")
+                                .font(.system(size: 12, weight: .black, design: .rounded))
+                                .foregroundStyle(.black)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Search \"\(clean)\" on Rule34.xxx")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Stream Rule34 videos, GIFs & artwork for this tag")
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.65))
                         }
@@ -432,11 +568,8 @@ struct GoonedBrowseOverlay: View {
                 } label: {
                     HStack(spacing: 12) {
                         ZStack {
-                            Circle()
-                                .fill(Color.black.opacity(0.6))
-                                .frame(width: 28, height: 28)
-                            Text("𝕏")
-                                .font(.system(size: 14, weight: .black))
+                            Circle().fill(Color.black.opacity(0.6)).frame(width: 28, height: 28)
+                            Text("𝕏").font(.system(size: 14, weight: .black))
                         }
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Search \"\(clean)\" Videos on 𝕏")
@@ -455,36 +588,67 @@ struct GoonedBrowseOverlay: View {
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
-                Button {
-                    onSelectFeed(.xUser(clean))
-                } label: {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.black.opacity(0.6))
-                                .frame(width: 28, height: 28)
-                            Text("@")
+                HStack(spacing: 8) {
+                    Button {
+                        onSelectFeed(.xUser(clean))
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("𝕏")
                                 .font(.system(size: 14, weight: .black))
+                            Text("@\(clean)")
+                                .font(.system(size: 14, weight: .bold))
+                                .lineLimit(1)
+                            Spacer()
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Open @\(clean) on 𝕏")
-                                .font(.system(size: 15, weight: .bold))
-                            Text("Watch creator's X video & media timeline")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.5))
+                        .padding(12)
+                        .liquidGlassCard(cornerRadius: 16)
                     }
-                    .padding(13)
-                    .liquidGlassCard(cornerRadius: 18)
+                    .buttonStyle(ScalePressButtonStyle())
+
+                    Button {
+                        onSelectFeed(.igUser(clean))
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "camera.fill")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("IG @\(clean)")
+                                .font(.system(size: 14, weight: .bold))
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .padding(12)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
                 }
-                .buttonStyle(ScalePressButtonStyle())
             }
 
-            // Matching Categories
+            // Live Rule34 Autocomplete Tag Suggestions
+            if !r34Suggestions.isEmpty {
+                Text("RULE34.XXX TAGS")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
+                    .padding(.horizontal, 4)
+
+                ForEach(r34Suggestions.prefix(6)) { item in
+                    Button {
+                        onSelectFeed(.rule34(item.value))
+                    } label: {
+                        HStack {
+                            Text("#\(item.label)")
+                                .font(.system(size: 15, weight: .semibold))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(12)
+                        .liquidGlassCard(cornerRadius: 14)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+            }
+
             if !matchingCategories.isEmpty {
                 Text("CATEGORIES")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -508,7 +672,6 @@ struct GoonedBrowseOverlay: View {
                 }
             }
 
-            // Subreddits from api.gooned.app/reddit/search
             if !searchResults.subreddits.isEmpty {
                 Text("SUBREDDITS")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -553,7 +716,6 @@ struct GoonedBrowseOverlay: View {
                 }
             }
 
-            // Users from api.gooned.app/reddit/search
             if !searchResults.users.isEmpty {
                 Text("REDDIT USERS")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -598,27 +760,32 @@ struct GoonedBrowseOverlay: View {
     }
 }
 
-// MARK: - 2. Likes / Stash Screen (Screenshot 2 Exact Clone)
+// MARK: - 2. Likes & Offline Vault Screen (Screenshot 2 + Offline Vault Mode)
 
 struct GoonedLikesView: View {
     var onOpenSettings: () -> Void
     var onStartStash: () -> Void
     var onPlayLikedPost: (Gif) -> Void
+    var onPlayOfflinePost: (Gif) -> Void
 
     @EnvironmentObject var store: UserStore
-    @State private var filter: String = "all" // "all", "videos", "gifs", "images"
+    @ObservedObject private var offline = OfflineManager.shared
+    @State private var mode: String = "liked" // "liked" or "offline"
+    @State private var filter: String = "all" // "all", "videos", "images"
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
-    private var filteredLikes: [Gif] {
+    private var sourceItems: [Gif] {
+        mode == "offline" ? store.data.downloaded : store.data.liked
+    }
+
+    private var filteredItems: [Gif] {
         switch filter {
         case "videos":
-            return store.data.liked.filter { !$0.isImage && $0.mediaType != "gif" }
-        case "gifs":
-            return store.data.liked.filter { $0.mediaType == "gif" }
+            return sourceItems.filter { !$0.isImage }
         case "images":
-            return store.data.liked.filter { $0.isImage }
+            return sourceItems.filter { $0.isImage }
         default:
-            return store.data.liked
+            return sourceItems
         }
     }
 
@@ -627,25 +794,42 @@ struct GoonedLikesView: View {
             Theme.crimsonBg.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top Bar with Gear on Right
-                HStack {
-                    if !store.data.liked.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach([("all", "All"), ("videos", "Videos"), ("images", "Images")], id: \.0) { id, label in
-                                Button {
-                                    filter = id
-                                } label: {
-                                    Text(label)
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 7)
-                                        .liquidGlassCapsule(active: filter == id)
-                                }
+                // Top Bar: Liked vs Offline Vault Switcher + Gear on Right
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        Button {
+                            withAnimation { mode = "liked" }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "heart.fill")
+                                    .font(.system(size: 12))
+                                Text("Liked (\(store.data.liked.count))")
+                                    .font(.system(size: 13, weight: .bold))
                             }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .liquidGlassCapsule(active: mode == "liked")
+                        }
+
+                        Button {
+                            withAnimation { mode = "offline" }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 12))
+                                Text("Offline (\(store.data.downloaded.count))")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .liquidGlassCapsule(active: mode == "offline")
                         }
                     }
+
                     Spacer()
+
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
                             .font(.system(size: 17, weight: .semibold))
@@ -658,8 +842,48 @@ struct GoonedLikesView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
 
-                if filteredLikes.isEmpty {
-                    // Exact Screenshot 2 Empty State
+                // Sub-toolbar when items exist
+                if !sourceItems.isEmpty {
+                    HStack {
+                        HStack(spacing: 6) {
+                            ForEach([("all", "All"), ("videos", "Videos"), ("images", "Images")], id: \.0) { id, label in
+                                Button {
+                                    filter = id
+                                } label: {
+                                    Text(label)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .liquidGlassCapsule(active: filter == id)
+                                }
+                            }
+                        }
+
+                        Spacer()
+
+                        if mode == "offline", let firstOffline = filteredItems.first {
+                            Button {
+                                onPlayOfflinePost(firstOffline)
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("Play Offline (\(offline.totalDiskUsageString()))")
+                                        .font(.system(size: 11, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 6)
+                                .liquidGlassCapsule(active: true)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                }
+
+                if filteredItems.isEmpty {
                     Spacer()
                     VStack(spacing: 14) {
                         ZStack {
@@ -667,21 +891,25 @@ struct GoonedLikesView: View {
                                 .fill(Color(red: 0.42, green: 0.10, blue: 0.20).opacity(0.85))
                                 .frame(width: 68, height: 68)
                                 .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
-                            Image(systemName: "heart.fill")
+                            Image(systemName: mode == "offline" ? "arrow.down.to.line" : "heart.fill")
                                 .font(.system(size: 28))
                                 .foregroundStyle(.white)
                         }
 
-                        Text("No liked posts yet")
+                        Text(mode == "offline" ? "No offline downloads yet" : "No liked posts yet")
                             .font(.system(size: 20, weight: .bold))
                             .foregroundStyle(.white)
 
-                        Text("Double-tap a post to save it here.")
+                        Text(mode == "offline"
+                             ? "Tap Save (↓) on any video to watch it offline anytime."
+                             : "Double-tap a post to save it here.")
                             .font(.system(size: 15))
                             .foregroundStyle(.white.opacity(0.72))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 36)
 
                         Button(action: onStartStash) {
-                            Text("Start your stash")
+                            Text(mode == "offline" ? "Browse videos to download" : "Start your stash")
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 28)
@@ -696,13 +924,44 @@ struct GoonedLikesView: View {
                 } else {
                     ScrollView(.vertical, showsIndicators: false) {
                         LazyVGrid(columns: columns, spacing: 2) {
-                            ForEach(filteredLikes) { post in
+                            ForEach(filteredItems) { post in
                                 Button {
-                                    onPlayLikedPost(post)
+                                    if mode == "offline" {
+                                        onPlayOfflinePost(post)
+                                    } else {
+                                        onPlayLikedPost(post)
+                                    }
                                 } label: {
-                                    GridThumb(gif: post)
+                                    GridThumb(gif: post, isOfflineBadge: offline.isDownloaded(post))
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    if offline.isDownloaded(post) {
+                                        if let localURL = offline.localMediaURL(for: post) {
+                                            ShareLink(item: localURL) {
+                                                Label("Export / Share File", systemImage: "square.and.arrow.up")
+                                            }
+                                        }
+                                        Button(role: .destructive) {
+                                            offline.removeDownload(post)
+                                        } label: {
+                                            Label("Delete Offline Copy", systemImage: "trash")
+                                        }
+                                    } else {
+                                        Button {
+                                            Task { await offline.download(post) }
+                                        } label: {
+                                            Label("Download for Offline", systemImage: "arrow.down.to.line")
+                                        }
+                                    }
+                                    if store.isLiked(post) {
+                                        Button(role: .destructive) {
+                                            store.toggleLike(post)
+                                        } label: {
+                                            Label("Remove from Likes", systemImage: "heart.slash")
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(.top, 12)
@@ -716,6 +975,7 @@ struct GoonedLikesView: View {
 
 struct GridThumb: View {
     let gif: Gif
+    var isOfflineBadge: Bool = false
 
     var body: some View {
         Color(red: 0.25, green: 0.06, blue: 0.14)
@@ -730,11 +990,23 @@ struct GridThumb: View {
                 }
             )
             .clipped()
+            .overlay(alignment: .topTrailing) {
+                if isOfflineBadge {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                        .padding(6)
+                }
+            }
             .overlay(alignment: .bottomLeading) {
                 HStack(spacing: 4) {
                     if gif.isXPost {
-                        Text("𝕏")
-                            .font(.system(size: 10, weight: .black))
+                        Text("𝕏").font(.system(size: 10, weight: .black))
+                    } else if gif.isIGPost {
+                        Image(systemName: "camera.fill").font(.system(size: 9, weight: .bold))
+                    } else if gif.isRule34Post {
+                        Text("34").font(.system(size: 10, weight: .black))
                     } else {
                         Image(systemName: gif.isImage ? "photo" : "play.fill")
                     }
@@ -749,12 +1021,13 @@ struct GridThumb: View {
     }
 }
 
-// MARK: - 3. Profile / Follows View (Subreddits, Reddit Creators & Personal X)
+// MARK: - 3. Profile / Follows View (Subreddits, Reddit Creators, X Creators, Instagram Creators)
 
 struct GoonedFollowsView: View {
     var onOpenSettings: () -> Void
     var onSelectFeed: (FeedSource) -> Void
     var onConnectX: () -> Void
+    var onConnectIG: () -> Void
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
@@ -762,7 +1035,8 @@ struct GoonedFollowsView: View {
     private var hasAnyFollows: Bool {
         !store.data.followedSubreddits.isEmpty ||
         !store.data.followedUsers.isEmpty ||
-        !store.data.followedXUsers.isEmpty
+        !store.data.followedXUsers.isEmpty ||
+        !store.data.followedIGUsers.isEmpty
     }
 
     var body: some View {
@@ -803,22 +1077,21 @@ struct GoonedFollowsView: View {
                                 ZStack {
                                     Circle()
                                         .fill(Color.black.opacity(0.6))
-                                        .frame(width: 42, height: 42)
+                                        .frame(width: 40, height: 40)
                                         .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
-                                    Text("𝕏")
-                                        .font(.system(size: 19, weight: .black))
+                                    Text("𝕏").font(.system(size: 18, weight: .black))
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
                                     if store.data.xSession.isConnected {
                                         let sn = store.data.xSession.screenName
                                         Text(sn.isEmpty ? "Personal X Connected" : "@\(sn)")
-                                            .font(.system(size: 16, weight: .bold))
+                                            .font(.system(size: 15, weight: .bold))
                                         Text("Streaming personal X timeline & 18+ media")
                                             .font(.caption)
                                             .foregroundStyle(.white.opacity(0.68))
                                     } else {
                                         Text("Personal X Account")
-                                            .font(.system(size: 16, weight: .bold))
+                                            .font(.system(size: 15, weight: .bold))
                                         Text("Connect your X to watch For You & Bookmarks")
                                             .font(.caption)
                                             .foregroundStyle(.white.opacity(0.68))
@@ -838,32 +1111,78 @@ struct GoonedFollowsView: View {
 
                             if store.data.xSession.isConnected {
                                 HStack(spacing: 8) {
-                                    Button {
-                                        onSelectFeed(.xForYou)
-                                    } label: {
-                                        Text("𝕏 For You")
-                                            .font(.caption.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 9)
+                                    Button { onSelectFeed(.xForYou) } label: {
+                                        Text("𝕏 For You").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule(active: true)
+                                    }
+                                    Button { onSelectFeed(.xFollowing) } label: {
+                                        Text("𝕏 Following").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule()
+                                    }
+                                    Button { onSelectFeed(.xBookmarks) } label: {
+                                        Text("𝕏 Saved").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule()
+                                    }
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 20)
+
+                        // Personal Instagram Account Card
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color(red: 0.98, green: 0.35, blue: 0.35),
+                                                    Color(red: 0.85, green: 0.18, blue: 0.56),
+                                                    Color(red: 0.55, green: 0.22, blue: 0.85)
+                                                ],
+                                                startPoint: .bottomLeading,
+                                                endPoint: .topTrailing
+                                            )
+                                        )
+                                        .frame(width: 40, height: 40)
+                                    Image(systemName: "camera.fill").font(.system(size: 15, weight: .bold))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    if store.data.igSession.isConnected {
+                                        let un = store.data.igSession.username
+                                        Text(un.isEmpty ? "Instagram Connected" : "@\(un)")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("Streaming your personal Instagram Reels & Saved")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    } else {
+                                        Text("Personal Instagram")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("Connect Instagram for Reels, Following & Saved")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    }
+                                }
+                                Spacer()
+                                if !store.data.igSession.isConnected {
+                                    Button(action: onConnectIG) {
+                                        Text("Connect")
+                                            .font(.subheadline.bold())
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 8)
                                             .liquidGlassCapsule(active: true)
                                     }
-                                    Button {
-                                        onSelectFeed(.xFollowing)
-                                    } label: {
-                                        Text("𝕏 Following")
-                                            .font(.caption.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 9)
-                                            .liquidGlassCapsule()
+                                }
+                            }
+
+                            if store.data.igSession.isConnected {
+                                HStack(spacing: 8) {
+                                    Button { onSelectFeed(.igReels) } label: {
+                                        Text("IG Reels").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule(active: true)
                                     }
-                                    Button {
-                                        onSelectFeed(.xBookmarks)
-                                    } label: {
-                                        Text("𝕏 Saved")
-                                            .font(.caption.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 9)
-                                            .liquidGlassCapsule()
+                                    Button { onSelectFeed(.igFollowing) } label: {
+                                        Text("IG Following").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule()
+                                    }
+                                    Button { onSelectFeed(.igSaved) } label: {
+                                        Text("IG Saved").font(.caption.bold()).frame(maxWidth: .infinity).padding(.vertical, 8).liquidGlassCapsule()
                                     }
                                 }
                             }
@@ -885,14 +1204,14 @@ struct GoonedFollowsView: View {
                                 Text("No follows yet")
                                     .font(.system(size: 19, weight: .bold))
                                     .foregroundStyle(.white)
-                                Text("Tap + on any video to follow its subreddit, Reddit creator, or 𝕏 creator.")
+                                Text("Tap + on any video to follow its subreddit, Reddit creator, 𝕏 creator, or Instagram creator.")
                                     .font(.system(size: 14))
                                     .foregroundStyle(.white.opacity(0.72))
                                     .multilineTextAlignment(.center)
                                     .padding(.horizontal, 32)
                             }
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 48)
+                            .padding(.vertical, 36)
                         } else {
                             if !store.data.followedXUsers.isEmpty {
                                 Text("𝕏 CREATORS")
@@ -902,27 +1221,41 @@ struct GoonedFollowsView: View {
 
                                 ForEach(store.data.followedXUsers, id: \.self) { handle in
                                     HStack {
-                                        Button {
-                                            onSelectFeed(.xUser(handle))
-                                        } label: {
+                                        Button { onSelectFeed(.xUser(handle)) } label: {
                                             HStack(spacing: 10) {
-                                                Circle()
-                                                    .fill(Color.black.opacity(0.55))
-                                                    .frame(width: 36, height: 36)
+                                                Circle().fill(Color.black.opacity(0.55)).frame(width: 36, height: 36)
                                                     .overlay(Text("𝕏").font(.system(size: 13, weight: .black)))
-                                                Text("@\(handle)")
-                                                    .font(.system(size: 16, weight: .bold))
+                                                Text("@\(handle)").font(.system(size: 16, weight: .bold))
                                                 Spacer()
                                             }
                                         }
-                                        Button {
-                                            store.toggleFollowXUser(handle)
-                                        } label: {
-                                            Text("Unfollow")
-                                                .font(.caption.bold())
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 6)
-                                                .liquidGlassCapsule()
+                                        Button { store.toggleFollowXUser(handle) } label: {
+                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
+                                        }
+                                    }
+                                    .padding(12)
+                                    .liquidGlassCard(cornerRadius: 16)
+                                }
+                            }
+
+                            if !store.data.followedIGUsers.isEmpty {
+                                Text("INSTAGRAM CREATORS")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.6))
+                                    .padding(.horizontal, 4)
+
+                                ForEach(store.data.followedIGUsers, id: \.self) { handle in
+                                    HStack {
+                                        Button { onSelectFeed(.igUser(handle)) } label: {
+                                            HStack(spacing: 10) {
+                                                Circle().fill(Theme.accent.opacity(0.55)).frame(width: 36, height: 36)
+                                                    .overlay(Image(systemName: "camera.fill").font(.system(size: 12, weight: .bold)))
+                                                Text("IG @\(handle)").font(.system(size: 16, weight: .bold))
+                                                Spacer()
+                                            }
+                                        }
+                                        Button { store.toggleFollowIGUser(handle) } label: {
+                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
                                         }
                                     }
                                     .padding(12)
@@ -938,27 +1271,16 @@ struct GoonedFollowsView: View {
 
                                 ForEach(store.data.followedSubreddits, id: \.self) { sub in
                                     HStack {
-                                        Button {
-                                            onSelectFeed(.subreddit(sub))
-                                        } label: {
+                                        Button { onSelectFeed(.subreddit(sub)) } label: {
                                             HStack(spacing: 10) {
-                                                Circle()
-                                                    .fill(Theme.accent.opacity(0.5))
-                                                    .frame(width: 36, height: 36)
+                                                Circle().fill(Theme.accent.opacity(0.5)).frame(width: 36, height: 36)
                                                     .overlay(Text("r/").font(.system(size: 12, weight: .black)))
-                                                Text("r/\(sub)")
-                                                    .font(.system(size: 16, weight: .bold))
+                                                Text("r/\(sub)").font(.system(size: 16, weight: .bold))
                                                 Spacer()
                                             }
                                         }
-                                        Button {
-                                            store.toggleFollowSubreddit(sub)
-                                        } label: {
-                                            Text("Unfollow")
-                                                .font(.caption.bold())
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 6)
-                                                .liquidGlassCapsule()
+                                        Button { store.toggleFollowSubreddit(sub) } label: {
+                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
                                         }
                                     }
                                     .padding(12)
@@ -975,27 +1297,16 @@ struct GoonedFollowsView: View {
 
                                 ForEach(store.data.followedUsers, id: \.self) { u in
                                     HStack {
-                                        Button {
-                                            onSelectFeed(.user(u))
-                                        } label: {
+                                        Button { onSelectFeed(.user(u)) } label: {
                                             HStack(spacing: 10) {
-                                                Circle()
-                                                    .fill(Color.white.opacity(0.18))
-                                                    .frame(width: 36, height: 36)
+                                                Circle().fill(Color.white.opacity(0.18)).frame(width: 36, height: 36)
                                                     .overlay(Text("u/").font(.system(size: 12, weight: .black)))
-                                                Text("u/\(u)")
-                                                    .font(.system(size: 16, weight: .bold))
+                                                Text("u/\(u)").font(.system(size: 16, weight: .bold))
                                                 Spacer()
                                             }
                                         }
-                                        Button {
-                                            store.toggleFollowUser(u)
-                                        } label: {
-                                            Text("Unfollow")
-                                                .font(.caption.bold())
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 6)
-                                                .liquidGlassCapsule()
+                                        Button { store.toggleFollowUser(u) } label: {
+                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
                                         }
                                     }
                                     .padding(12)
@@ -1013,13 +1324,16 @@ struct GoonedFollowsView: View {
     }
 }
 
-// MARK: - 4. Settings Modal (Screenshot 4 Exact Clone + Personal X Account Section)
+// MARK: - 4. Settings Modal (X, Instagram, Rule34, Offline Vault, Autoplay, Video Fit, Appearance, Security)
 
 struct GoonedSettingsModal: View {
     @Binding var isPresented: Bool
     var onConnectX: () -> Void
+    var onConnectIG: () -> Void
+    var onSetupR34Key: () -> Void
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
+    @ObservedObject private var offline = OfflineManager.shared
     @State private var changingPasscode = false
     @State private var confirmErase = false
 
@@ -1032,7 +1346,6 @@ struct GoonedSettingsModal: View {
                 .onTapGesture { isPresented = false }
 
             VStack(spacing: 0) {
-                // Header: Settings + X Circle
                 HStack {
                     Text("Settings")
                         .font(.system(size: 22, weight: .bold))
@@ -1055,66 +1368,129 @@ struct GoonedSettingsModal: View {
 
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 18) {
-                        // X.COM PERSONAL ACCOUNT
-                        sectionHeader("𝕏 (TWITTER) ACCOUNT")
+                        // CONNECTED ACCOUNTS (X, INSTAGRAM, RULE34)
+                        sectionHeader("CONNECTED ACCOUNTS")
 
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            // X.com
                             HStack(spacing: 12) {
                                 ZStack {
-                                    Circle()
-                                        .fill(Color.black.opacity(0.6))
-                                        .frame(width: 40, height: 40)
+                                    Circle().fill(Color.black.opacity(0.6)).frame(width: 38, height: 38)
                                         .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
-                                    Text("𝕏")
-                                        .font(.system(size: 18, weight: .black))
+                                    Text("𝕏").font(.system(size: 17, weight: .black))
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    if store.data.xSession.isConnected {
-                                        let sn = store.data.xSession.screenName
-                                        Text(sn.isEmpty ? "Personal X Connected" : "Connected as @\(sn)")
-                                            .font(.system(size: 16, weight: .bold))
-                                        Text("Your personal X feed, search & bookmarks are active.")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.white.opacity(0.68))
-                                    } else {
-                                        Text("Connect Personal X")
-                                            .font(.system(size: 16, weight: .bold))
-                                        Text("Sign in to stream your X For You, Following & 18+ videos.")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.white.opacity(0.68))
-                                    }
+                                    let sn = store.data.xSession.screenName
+                                    Text(store.data.xSession.isConnected ? (sn.isEmpty ? "Personal X Connected" : "𝕏 @\(sn)") : "Personal X.com")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text(store.data.xSession.isConnected ? "For You, Following & Bookmarks active" : "Sign in to stream 18+ X videos")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
                                 }
                                 Spacer()
+                                Button {
+                                    if store.data.xSession.isConnected {
+                                        store.disconnectX()
+                                    } else {
+                                        onConnectX()
+                                    }
+                                } label: {
+                                    Text(store.data.xSession.isConnected ? "Disconnect" : "Connect")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule(active: !store.data.xSession.isConnected)
+                                }
                             }
 
                             if store.data.xSession.isConnected {
-                                Divider().overlay(Color.white.opacity(0.14))
-
-                                HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text("Mix 𝕏 into For You")
-                                            .font(.system(size: 15, weight: .bold))
-                                        Text("Blend videos from your X timeline into the main For You feed.")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.white.opacity(0.68))
-                                    }
+                                HStack {
+                                    Text("Mix 𝕏 into For You")
+                                        .font(.system(size: 14, weight: .semibold))
                                     Spacer()
                                     Toggle("", isOn: $store.data.xSession.mixIntoForYou)
                                         .labelsHidden()
                                         .tint(Theme.accent)
                                 }
+                            }
 
-                                HStack(spacing: 10) {
-                                    pillOption(title: "Reconnect 𝕏", active: false) {
-                                        onConnectX()
-                                    }
-                                    pillOption(title: "Disconnect", active: false) {
-                                        store.disconnectX()
-                                    }
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            // Instagram
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color(red: 0.98, green: 0.35, blue: 0.35),
+                                                    Color(red: 0.85, green: 0.18, blue: 0.56),
+                                                    Color(red: 0.55, green: 0.22, blue: 0.85)
+                                                ],
+                                                startPoint: .bottomLeading,
+                                                endPoint: .topTrailing
+                                            )
+                                        )
+                                        .frame(width: 38, height: 38)
+                                    Image(systemName: "camera.fill").font(.system(size: 14, weight: .bold))
                                 }
-                            } else {
-                                pillOption(title: "Sign in with Personal 𝕏", active: true) {
-                                    onConnectX()
+                                VStack(alignment: .leading, spacing: 2) {
+                                    let un = store.data.igSession.username
+                                    Text(store.data.igSession.isConnected ? (un.isEmpty ? "Instagram Connected" : "IG @\(un)") : "Personal Instagram")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text(store.data.igSession.isConnected ? "Reels, Following & Saved active" : "Sign in to stream your IG Reels")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                Button {
+                                    if store.data.igSession.isConnected {
+                                        store.disconnectIG()
+                                    } else {
+                                        onConnectIG()
+                                    }
+                                } label: {
+                                    Text(store.data.igSession.isConnected ? "Disconnect" : "Connect")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule(active: !store.data.igSession.isConnected)
+                                }
+                            }
+
+                            if store.data.igSession.isConnected {
+                                HStack {
+                                    Text("Mix IG Reels into For You")
+                                        .font(.system(size: 14, weight: .semibold))
+                                    Spacer()
+                                    Toggle("", isOn: $store.data.igSession.mixIntoForYou)
+                                        .labelsHidden()
+                                        .tint(Theme.accent)
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            // Rule34.xxx API Key
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle().fill(Color(red: 0.42, green: 0.72, blue: 0.40)).frame(width: 38, height: 38)
+                                    Text("34").font(.system(size: 14, weight: .black, design: .rounded)).foregroundStyle(.black)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Rule34.xxx DAPI Key")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text(store.data.r34Credentials.isConnected ? "Authenticated DAPI key active" : "Built-in Rule34 active · Add key for direct DAPI")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                Button(action: onSetupR34Key) {
+                                    Text(store.data.r34Credentials.isConnected ? "Edit Key" : "API Key")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule()
                                 }
                             }
                         }
@@ -1252,10 +1628,35 @@ struct GoonedSettingsModal: View {
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
 
-                        // VAULT SECURITY & ROTATION
-                        sectionHeader("ROTATION & SECURITY")
+                        // OFFLINE VAULT, ROTATION & SECURITY
+                        sectionHeader("OFFLINE VAULT & SECURITY")
 
                         VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Offline Vault Storage")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text("\(store.data.downloaded.count) saved offline · \(offline.totalDiskUsageString())")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                if !store.data.downloaded.isEmpty {
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                        offline.clearAllDownloads()
+                                    } label: {
+                                        Text("Clear Vault")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .liquidGlassCapsule()
+                                    }
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Feed Rotation History")

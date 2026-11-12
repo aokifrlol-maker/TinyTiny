@@ -34,7 +34,7 @@ struct AppSettings: Codable {
 
 struct RecentFeedEntry: Codable, Hashable, Identifiable {
     var id: String { "\(kind):\(name)" }
-    var kind: String // "foryou", "category", "subreddit", "user", "xforyou", "xuser", "xsearch"
+    var kind: String
     var name: String
     var displayTitle: String
     var swipedCount: Int
@@ -43,18 +43,23 @@ struct RecentFeedEntry: Codable, Hashable, Identifiable {
 
 struct UserData: Codable {
     var liked: [Gif] = []
+    var downloaded: [Gif] = []
     var followedSubreddits: [String] = []
     var followedUsers: [String] = []
     var followedXUsers: [String] = []
+    var followedIGUsers: [String] = []
     var recentFeeds: [RecentFeedEntry] = []
     var seenIDs: [String] = []
     var savedCursors: [String: String] = [:]
     var swipedTotal: Int = 0
     var settings = AppSettings()
     var xSession = XAccountSession()
+    var igSession = InstagramAccountSession()
+    var r34Credentials = Rule34Credentials()
 
     enum CodingKeys: String, CodingKey {
-        case liked, followedSubreddits, followedUsers, followedXUsers, recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession
+        case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers
+        case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, r34Credentials
     }
 
     init() {}
@@ -62,15 +67,19 @@ struct UserData: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         liked = (try? c.decode([Gif].self, forKey: .liked)) ?? []
+        downloaded = (try? c.decode([Gif].self, forKey: .downloaded)) ?? []
         followedSubreddits = (try? c.decode([String].self, forKey: .followedSubreddits)) ?? []
         followedUsers = (try? c.decode([String].self, forKey: .followedUsers)) ?? []
         followedXUsers = (try? c.decode([String].self, forKey: .followedXUsers)) ?? []
+        followedIGUsers = (try? c.decode([String].self, forKey: .followedIGUsers)) ?? []
         recentFeeds = (try? c.decode([RecentFeedEntry].self, forKey: .recentFeeds)) ?? []
         seenIDs = (try? c.decode([String].self, forKey: .seenIDs)) ?? []
         savedCursors = (try? c.decode([String: String].self, forKey: .savedCursors)) ?? [:]
         swipedTotal = (try? c.decode(Int.self, forKey: .swipedTotal)) ?? 0
         settings = (try? c.decode(AppSettings.self, forKey: .settings)) ?? AppSettings()
         xSession = (try? c.decode(XAccountSession.self, forKey: .xSession)) ?? XAccountSession()
+        igSession = (try? c.decode(InstagramAccountSession.self, forKey: .igSession)) ?? InstagramAccountSession()
+        r34Credentials = (try? c.decode(Rule34Credentials.self, forKey: .r34Credentials)) ?? Rule34Credentials()
     }
 }
 
@@ -169,7 +178,7 @@ final class UserStore: ObservableObject {
         saveNow()
     }
 
-    // MARK: - Likes (Stash)
+    // MARK: - Likes (Stash) & Offline Downloads
 
     func isLiked(_ g: Gif) -> Bool {
         data.liked.contains { $0.id == g.id }
@@ -187,7 +196,19 @@ final class UserStore: ObservableObject {
         if !isLiked(g) { toggleLike(g) }
     }
 
-    // MARK: - Follows (Subreddits, Reddit Creators & X Creators)
+    func recordDownload(_ g: Gif) {
+        if let i = data.downloaded.firstIndex(where: { $0.id == g.id }) {
+            data.downloaded[i] = g
+        } else {
+            data.downloaded.insert(g, at: 0)
+        }
+    }
+
+    func removeDownloadedRecord(_ g: Gif) {
+        data.downloaded.removeAll { $0.id == g.id }
+    }
+
+    // MARK: - Follows (Subreddits, Reddit Creators, X Creators & Instagram Creators)
 
     func isFollowingSubreddit(_ sub: String) -> Bool {
         data.followedSubreddits.contains { $0.caseInsensitiveCompare(sub) == .orderedSame }
@@ -234,9 +255,31 @@ final class UserStore: ObservableObject {
         }
     }
 
+    func isFollowingIGUser(_ handle: String) -> Bool {
+        let clean = handle.replacingOccurrences(of: "@", with: "")
+        return data.followedIGUsers.contains { $0.caseInsensitiveCompare(clean) == .orderedSame }
+    }
+
+    func toggleFollowIGUser(_ handle: String) {
+        let clean = handle
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "@", with: "")
+        guard !clean.isEmpty else { return }
+        if let i = data.followedIGUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
+            data.followedIGUsers.remove(at: i)
+        } else {
+            data.followedIGUsers.insert(clean, at: 0)
+        }
+    }
+
     func disconnectX() {
         data.xSession = XAccountSession()
         Task { await XWebEngine.shared.resetSession() }
+    }
+
+    func disconnectIG() {
+        data.igSession = InstagramAccountSession()
+        Task { await InstagramWebEngine.shared.resetSession() }
     }
 
     // MARK: - Pick Up Where You Left Off (Swipe Tracking)
@@ -261,8 +304,12 @@ final class UserStore: ObservableObject {
     func eraseAll() {
         saveTask?.cancel()
         seenSet.removeAll()
+        OfflineManager.shared.clearAllDownloads()
         data = UserData()
         try? FileManager.default.removeItem(at: Self.fileURL)
-        Task { await XWebEngine.shared.resetSession() }
+        Task {
+            await XWebEngine.shared.resetSession()
+            await InstagramWebEngine.shared.resetSession()
+        }
     }
 }
