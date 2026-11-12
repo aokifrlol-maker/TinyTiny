@@ -114,6 +114,7 @@ enum FeedSort: String, CaseIterable, Identifiable {
 final class FeedModel: ObservableObject {
     @Published var items: [Gif] = []
     @Published private(set) var isLoading = false
+    @Published private(set) var isSwitching = false
     @Published var errorText: String?
     @Published var source: FeedSource
     @Published var sort: FeedSort = .hot
@@ -123,6 +124,8 @@ final class FeedModel: ObservableObject {
     private var igMixAfterCursor: String? = nil
     private var hasMore = true
     private var ids = Set<String>()
+    private var activeLoadTask: Task<Void, Never>?
+    private var emptyPageStreak = 0
 
     init(source: FeedSource = .forYou, items: [Gif] = []) {
         self.source = source
@@ -136,6 +139,15 @@ final class FeedModel: ObservableObject {
         return hasMore
     }
 
+    private var isInfiniteSource: Bool {
+        switch source {
+        case .forYou, .following, .category, .rule34, .xForYou, .xFollowing, .igReels, .igFollowing:
+            return true
+        default:
+            return false
+        }
+    }
+
     private var cursorKey: String {
         let k = source.swipeKey
         return "\(k.kind):\(k.name.lowercased()):\(sort.rawValue)"
@@ -146,26 +158,42 @@ final class FeedModel: ObservableObject {
             Task { await refresh(rotateCursor: true) }
             return
         }
+        activeLoadTask?.cancel()
         source = newSource
+        emptyPageStreak = 0
         if !initialItems.isEmpty {
             items = initialItems
             ids = Set(initialItems.map(\.id))
             hasMore = false
+            isSwitching = false
             afterCursor = nil
             xMixAfterCursor = nil
             igMixAfterCursor = nil
             errorText = nil
         } else {
+            items = []
+            ids = []
+            hasMore = true
+            isSwitching = true
+            isLoading = false
+            errorText = nil
             afterCursor = UserStore.shared.savedCursor(for: cursorKey)
-            Task { await refresh(keepSavedCursor: true) }
+            activeLoadTask = Task {
+                await refresh(keepSavedCursor: true)
+            }
         }
     }
 
     func setSort(_ newSort: FeedSort) {
         guard sort != newSort else { return }
+        activeLoadTask?.cancel()
         sort = newSort
+        isSwitching = true
+        isLoading = false
         afterCursor = UserStore.shared.savedCursor(for: cursorKey)
-        Task { await refresh(keepSavedCursor: true) }
+        activeLoadTask = Task {
+            await refresh(keepSavedCursor: true)
+        }
     }
 
     func shuffleItems() {
@@ -179,7 +207,7 @@ final class FeedModel: ObservableObject {
     }
 
     func onItemAppear(_ g: Gif) {
-        if items.suffix(6).contains(where: { $0.id == g.id }) {
+        if items.suffix(10).contains(where: { $0.id == g.id }) {
             Task { await loadMore() }
         }
     }
@@ -187,9 +215,10 @@ final class FeedModel: ObservableObject {
     func refresh(keepSavedCursor: Bool = false, rotateCursor: Bool = false) async {
         items = []
         ids = []
+        emptyPageStreak = 0
         if rotateCursor {
             if case .forYou = source {
-                afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...4) * 50)
+                afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...6) * 25)
             } else if afterCursor == nil {
                 afterCursor = UserStore.shared.savedCursor(for: cursorKey)
             }
@@ -200,14 +229,18 @@ final class FeedModel: ObservableObject {
         igMixAfterCursor = nil
         hasMore = true
         errorText = nil
-        if case .list = source { hasMore = false; return }
+        if case .list = source { hasMore = false; isSwitching = false; return }
         await loadMore()
+        isSwitching = false
     }
 
     func loadMore() async {
         guard !isLoading, canLoadMore else { return }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            isSwitching = false
+        }
 
         let api = GoonedAPI.shared
         let store = UserStore.shared
@@ -216,23 +249,43 @@ final class FeedModel: ObservableObject {
             var fallbackSeen: [Gif] = []
             var attempts = 0
 
-            while collectedUnseen.count < 8 && attempts < 2 && hasMore {
+            while collectedUnseen.count < 10 && attempts < 3 && hasMore {
+                if Task.isCancelled { return }
                 attempts += 1
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
 
                 afterCursor = resp.after
                 store.setSavedCursor(resp.after, for: cursorKey)
 
-                if resp.posts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
-                    if attempts == 1 && store.savedCursor(for: cursorKey) != nil {
+                let playablePosts = resp.posts.filter { $0.hasPlayableMedia }
+
+                if playablePosts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
+                    if isInfiniteSource {
+                        // Rotate cursor so infinite feeds never hit a dead end
+                        if case .forYou = source {
+                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...8) * 25)
+                        } else if case .rule34 = source {
+                            let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
+                            afterCursor = "\(nextP)"
+                        } else {
+                            store.setSavedCursor(nil, for: cursorKey)
+                            afterCursor = nil
+                        }
+                        if source.isXFeed || source.isIGFeed {
+                            // Give WebView engine a short beat if it returned 0 on warm-up
+                            try? await Task.sleep(nanoseconds: 450_000_000)
+                        }
+                        continue
+                    } else if attempts == 1 && store.savedCursor(for: cursorKey) != nil {
                         store.setSavedCursor(nil, for: cursorKey)
                         afterCursor = nil
                         continue
+                    } else {
+                        hasMore = false
                     }
-                    hasMore = false
                 }
 
-                for post in resp.posts {
+                for post in playablePosts {
                     guard ids.insert(post.id).inserted else { continue }
                     if store.isSeen(post.id) {
                         fallbackSeen.append(post)
@@ -241,21 +294,68 @@ final class FeedModel: ObservableObject {
                     }
                 }
 
-                if source.isXFeed || source.isIGFeed { break }
-                if resp.after == nil || resp.after?.isEmpty == true { break }
+                // If everything on this page was already seen/in-feed, force cursor rotation on next attempt
+                if collectedUnseen.isEmpty && isInfiniteSource {
+                    if case .forYou = source {
+                        afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...10) * 25)
+                    } else if resp.after == nil || resp.after?.isEmpty == true {
+                        afterCursor = nil
+                    }
+                }
+
+                if (source.isXFeed || source.isIGFeed) && !playablePosts.isEmpty { break }
+                if resp.after == nil || resp.after?.isEmpty == true {
+                    if !isInfiniteSource { break }
+                }
             }
 
+            // Apply smart on-device algorithm on For You (or shuffle for discovery)
             switch source {
-            case .forYou, .category, .rule34:
+            case .forYou:
+                collectedUnseen = store.rankWithAlgorithm(collectedUnseen)
+            case .category, .rule34:
                 collectedUnseen.shuffle()
             default:
                 break
             }
 
             if !collectedUnseen.isEmpty {
+                emptyPageStreak = 0
                 items.append(contentsOf: collectedUnseen)
-            } else if items.isEmpty && !fallbackSeen.isEmpty {
+            } else if !fallbackSeen.isEmpty {
+                emptyPageStreak = 0
                 items.append(contentsOf: fallbackSeen.shuffled())
+            } else {
+                emptyPageStreak += 1
+                if !isInfiniteSource && emptyPageStreak >= 2 {
+                    hasMore = false
+                }
+            }
+
+            // Algorithm Taste Boost: when enabled on For You, pull a small fresh batch from top-liked subreddit
+            if case .forYou = source,
+               store.data.settings.algorithmEnabled,
+               let favSub = store.topAlgorithmSubreddits.randomElement() {
+                Task { @MainActor [weak self] in
+                    guard let self, case .forYou = self.source else { return }
+                    if let subResp = try? await api.subreddit(favSub, sort: self.sort.rawValue, after: nil, limit: 8) {
+                        let freshFavs = subResp.posts.filter {
+                            $0.hasPlayableMedia && !store.isSeen($0.id) && self.ids.insert($0.id).inserted
+                        }
+                        guard !freshFavs.isEmpty else { return }
+                        var combined = self.items
+                        var idx = max(2, combined.count - 6)
+                        for p in freshFavs.prefix(3) {
+                            if idx <= combined.count {
+                                combined.insert(p, at: idx)
+                                idx += 3
+                            } else {
+                                combined.append(p)
+                            }
+                        }
+                        self.items = combined
+                    }
+                }
             }
 
             // Blend X For You if enabled

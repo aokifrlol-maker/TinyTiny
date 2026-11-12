@@ -33,14 +33,27 @@ actor Rule34API {
         return URLSession(configuration: cfg)
     }()
 
+    /// Parses user search into Rule34 tags: spaces start a NEW tag, underscores keep a multi-word tag together.
+    /// e.g. "Hentai Femboy" -> ["hentai", "femboy"], "Hentai_Femboy" -> ["hentai_femboy"]
+    nonisolated static func parseTags(_ raw: String) -> [String] {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map {
+                String($0)
+                    .replacingOccurrences(of: "#", with: "")
+                    .replacingOccurrences(of: "r34:", with: "", options: .caseInsensitive)
+                    .lowercased()
+            }
+            .filter { !$0.isEmpty }
+    }
+
     /// Live tag autocomplete from `https://api.rule34.xxx/autocomplete.php?q=...` (works without authentication).
+    /// Only autocompletes the active (last) tag being typed so multi-tag queries ("hentai fem...") work naturally!
     func autocomplete(_ rawQuery: String) async -> [Rule34TagSuggestion] {
-        let clean = rawQuery
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
-            .lowercased()
-        guard !clean.isEmpty,
-              let encoded = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+        let tags = Self.parseTags(rawQuery)
+        let activeWord = tags.last ?? ""
+        guard !activeWord.isEmpty,
+              let encoded = activeWord.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://api.rule34.xxx/autocomplete.php?q=\(encoded)") else {
             return []
         }
@@ -52,7 +65,7 @@ actor Rule34API {
         }
     }
 
-    /// Fetches Rule34 videos & high-res posts for a tag (or general Rule34 feed if `tag` is nil/empty).
+    /// Fetches Rule34 videos & high-res posts for a tag query (space-separated tags = AND; underscores = single tag).
     func fetchFeed(
         tag: String?,
         sort: String,
@@ -60,9 +73,8 @@ actor Rule34API {
         credentials: Rule34Credentials
     ) async -> GoonedFeedResponse {
         let page = Int(after ?? "0") ?? 0
-        let cleanTag = (tag ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
+        let tags = Self.parseTags(tag ?? "")
+        let cleanTagString = tags.joined(separator: " ")
 
         var combined: [Gif] = []
         var seen = Set<String>()
@@ -70,7 +82,7 @@ actor Rule34API {
         // 1. Direct api.rule34.xxx JSON API (if user connected their rule34.xxx user_id + api_key)
         if credentials.isConnected {
             let directPosts = await fetchDirectRule34XXX(
-                tag: cleanTag,
+                tag: cleanTagString,
                 sort: sort,
                 page: page,
                 credentials: credentials
@@ -82,8 +94,9 @@ actor Rule34API {
 
         // 2. Always-on Zero-Auth Engine (Gooned R34/Hentai network + Booru JSON APIs) so Rule34 works 100% out of the box
         if combined.count < 12 {
-            async let goonedR34Task = fetchGoonedRule34(tag: cleanTag, sort: sort, page: page)
-            async let booruTask = fetchZeroAuthBooru(tag: cleanTag, sort: sort, page: page)
+            let primaryTag = tags.first ?? ""
+            async let goonedR34Task = fetchGoonedRule34(tags: tags, sort: sort, page: page)
+            async let booruTask = fetchZeroAuthBooru(tag: cleanTagString.isEmpty ? primaryTag : cleanTagString, sort: sort, page: page)
 
             let (goonedPosts, booruPosts) = await (goonedR34Task, booruTask)
             for p in goonedPosts where seen.insert(p.id).inserted {
@@ -94,8 +107,7 @@ actor Rule34API {
             }
         }
 
-        let nextCursor = combined.isEmpty ? nil : "\(page + 1)"
-        return GoonedFeedResponse(posts: combined, after: nextCursor)
+        return GoonedFeedResponse(posts: combined, after: "\(page + 1)")
     }
 
     // MARK: - Tier 1: Direct `api.rule34.xxx`
@@ -137,11 +149,11 @@ actor Rule34API {
 
     // MARK: - Tier 2A: Gooned Rule34 / Hentai Subreddit Network
 
-    private func fetchGoonedRule34(tag: String, sort: String, page: Int) async -> [Gif] {
+    private func fetchGoonedRule34(tags: [String], sort: String, page: Int) async -> [Gif] {
         let api = GoonedAPI.shared
         let offsetCursor = page == 0 ? nil : GoonedAPI.randomForYouCursor(offset: page * 25)
 
-        if tag.isEmpty {
+        if tags.isEmpty {
             let catName = (page % 2 == 0) ? "Rule34" : "Hentai"
             if let resp = try? await api.category(catName, sort: sort, after: offsetCursor, limit: 25) {
                 return resp.posts.map { markAsRule34($0, tag: "rule34") }
@@ -149,13 +161,14 @@ actor Rule34API {
             return []
         }
 
-        // Search matching subreddits on gooned.app for the tag (e.g. "overwatch" -> "Overwatch_Porn", "rule34", etc.)
-        let cleanSub = tag.replacingOccurrences(of: "_", with: "")
+        // Search matching subreddits on gooned.app for each tag (e.g. "hentai femboy" -> searches both!)
         var targetSubs: [String] = []
-
-        if let searchResp = try? await api.search(cleanSub) {
-            for s in searchResp.subreddits.prefix(3) {
-                targetSubs.append(s.name)
+        for tag in tags.prefix(3) {
+            let cleanSub = tag.replacingOccurrences(of: "_", with: "")
+            if let searchResp = try? await api.search(cleanSub) {
+                for s in searchResp.subreddits.prefix(2) where !targetSubs.contains(s.name) {
+                    targetSubs.append(s.name)
+                }
             }
         }
         if targetSubs.isEmpty {
@@ -163,8 +176,8 @@ actor Rule34API {
         }
 
         let chosenSub = targetSubs[page % max(1, targetSubs.count)]
-        if let resp = try? await api.subreddit(chosenSub, sort: sort, after: nil, limit: 25) {
-            return resp.posts.map { markAsRule34($0, tag: tag) }
+        if let resp = try? await api.subreddit(chosenSub, sort: sort, after: offsetCursor, limit: 25) {
+            return resp.posts.map { markAsRule34($0, tag: tags.joined(separator: " ")) }
         }
         return []
     }
@@ -457,3 +470,4 @@ struct Rule34AccountWebView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
+

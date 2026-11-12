@@ -45,7 +45,153 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 }
 
-// MARK: - Lightweight Next-Video Preloader
+// MARK: - Source-Aware HTTP Headers & Fast Cached Image/Video Preloaders
+
+enum MediaHeaders {
+    static func headers(for url: URL) -> [String: String] {
+        let host = url.host?.lowercased() ?? ""
+        var h: [String: String] = ["User-Agent": Config.userAgent]
+        if host.contains("redgifs.com") {
+            h["Referer"] = "https://www.redgifs.com/"
+        } else if host.contains("rule34") || host.contains("yande.re") || host.contains("hypnohub") || host.contains("gelbooru") {
+            h["Referer"] = "https://rule34.xxx/"
+        } else if host.contains("twimg.com") || host.contains("x.com") || host.contains("twitter.com") {
+            h["Referer"] = "https://x.com/"
+        } else if host.contains("cdninstagram.com") || host.contains("fbcdn.net") || host.contains("instagram.com") {
+            h["Referer"] = "https://www.instagram.com/"
+        } else {
+            h["Referer"] = Config.referer
+        }
+        return h
+    }
+}
+
+@MainActor
+final class MediaImageLoader {
+    static let shared = MediaImageLoader()
+    private let cache = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 14
+        cfg.urlCache = URLCache.shared
+        return URLSession(configuration: cfg)
+    }()
+
+    init() {
+        cache.countLimit = 180
+        cache.totalCostLimit = 96 * 1024 * 1024
+    }
+
+    func cached(_ url: URL) -> UIImage? {
+        cache.object(forKey: url.absoluteString as NSString)
+    }
+
+    func load(_ url: URL) async -> UIImage? {
+        if url.isFileURL {
+            if let img = cached(url) { return img }
+            if let data = try? Data(contentsOf: url), let img = UIImage(data: data) {
+                cache.setObject(img, forKey: url.absoluteString as NSString)
+                return img
+            }
+            return nil
+        }
+        let key = url.absoluteString
+        if let existing = cache.object(forKey: key as NSString) { return existing }
+        if let task = inFlight[key] { return await task.value }
+
+        let task = Task<UIImage?, Never> {
+            var req = URLRequest(url: url)
+            for (k, v) in MediaHeaders.headers(for: url) {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+            guard let (data, resp) = try? await session.data(for: req),
+                  (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
+                  let img = UIImage(data: data) else {
+                return nil
+            }
+            cache.setObject(img, forKey: key as NSString, cost: data.count)
+            return img
+        }
+        inFlight[key] = task
+        let img = await task.value
+        inFlight.removeValue(forKey: key)
+        return img
+    }
+
+    func prefetch(urls: [URL?]) {
+        for u in urls.compactMap({ $0 }) where cached(u) == nil {
+            Task.detached(priority: .utility) { _ = await MediaImageLoader.shared.load(u) }
+        }
+    }
+}
+
+struct RemoteImageView: View {
+    let url: URL?
+    var fill: Bool = false
+    var showSpinnerOnLoad: Bool = true
+    var onFailed: (() -> Void)? = nil
+
+    @State private var image: UIImage?
+    @State private var didFail = false
+    @State private var reloadToken = 0
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: fill ? .fill : .fit)
+            } else if didFail {
+                VStack(spacing: 10) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.white.opacity(0.45))
+                    Button {
+                        didFail = false
+                        reloadToken += 1
+                    } label: {
+                        Text("Tap to retry")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .liquidGlassCapsule(tinted: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
+            } else {
+                ZStack {
+                    Color.black
+                    if showSpinnerOnLoad {
+                        ProgressView()
+                            .tint(Theme.accent.opacity(0.8))
+                    }
+                }
+            }
+        }
+        .task(id: "\(url?.absoluteString ?? "nil")_\(reloadToken)") {
+            guard let url else {
+                didFail = true
+                onFailed?()
+                return
+            }
+            if let cached = MediaImageLoader.shared.cached(url) {
+                image = cached
+                didFail = false
+                return
+            }
+            if let loaded = await MediaImageLoader.shared.load(url) {
+                image = loaded
+                didFail = false
+            } else {
+                didFail = true
+                onFailed?()
+            }
+        }
+    }
+}
 
 @MainActor
 final class VideoPreloader {
@@ -54,7 +200,8 @@ final class VideoPreloader {
     private var order: [String] = []
 
     func preload(gifs: [Gif], hd: Bool) {
-        for gif in gifs.prefix(2) {
+        MediaImageLoader.shared.prefetch(urls: gifs.prefix(3).map(\.posterURL))
+        for gif in gifs.prefix(3) {
             guard !gif.isImage, let url = gif.videoURL(hd: hd) else { continue }
             let key = url.absoluteString
             guard cachedAssets[key] == nil else { continue }
@@ -64,12 +211,12 @@ final class VideoPreloader {
             } else {
                 asset = AVURLAsset(
                     url: url,
-                    options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
+                    options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url)]
                 )
             }
             cachedAssets[key] = asset
             order.append(key)
-            if order.count > 8, let oldest = order.first {
+            if order.count > 10, let oldest = order.first {
                 order.removeFirst()
                 cachedAssets.removeValue(forKey: oldest)
             }
@@ -88,12 +235,12 @@ final class VideoPreloader {
         }
         return AVURLAsset(
             url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
+            options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url)]
         )
     }
 }
 
-// MARK: - Resilient PlayerModel (Auto-Fallback URLs + Real Aspect Detection + Scrubbing)
+// MARK: - Resilient PlayerModel (Auto-Fallback URLs + Buffering/Failure Recovery + Scrubbing)
 
 @MainActor
 final class PlayerModel: ObservableObject {
@@ -103,6 +250,8 @@ final class PlayerModel: ObservableObject {
     @Published var durationSeconds: Double = 0
     @Published var is2xSpeed: Bool = false
     @Published var detectedAspect: Double? = nil
+    @Published var isReady: Bool = false
+    @Published var allFailed: Bool = false
 
     private var looper: AVPlayerLooper?
     private var timeObserver: Any?
@@ -116,6 +265,8 @@ final class PlayerModel: ObservableObject {
     func prepare(urls: [URL]) {
         guard !prepared, !urls.isEmpty else { return }
         prepared = true
+        allFailed = false
+        isReady = false
         candidateURLs = urls
         currentURLIndex = 0
         loadCandidate(at: 0)
@@ -139,8 +290,18 @@ final class PlayerModel: ObservableObject {
         }
     }
 
+    func retry() {
+        let urls = candidateURLs
+        teardown()
+        prepare(urls: urls)
+        play()
+    }
+
     private func loadCandidate(at index: Int) {
-        guard index < candidateURLs.count else { return }
+        guard index < candidateURLs.count else {
+            allFailed = true
+            return
+        }
         let url = candidateURLs[index]
         let asset = VideoPreloader.shared.asset(for: url)
         let item = AVPlayerItem(asset: asset)
@@ -154,16 +315,27 @@ final class PlayerModel: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 else { return }
                 self.detectedAspect = Double(sz.width / sz.height)
+                self.isReady = true
             }
         }
 
         statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if p.currentItem?.status == .failed, self.currentURLIndex + 1 < self.candidateURLs.count {
-                    self.currentURLIndex += 1
-                    self.loadCandidate(at: self.currentURLIndex)
-                    self.player.play()
+                switch p.currentItem?.status {
+                case .readyToPlay:
+                    self.isReady = true
+                    self.allFailed = false
+                case .failed:
+                    if self.currentURLIndex + 1 < self.candidateURLs.count {
+                        self.currentURLIndex += 1
+                        self.loadCandidate(at: self.currentURLIndex)
+                        self.player.play()
+                    } else {
+                        self.allFailed = true
+                    }
+                default:
+                    break
                 }
             }
         }
@@ -212,6 +384,8 @@ final class PlayerModel: ObservableObject {
     func teardown() {
         player.pause()
         is2xSpeed = false
+        isReady = false
+        allFailed = false
         onClipEnded = nil
         statusObservation?.invalidate()
         statusObservation = nil
@@ -246,6 +420,7 @@ struct FeedView: View {
     @EnvironmentObject var store: UserStore
     @State private var onScreen = false
     @State private var autoScrollTask: Task<Void, Never>?
+    @State private var currentItemShownAt: Date = Date()
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -314,8 +489,15 @@ struct FeedView: View {
         .onChange(of: store.data.settings.autoScrollDelay) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: store.data.settings.playVideosToEnd) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: currentID) { old, new in
-            if let old { store.markSeen(old) }
+            if let old {
+                store.markSeen(old)
+                if let oldPost = model.items.first(where: { $0.id == old }) {
+                    let dwell = Date().timeIntervalSince(currentItemShownAt)
+                    store.recordDwellSignal(for: oldPost, secondsWatched: dwell)
+                }
+            }
             if let new {
+                currentItemShownAt = Date()
                 store.markSeen(new)
                 if old != nil {
                     let key = model.source.swipeKey
@@ -331,7 +513,7 @@ struct FeedView: View {
         guard let curID = currentID,
               let idx = model.items.firstIndex(where: { $0.id == curID }),
               idx + 1 < model.items.count else { return }
-        let upcoming = Array(model.items[(idx + 1)...].prefix(2))
+        let upcoming = Array(model.items[(idx + 1)...].prefix(3))
         VideoPreloader.shared.preload(gifs: upcoming, hd: store.data.settings.hd)
     }
 
@@ -449,7 +631,7 @@ struct FeedStateView: View {
                         .padding(.vertical, 11)
                         .liquidGlassCapsule(tinted: true, active: true)
                 }
-            } else if model.canLoadMore || model.isLoading {
+            } else if model.isSwitching || model.isLoading || model.canLoadMore {
                 ProgressView()
                     .tint(Theme.accent)
                     .controlSize(.large)
@@ -1148,34 +1330,45 @@ struct GoonedReelCell: View {
     @ViewBuilder
     private func mediaView(_ size: CGSize) -> some View {
         if gif.isImage {
-            AsyncImage(url: gif.imageURL) { phase in
-                if let img = phase.image {
-                    img.resizable()
-                        .aspectRatio(contentMode: fill ? .fill : .fit)
-                        .frame(width: size.width, height: size.height)
-                } else {
-                    ShimmerPlaceholder()
-                }
-            }
-            .frame(width: size.width, height: size.height)
-            .clipped()
-        } else {
-            ZStack {
-                AsyncImage(url: gif.posterURL) { phase in
-                    if let img = phase.image {
-                        img.resizable()
-                            .aspectRatio(contentMode: fill ? .fill : .fit)
-                            .frame(width: size.width, height: size.height)
-                    } else {
-                        ShimmerPlaceholder()
-                    }
-                }
+            RemoteImageView(url: gif.imageURL, fill: fill, showSpinnerOnLoad: true)
                 .frame(width: size.width, height: size.height)
                 .clipped()
+        } else {
+            ZStack {
+                Color.black
+
+                if let poster = gif.posterURL {
+                    RemoteImageView(url: poster, fill: fill, showSpinnerOnLoad: false)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                }
 
                 PlayerLayerView(player: player.player, fill: fill)
                     .frame(width: size.width, height: size.height)
                     .clipped()
+                    .opacity(player.isReady ? 1 : 0)
+
+                if !player.isReady && !player.allFailed {
+                    ProgressView()
+                        .tint(Theme.accent.opacity(0.85))
+                        .controlSize(.regular)
+                } else if player.allFailed && gif.posterURL == nil {
+                    VStack(spacing: 10) {
+                        Image(systemName: "play.slash")
+                            .font(.system(size: 28, weight: .light))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Button {
+                            player.retry()
+                        } label: {
+                            Text("Tap to retry")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.85))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .liquidGlassCapsule(tinted: true)
+                        }
+                    }
+                }
             }
             .frame(width: size.width, height: size.height)
             .clipped()

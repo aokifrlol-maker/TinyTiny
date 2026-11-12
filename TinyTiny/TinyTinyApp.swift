@@ -86,7 +86,7 @@ struct GoonedMainShell: View {
 
     var body: some View {
         ZStack {
-            // 1. Main Full-Screen Feed Scroller
+            // 1. Main Full-Screen Feed Scroller (with Horizontal Swipe between Following · For You · 𝕏 · R34 · IG)
             FeedView(
                 model: feedModel,
                 isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
@@ -119,6 +119,20 @@ struct GoonedMainShell: View {
                     pendingFeedAfterLogin = feedModel.source.isIGFeed ? feedModel.source : .igReels
                     showIGLoginSheet = true
                 }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 30)
+                    .onEnded { val in
+                        guard activeTab == .home,
+                              !showSettingsModal,
+                              !showXLoginSheet,
+                              !showIGLoginSheet,
+                              !showR34KeySheet else { return }
+                        let dx = val.translation.width
+                        let dy = val.translation.height
+                        guard abs(dx) > 55, abs(dx) > abs(dy) * 1.5 else { return }
+                        handleHorizontalFeedSwipe(dx: dx)
+                    }
             )
             .opacity(activeTab == .home ? 1 : 0)
             .allowsHitTesting(activeTab == .home)
@@ -313,216 +327,238 @@ struct GoonedMainShell: View {
         }
     }
 
-    // MARK: - Home Top Bar (`🔍` | `Following  For You  𝕏  IG  34` | `⚙️`)
+    private var homeChannelIndex: Int {
+        switch feedModel.source {
+        case .following: return 0
+        case .forYou: return 1
+        case .xForYou, .xFollowing, .xBookmarks, .xLikes: return 2
+        case .rule34: return 3
+        case .igReels, .igFollowing, .igSaved: return 4
+        default: return 1
+        }
+    }
+
+    private func handleHorizontalFeedSwipe(dx: CGFloat) {
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels]
+        let cur = homeChannelIndex
+        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG
+        // Swipe right (dx > 0) moves backward
+        let nextIdx = dx < 0 ? cur + 1 : cur - 1
+        guard channels.indices.contains(nextIdx) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let target = channels[nextIdx]
+        if target.isXFeed {
+            selectXFeedOrLogin(target)
+        } else if target.isIGFeed {
+            selectIGFeedOrLogin(target)
+        } else {
+            selectFeed(target)
+        }
+    }
+
+    // MARK: - Home Top Bar (`🔍` | `Following · For You · 𝕏 · R34 · IG` | `⚙️`)
 
     private var homeTopBar: some View {
-        HStack(spacing: 8) {
-            // Left: Search Circle Button
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                activeTab = .browse
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .liquidGlassCircle(tinted: tinted)
-            }
-            .buttonStyle(ScalePressButtonStyle())
-
-            Spacer(minLength: 4)
-
-            switch feedModel.source {
-            case .forYou, .following:
-                HStack(spacing: 12) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        selectFeed(.following)
-                    } label: {
-                        Text("Following")
-                            .font(.system(size: 15, weight: isFollowingFeed ? .bold : .medium))
-                            .foregroundStyle(isFollowingFeed ? .white : .white.opacity(0.62))
-                    }
-
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        if case .forYou = feedModel.source {
-                            currentPostID = nil
-                            Task { await feedModel.refresh(rotateCursor: true) }
-                        } else {
-                            selectFeed(.forYou)
-                        }
-                    } label: {
-                        Text("For You")
-                            .font(.system(size: 15, weight: !isFollowingFeed ? .bold : .medium))
-                            .foregroundStyle(!isFollowingFeed ? .white : .white.opacity(0.62))
-                    }
-
-                    // Quick Platform Pills: 𝕏, IG, R34
-                    HStack(spacing: 5) {
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectXFeedOrLogin(.xForYou)
-                        } label: {
-                            HStack(spacing: 3) {
-                                Text("𝕏")
-                                    .font(.system(size: 13, weight: .black))
-                                if store.data.xSession.isConnected {
-                                    Circle().fill(Theme.accentBright).frame(width: 4, height: 4)
-                                }
-                            }
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .liquidGlassCapsule(tinted: tinted)
-                        }
-
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectIGFeedOrLogin(.igReels)
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "camera.fill")
-                                    .font(.system(size: 11, weight: .bold))
-                                if store.data.igSession.isConnected {
-                                    Circle().fill(Theme.accentBright).frame(width: 4, height: 4)
-                                }
-                            }
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .liquidGlassCapsule(tinted: tinted)
-                        }
-
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectFeed(.rule34(""))
-                        } label: {
-                            Text("34")
-                                .font(.system(size: 12, weight: .black, design: .rounded))
-                                .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .liquidGlassCapsule(tinted: tinted)
-                        }
-                    }
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                // Left: Search Circle Button
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    activeTab = .browse
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .liquidGlassCircle(tinted: tinted)
                 }
-                .shadow(color: .black.opacity(0.5), radius: 4)
+                .buttonStyle(ScalePressButtonStyle())
+                .fixedSize()
 
-            case .xForYou, .xFollowing, .xBookmarks:
-                HStack(spacing: 10) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        selectFeed(.forYou)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
+                Spacer(minLength: 2)
 
-                    ForEach([
-                        (FeedSource.xForYou, "𝕏 For You"),
-                        (FeedSource.xFollowing, "Following"),
-                        (FeedSource.xBookmarks, "Saved")
-                    ], id: \.1) { src, title in
-                        let active = feedModel.source == src
+                if case .category = feedModel.source {
+                    customFeedTitlePill
+                } else if case .subreddit = feedModel.source {
+                    customFeedTitlePill
+                } else if case .user = feedModel.source {
+                    customFeedTitlePill
+                } else if case .xSearch = feedModel.source {
+                    customFeedTitlePill
+                } else if case .xUser = feedModel.source {
+                    customFeedTitlePill
+                } else if case .igUser = feedModel.source {
+                    customFeedTitlePill
+                } else if case .list = feedModel.source {
+                    customFeedTitlePill
+                } else if case .rule34(let t) = feedModel.source, !t.isEmpty {
+                    customFeedTitlePill
+                } else {
+                    HStack(spacing: 10) {
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            if active {
+                            selectFeed(.following)
+                        } label: {
+                            Text("Following")
+                                .font(.system(size: 13.5, weight: isFollowingFeed ? .bold : .medium))
+                                .foregroundStyle(isFollowingFeed ? .white : .white.opacity(0.60))
+                                .fixedSize()
+                        }
+
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            if case .forYou = feedModel.source {
                                 currentPostID = nil
                                 Task { await feedModel.refresh(rotateCursor: true) }
                             } else {
-                                selectXFeedOrLogin(src)
+                                selectFeed(.forYou)
                             }
                         } label: {
-                            Text(title)
-                                .font(.system(size: 14, weight: active ? .bold : .medium))
-                                .foregroundStyle(active ? .white : .white.opacity(0.62))
+                            let isForYou: Bool = {
+                                if case .forYou = feedModel.source { return true }
+                                return false
+                            }()
+                            Text("For You")
+                                .font(.system(size: 13.5, weight: isForYou ? .bold : .medium))
+                                .foregroundStyle(isForYou ? .white : .white.opacity(0.60))
+                                .fixedSize()
+                        }
+
+                        // Compact Brand Logos: 𝕏 · R34 · Instagram
+                        HStack(spacing: 6) {
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if feedModel.source.isXFeed {
+                                    currentPostID = nil
+                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                } else {
+                                    selectXFeedOrLogin(.xForYou)
+                                }
+                            } label: {
+                                BrandLogoX(active: feedModel.source.isXFeed, connected: store.data.xSession.isConnected)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if case .rule34 = feedModel.source {
+                                    currentPostID = nil
+                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                } else {
+                                    selectFeed(.rule34(""))
+                                }
+                            } label: {
+                                BrandLogoRule34(active: feedModel.source.isRule34Feed)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if feedModel.source.isIGFeed {
+                                    currentPostID = nil
+                                    Task { await feedModel.refresh(rotateCursor: true) }
+                                } else {
+                                    selectIGFeedOrLogin(.igReels)
+                                }
+                            } label: {
+                                BrandLogoInstagram(active: feedModel.source.isIGFeed, connected: store.data.igSession.isConnected)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+                        }
+                        .fixedSize()
+                    }
+                    .shadow(color: .black.opacity(0.55), radius: 4)
+                }
+
+                Spacer(minLength: 2)
+
+                // Right: Gear Settings Circle Button
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    showSettingsModal = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .liquidGlassCircle(tinted: tinted)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+                .fixedSize()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+
+            // Secondary sub-feed switcher when inside X or IG
+            if feedModel.source.isXFeed && (feedModel.source == .xForYou || feedModel.source == .xFollowing || feedModel.source == .xBookmarks) {
+                HStack(spacing: 12) {
+                    ForEach([
+                        (FeedSource.xForYou, "For You"),
+                        (FeedSource.xFollowing, "Following"),
+                        (FeedSource.xBookmarks, "Bookmarks")
+                    ], id: \.1) { src, label in
+                        let active = feedModel.source == src
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            selectXFeedOrLogin(src)
+                        } label: {
+                            Text(label)
+                                .font(.system(size: 12, weight: active ? .bold : .medium))
+                                .foregroundStyle(active ? .white : .white.opacity(0.6))
                         }
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+                .padding(.vertical, 5)
                 .liquidGlassCapsule(tinted: tinted)
-
-            case .igReels, .igFollowing, .igSaved:
-                HStack(spacing: 10) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        selectFeed(.forYou)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-
+            } else if feedModel.source.isIGFeed && (feedModel.source == .igReels || feedModel.source == .igFollowing || feedModel.source == .igSaved) {
+                HStack(spacing: 12) {
                     ForEach([
-                        (FeedSource.igReels, "IG Reels"),
+                        (FeedSource.igReels, "Reels"),
                         (FeedSource.igFollowing, "Following"),
                         (FeedSource.igSaved, "Saved")
-                    ], id: \.1) { src, title in
+                    ], id: \.1) { src, label in
                         let active = feedModel.source == src
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            if active {
-                                currentPostID = nil
-                                Task { await feedModel.refresh(rotateCursor: true) }
-                            } else {
-                                selectIGFeedOrLogin(src)
-                            }
+                            selectIGFeedOrLogin(src)
                         } label: {
-                            Text(title)
-                                .font(.system(size: 14, weight: active ? .bold : .medium))
-                                .foregroundStyle(active ? .white : .white.opacity(0.62))
+                            Text(label)
+                                .font(.system(size: 12, weight: active ? .bold : .medium))
+                                .foregroundStyle(active ? .white : .white.opacity(0.6))
                         }
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .liquidGlassCapsule(tinted: tinted)
-
-            default:
-                HStack(spacing: 8) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        selectFeed(.forYou)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.8))
-                    }
-
-                    Button {
-                        activeTab = .browse
-                    } label: {
-                        Text(feedModel.source.displayTitle)
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+                .padding(.vertical, 5)
                 .liquidGlassCapsule(tinted: tinted)
             }
+        }
+    }
 
-            Spacer(minLength: 4)
-
-            // Right: Gear Settings Circle Button
+    private var customFeedTitlePill: some View {
+        HStack(spacing: 8) {
             Button {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                showSettingsModal = true
+                selectFeed(.forYou)
             } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .liquidGlassCircle(tinted: tinted)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
             }
-            .buttonStyle(ScalePressButtonStyle())
+
+            Button {
+                activeTab = .browse
+            } label: {
+                Text(feedModel.source.displayTitle)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 14)
-        .padding(.top, 8)
+        .padding(.vertical, 7)
+        .liquidGlassCapsule(tinted: tinted)
     }
 
     // MARK: - Floating Liquid Glass Bottom Dock (`🏠` `🤍` `🧭` `👤`)
@@ -571,5 +607,116 @@ struct GoonedMainShell: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Compact Brand Logos for Top Bar
+
+struct BrandLogoX: View {
+    var active: Bool
+    var connected: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Circle()
+                .fill(active ? Color.white : Color.black.opacity(0.55))
+                .frame(width: 26, height: 26)
+                .overlay(
+                    Circle().stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.5 : 0.8)
+                )
+                .overlay(
+                    Text("𝕏")
+                        .font(.system(size: 13.5, weight: .black))
+                        .foregroundStyle(active ? Color.black : Color.white)
+                )
+
+            if connected {
+                Circle()
+                    .fill(Theme.accentBright)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color.black, lineWidth: 1))
+                    .offset(x: 1, y: -1)
+            }
+        }
+        .frame(width: 26, height: 26)
+    }
+}
+
+struct BrandLogoRule34: View {
+    var active: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Color(red: 0.69, green: 0.92, blue: 0.65), Color(red: 0.45, green: 0.77, blue: 0.42)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: 26, height: 26)
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.8 : 0.7)
+            )
+            .overlay(
+                Text("34")
+                    .font(.system(size: 12, weight: .black, design: .rounded))
+                    .foregroundStyle(Color(red: 0.06, green: 0.22, blue: 0.06))
+            )
+            .opacity(active ? 1.0 : 0.88)
+            .frame(width: 26, height: 26)
+    }
+}
+
+struct BrandLogoInstagram: View {
+    var active: Bool
+    var connected: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.99, green: 0.76, blue: 0.28),
+                            Color(red: 0.96, green: 0.27, blue: 0.34),
+                            Color(red: 0.76, green: 0.16, blue: 0.65),
+                            Color(red: 0.38, green: 0.24, blue: 0.88)
+                        ],
+                        startPoint: .bottomLeading,
+                        endPoint: .topTrailing
+                    )
+                )
+                .frame(width: 26, height: 26)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.8 : 0.7)
+                )
+                .overlay(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                            .stroke(Color.white, lineWidth: 1.5)
+                            .frame(width: 15, height: 15)
+                        Circle()
+                            .stroke(Color.white, lineWidth: 1.5)
+                            .frame(width: 7, height: 7)
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 2.2, height: 2.2)
+                            .offset(x: 4.4, y: -4.4)
+                    }
+                )
+
+            if connected {
+                Circle()
+                    .fill(Theme.accentBright)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color.black, lineWidth: 1))
+                    .offset(x: 1, y: -1)
+            }
+        }
+        .opacity(active ? 1.0 : 0.90)
+        .frame(width: 26, height: 26)
     }
 }

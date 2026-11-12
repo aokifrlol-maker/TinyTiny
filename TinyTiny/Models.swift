@@ -53,6 +53,36 @@ struct Gif: Codable, Identifiable, Hashable {
         return remoteOrLocalVideoURLs(hd: true).isEmpty
     }
 
+    var hasPlayableMedia: Bool {
+        !remoteOrLocalVideoURLs(hd: true).isEmpty || imageURL != nil
+    }
+
+    private static func isPlayableVideoURLString(_ s: String) -> Bool {
+        let lower = s.lowercased()
+        if lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".webp") || lower.hasSuffix(".gif") {
+            return false
+        }
+        if lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/") {
+            return false
+        }
+        if lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") {
+            return true
+        }
+        // Some CDN video URLs don't end in .mp4 (e.g. X/IG/Reddit v.redd.it without ext)
+        return lower.contains("video.twimg.com") || lower.contains("v.redd.it") || lower.contains("cdninstagram.com") || lower.contains("fbcdn.net")
+    }
+
+    private static func isRenderableImageURLString(_ s: String) -> Bool {
+        let lower = s.lowercased()
+        if lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") {
+            return false
+        }
+        if lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/") {
+            return false
+        }
+        return lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file://")
+    }
+
     /// Returns the actual width/height ratio only when real dimensions are known.
     var knownAspect: Double? {
         guard let w = width, let h = height, w > 0, h > 0 else { return nil }
@@ -68,16 +98,16 @@ struct Gif: Codable, Identifiable, Hashable {
         var urls: [URL] = []
         // 1. Prefer offline local file if downloaded!
         if let local = OfflineManager.localMediaURL(forId: id),
-           local.pathExtension.lowercased() != "jpg" && local.pathExtension.lowercased() != "png" {
+           !["jpg", "jpeg", "png", "webp", "gif"].contains(local.pathExtension.lowercased()) {
             urls.append(local)
         }
-        // 2. Remote stream candidates
+        // 2. Remote stream candidates (validated so .gif/.jpg/HTML never enter AVPlayer)
         let candidates: [String?] = hd
             ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
             : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
         var seen = Set<String>()
         for c in candidates {
-            if let s = c, !s.isEmpty, seen.insert(s).inserted, let u = URL(string: s) {
+            if let s = c, !s.isEmpty, Self.isPlayableVideoURLString(s), seen.insert(s).inserted, let u = URL(string: s) {
                 urls.append(u)
             }
         }
@@ -96,8 +126,8 @@ struct Gif: Codable, Identifiable, Hashable {
         if let local = OfflineManager.localMediaURL(forId: id) {
             return local
         }
-        for c in [mediaUrl, posterUrl, thumbnailUrl, sourceUrl] {
-            if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
+        for c in [mediaUrl, posterUrl, thumbnailUrl] {
+            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s), let u = URL(string: s) { return u }
         }
         return nil
     }
@@ -107,7 +137,7 @@ struct Gif: Codable, Identifiable, Hashable {
             return localThumb
         }
         for c in [posterUrl, thumbnailUrl, mediaUrl] {
-            if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
+            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s), let u = URL(string: s) { return u }
         }
         return nil
     }
@@ -117,7 +147,7 @@ struct Gif: Codable, Identifiable, Hashable {
             return localThumb
         }
         for c in [posterUrl, thumbnailUrl, mediaUrl] {
-            if let s = c, !s.isEmpty, let u = URL(string: s) { return u }
+            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s), let u = URL(string: s) { return u }
         }
         return nil
     }

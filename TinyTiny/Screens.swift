@@ -9,8 +9,17 @@ struct GoonedBrowseOverlay: View {
     var onConnectIG: () -> Void
     var onSetupR34Key: () -> Void
 
+    enum SearchScope: String, CaseIterable {
+        case all = "All"
+        case reddit = "Reddit"
+        case rule34 = "Rule34"
+        case x = "𝕏"
+        case ig = "IG"
+    }
+
     @EnvironmentObject var store: UserStore
     @State private var query = ""
+    @State private var searchScope: SearchScope = .all
     @State private var searchResults = GoonedSearchResponsePlaceholder()
     @State private var r34Suggestions: [Rule34TagSuggestion] = []
     @State private var isSearching = false
@@ -54,29 +63,14 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
 
-                        TextField("Search Reddit, 𝕏, IG, or Rule34 tags", text: $query)
+                        TextField("Search Reddit, 𝕏, IG, or Rule34 tags...", text: $query)
                             .font(.system(size: 16))
                             .foregroundStyle(.white)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .submitLabel(.search)
                             .onSubmit {
-                                let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !clean.isEmpty else { return }
-                                if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") {
-                                    let tag = clean
-                                        .replacingOccurrences(of: "r34:", with: "", options: .caseInsensitive)
-                                        .replacingOccurrences(of: "#", with: "")
-                                    onSelectFeed(.rule34(tag))
-                                } else if clean.lowercased().hasPrefix("ig:") {
-                                    onSelectFeed(.igUser(clean.replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
-                                } else if clean.hasPrefix("@") {
-                                    onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
-                                } else if let cat = matchingCategories.first {
-                                    onSelectFeed(.category(cat.name))
-                                } else {
-                                    onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "")))
-                                }
+                                submitSearch()
                             }
 
                         if !query.isEmpty {
@@ -101,6 +95,53 @@ struct GoonedBrowseOverlay: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
+
+                // Scope selector + Live Rule34 Multi-Tag Pills when typing
+                if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(SearchScope.allCases, id: \.self) { scope in
+                                    let active = searchScope == scope
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        searchScope = scope
+                                    } label: {
+                                        Text(scope.rawValue)
+                                            .font(.system(size: 12.5, weight: active ? .bold : .medium))
+                                            .foregroundStyle(active ? .white : .white.opacity(0.68))
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .liquidGlassCapsule(tinted: true, active: active)
+                                    }
+                                    .buttonStyle(ScalePressButtonStyle())
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+
+                        let parsedTags = Rule34API.parseTags(query)
+                        if (searchScope == .rule34 || searchScope == .all) && (!parsedTags.isEmpty && (parsedTags.count > 1 || query.contains("_") || query.hasPrefix("#"))) {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(parsedTags, id: \.self) { tag in
+                                        Text("#\(tag)")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .background(Color(red: 0.25, green: 0.45, blue: 0.25).opacity(0.45), in: Capsule())
+                                            .overlay(Capsule().stroke(Color(red: 0.67, green: 0.90, blue: 0.64).opacity(0.45), lineWidth: 0.8))
+                                    }
+                                    Text("Space = new tag · _ = combine")
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(.white.opacity(0.45))
+                                }
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+                }
 
                 ScrollView(.vertical, showsIndicators: false) {
                     if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -500,152 +541,221 @@ struct GoonedBrowseOverlay: View {
         .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 0.7))
     }
 
-    // MARK: - Live Search Results Content (Reddit, Rule34 Tags, X, Instagram)
+    // MARK: - Search Helpers & Scoped Live Results
+
+    private func submitSearch() {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        switch searchScope {
+        case .rule34:
+            onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
+        case .x:
+            if clean.hasPrefix("@") {
+                onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
+            } else {
+                onSelectFeed(.xSearch(clean))
+            }
+        case .ig:
+            onSelectFeed(.igUser(clean.replacingOccurrences(of: "@", with: "").replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
+        case .reddit:
+            onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "", options: .caseInsensitive).replacingOccurrences(of: " ", with: "")))
+        case .all:
+            if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") || clean.contains("_") {
+                onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
+            } else if clean.lowercased().hasPrefix("ig:") {
+                onSelectFeed(.igUser(clean.replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
+            } else if clean.hasPrefix("@") {
+                onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
+            } else if let cat = matchingCategories.first {
+                onSelectFeed(.category(cat.name))
+            } else if let firstSub = searchResults.subreddits.first {
+                onSelectFeed(.subreddit(firstSub.name))
+            } else {
+                onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "").replacingOccurrences(of: " ", with: "")))
+            }
+        }
+    }
+
+    private func completeRule34Tag(_ tagValue: String) {
+        var tags = Rule34API.parseTags(query)
+        if tags.isEmpty {
+            query = tagValue + " "
+        } else {
+            tags[tags.count - 1] = tagValue
+            query = tags.joined(separator: " ") + " "
+        }
+    }
 
     private var liveSearchResultsContent: some View {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "r/", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "u/", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "@", with: "")
+        let parsedR34Tags = Rule34API.parseTags(query)
+        let r34QueryString = parsedR34Tags.joined(separator: " ")
+        let showReddit = (searchScope == .all || searchScope == .reddit)
+        let showR34 = (searchScope == .all || searchScope == .rule34)
+        let showX = (searchScope == .all || searchScope == .x)
+        let showIG = (searchScope == .all || searchScope == .ig)
 
         return VStack(alignment: .leading, spacing: 14) {
             VStack(spacing: 8) {
-                Button {
-                    onSelectFeed(.subreddit(clean))
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "arrow.up.right.circle.fill")
-                            .font(.system(size: 22))
-                            .foregroundStyle(Theme.accentBright)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Open r/\(clean)")
-                                .font(.system(size: 15, weight: .bold))
-                            Text("Go directly to Reddit subreddit feed")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .padding(13)
-                    .liquidGlassCard(cornerRadius: 18)
-                }
-                .buttonStyle(ScalePressButtonStyle())
-
-                Button {
-                    onSelectFeed(.rule34(clean))
-                } label: {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            Circle()
-                                .fill(Color(red: 0.42, green: 0.72, blue: 0.40))
-                                .frame(width: 28, height: 28)
-                            Text("34")
-                                .font(.system(size: 12, weight: .black, design: .rounded))
-                                .foregroundStyle(.black)
-                        }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Search \"\(clean)\" on Rule34.xxx")
-                                .font(.system(size: 15, weight: .bold))
-                            Text("Stream Rule34 videos, GIFs & artwork for this tag")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .padding(13)
-                    .liquidGlassCard(cornerRadius: 18)
-                }
-                .buttonStyle(ScalePressButtonStyle())
-
-                Button {
-                    onSelectFeed(.xSearch(clean))
-                } label: {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            Circle().fill(Color.black.opacity(0.6)).frame(width: 28, height: 28)
-                            Text("𝕏").font(.system(size: 14, weight: .black))
-                        }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Search \"\(clean)\" Videos on 𝕏")
-                                .font(.system(size: 15, weight: .bold))
-                            Text("Stream 18+ video results from X.com")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .padding(13)
-                    .liquidGlassCard(cornerRadius: 18)
-                }
-                .buttonStyle(ScalePressButtonStyle())
-
-                HStack(spacing: 8) {
+                if showR34 && !r34QueryString.isEmpty {
                     Button {
-                        onSelectFeed(.xUser(clean))
+                        onSelectFeed(.rule34(r34QueryString))
                     } label: {
-                        HStack(spacing: 8) {
-                            Text("𝕏")
-                                .font(.system(size: 14, weight: .black))
-                            Text("@\(clean)")
-                                .font(.system(size: 14, weight: .bold))
-                                .lineLimit(1)
-                            Spacer()
-                        }
-                        .padding(12)
-                        .liquidGlassCard(cornerRadius: 16)
-                    }
-                    .buttonStyle(ScalePressButtonStyle())
-
-                    Button {
-                        onSelectFeed(.igUser(clean))
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "camera.fill")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("IG @\(clean)")
-                                .font(.system(size: 14, weight: .bold))
-                                .lineLimit(1)
-                            Spacer()
-                        }
-                        .padding(12)
-                        .liquidGlassCard(cornerRadius: 16)
-                    }
-                    .buttonStyle(ScalePressButtonStyle())
-                }
-            }
-
-            // Live Rule34 Autocomplete Tag Suggestions
-            if !r34Suggestions.isEmpty {
-                Text("RULE34.XXX TAGS")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
-                    .padding(.horizontal, 4)
-
-                ForEach(r34Suggestions.prefix(6)) { item in
-                    Button {
-                        onSelectFeed(.rule34(item.value))
-                    } label: {
-                        HStack {
-                            Text("#\(item.label)")
-                                .font(.system(size: 15, weight: .semibold))
+                        HStack(spacing: 12) {
+                            BrandLogoRule34(active: true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Rule34: \(parsedR34Tags.map { "#\($0)" }.joined(separator: " "))")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .lineLimit(1)
+                                Text(parsedR34Tags.count > 1 ? "Combined multi-tag search" : "Videos, GIFs & artwork")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .font(.caption.bold())
                                 .foregroundStyle(.white.opacity(0.5))
                         }
-                        .padding(12)
-                        .liquidGlassCard(cornerRadius: 14)
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
                     }
                     .buttonStyle(ScalePressButtonStyle())
+                }
+
+                if showReddit && !clean.isEmpty {
+                    let subClean = clean.replacingOccurrences(of: " ", with: "")
+                    Button {
+                        onSelectFeed(.subreddit(subClean))
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "arrow.up.right.circle.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(Theme.accentBright)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("r/\(subClean)")
+                                    .font(.system(size: 15, weight: .bold))
+                                Text("Open subreddit feed")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+
+                if showX && !clean.isEmpty {
+                    Button {
+                        onSelectFeed(.xSearch(clean))
+                    } label: {
+                        HStack(spacing: 12) {
+                            BrandLogoX(active: false, connected: store.data.xSession.isConnected)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Search \"\(clean)\" on 𝕏")
+                                    .font(.system(size: 15, weight: .bold))
+                                Text("18+ video posts")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+
+                if (showX || showIG) && !clean.isEmpty {
+                    let handleClean = clean.replacingOccurrences(of: " ", with: "")
+                    HStack(spacing: 8) {
+                        if showX {
+                            Button {
+                                onSelectFeed(.xUser(handleClean))
+                            } label: {
+                                HStack(spacing: 8) {
+                                    BrandLogoX(active: false, connected: false)
+                                    Text("@\(handleClean)")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                .padding(10)
+                                .liquidGlassCard(cornerRadius: 16)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+                        }
+
+                        if showIG {
+                            Button {
+                                onSelectFeed(.igUser(handleClean))
+                            } label: {
+                                HStack(spacing: 8) {
+                                    BrandLogoInstagram(active: false, connected: false)
+                                    Text("@\(handleClean)")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                .padding(10)
+                                .liquidGlassCard(cornerRadius: 16)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+                        }
+                    }
+                }
+            }
+
+            // Live Rule34 Autocomplete Tag Suggestions (Tap `+` to chain tags, or row to open!)
+            if showR34 && !r34Suggestions.isEmpty {
+                Text("RULE34 TAG SUGGESTIONS")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
+                    .padding(.horizontal, 4)
+
+                ForEach(r34Suggestions.prefix(7)) { item in
+                    HStack(spacing: 8) {
+                        Button {
+                            var tags = Rule34API.parseTags(query)
+                            if tags.isEmpty {
+                                onSelectFeed(.rule34(item.value))
+                            } else {
+                                tags[tags.count - 1] = item.value
+                                onSelectFeed(.rule34(tags.joined(separator: " ")))
+                            }
+                        } label: {
+                            HStack {
+                                Text("#\(item.label)")
+                                    .font(.system(size: 14.5, weight: .semibold))
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            completeRule34Tag(item.value)
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundStyle(Color(red: 0.67, green: 0.90, blue: 0.64))
+                        }
+                        .buttonStyle(ScalePressButtonStyle())
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .liquidGlassCard(cornerRadius: 14)
                 }
             }
 
@@ -1368,6 +1478,46 @@ struct GoonedSettingsModal: View {
 
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 18) {
+                        // FOR YOU ALGORITHM
+                        sectionHeader("FOR YOU ALGORITHM")
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Smart Personalization")
+                                        .font(.system(size: 16, weight: .bold))
+                                    Text(store.data.settings.algorithmEnabled ? store.topTasteSummary : "Off — showing unranked discovery feed")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                        .lineLimit(2)
+                                }
+                                Spacer()
+                                Toggle("", isOn: $store.data.settings.algorithmEnabled)
+                                    .labelsHidden()
+                                    .tint(Theme.accent)
+                            }
+
+                            if store.data.settings.algorithmEnabled && store.data.algorithm.totalSignals > 0 {
+                                Divider().overlay(Color.white.opacity(0.14))
+                                HStack {
+                                    Text("\(store.data.algorithm.totalSignals) signals learned on-device")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.white.opacity(0.55))
+                                    Spacer()
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        store.resetAlgorithm()
+                                    } label: {
+                                        Text("Reset Taste")
+                                            .font(.caption.bold())
+                                            .foregroundStyle(Theme.accentBright)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
                         // CONNECTED ACCOUNTS (X, INSTAGRAM, RULE34)
                         sectionHeader("CONNECTED ACCOUNTS")
 
