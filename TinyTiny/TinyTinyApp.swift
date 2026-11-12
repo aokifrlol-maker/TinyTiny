@@ -648,9 +648,9 @@ struct GoonedMainShell: View {
         return Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             if isSelected && tab == .home {
-                if case .forYou = feedModel.source {
-                    currentPostID = nil
-                    Task { await feedModel.refresh(rotateCursor: true) }
+                if activeChannel == .forYou {
+                    slotPostIDs[.forYou] = nil
+                    Task { await forYouModel.refresh(rotateCursor: true) }
                 } else {
                     selectFeed(.forYou)
                 }
