@@ -1,11 +1,28 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - Native AVPlayer Layer
+// MARK: - Native AVPlayer Layer (Properly Bounded & Clipped)
 
 final class PlayerUIView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        clipsToBounds = true
+        backgroundColor = .clear
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        playerLayer.frame = bounds
+    }
 }
 
 struct PlayerLayerView: UIViewRepresentable {
@@ -14,7 +31,6 @@ struct PlayerLayerView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PlayerUIView {
         let v = PlayerUIView()
-        v.backgroundColor = .clear
         v.playerLayer.player = player
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
         return v
@@ -22,39 +38,127 @@ struct PlayerLayerView: UIViewRepresentable {
 
     func updateUIView(_ v: PlayerUIView, context: Context) {
         if v.playerLayer.player !== player { v.playerLayer.player = player }
-        v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        let targetGravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+        if v.playerLayer.videoGravity != targetGravity {
+            v.playerLayer.videoGravity = targetGravity
+        }
     }
 }
+
+// MARK: - Lightweight Next-Video Preloader
+
+@MainActor
+final class VideoPreloader {
+    static let shared = VideoPreloader()
+    private var cachedAssets: [String: AVURLAsset] = [:]
+    private var order: [String] = []
+
+    func preload(gifs: [Gif], hd: Bool) {
+        for gif in gifs.prefix(2) {
+            guard !gif.isImage, let url = gif.videoURL(hd: hd) else { continue }
+            let key = url.absoluteString
+            guard cachedAssets[key] == nil else { continue }
+            let asset = AVURLAsset(
+                url: url,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
+            )
+            cachedAssets[key] = asset
+            order.append(key)
+            if order.count > 8, let oldest = order.first {
+                order.removeFirst()
+                cachedAssets.removeValue(forKey: oldest)
+            }
+            Task.detached(priority: .utility) {
+                _ = try? await asset.load(.isPlayable)
+            }
+        }
+    }
+
+    func asset(for url: URL) -> AVURLAsset {
+        if let existing = cachedAssets[url.absoluteString] {
+            return existing
+        }
+        return AVURLAsset(
+            url: url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]]
+        )
+    }
+}
+
+// MARK: - Resilient PlayerModel (Auto-Fallback URLs + Real Aspect Detection + Scrubbing)
 
 @MainActor
 final class PlayerModel: ObservableObject {
     let player = AVQueuePlayer()
     @Published var progress: Double = 0
+    @Published var currentSeconds: Double = 0
+    @Published var durationSeconds: Double = 0
     @Published var is2xSpeed: Bool = false
+    @Published var detectedAspect: Double? = nil
+
     private var looper: AVPlayerLooper?
     private var timeObserver: Any?
-    private var endObserver: NSObjectProtocol?
+    private var statusObservation: NSKeyValueObservation?
+    private var sizeObservation: NSKeyValueObservation?
+    private var candidateURLs: [URL] = []
+    private var currentURLIndex: Int = 0
     private var prepared = false
     var onClipEnded: (() -> Void)?
 
-    func prepare(url: URL) {
-        guard !prepared else { return }
+    func prepare(urls: [URL]) {
+        guard !prepared, !urls.isEmpty else { return }
         prepared = true
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": Config.userAgent]])
-        let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 4
-        looper = AVPlayerLooper(player: player, templateItem: item)
+        candidateURLs = urls
+        currentURLIndex = 0
+        loadCandidate(at: 0)
 
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.12, preferredTimescale: 600), queue: .main
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
-                guard let self, let d = self.player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
-                let ratio = min(max(time.seconds / d, 0), 1)
+                guard let self, let item = self.player.currentItem else { return }
+                let d = item.duration.seconds
+                guard d.isFinite, d > 0 else { return }
+                let cur = max(0, time.seconds)
+                let ratio = min(max(cur / d, 0), 1)
                 if ratio >= 0.97 && self.progress < 0.97 {
                     self.onClipEnded?()
                 }
+                self.currentSeconds = cur
+                self.durationSeconds = d
                 self.progress = ratio
+            }
+        }
+    }
+
+    private func loadCandidate(at index: Int) {
+        guard index < candidateURLs.count else { return }
+        let url = candidateURLs[index]
+        let asset = VideoPreloader.shared.asset(for: url)
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 5
+
+        looper?.disableLooping()
+        player.removeAllItems()
+        looper = AVPlayerLooper(player: player, templateItem: item)
+
+        // Observe real video track dimensions so we never crop landscape/square videos by mistake
+        sizeObservation = player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
+            MainActor.assumeIsolated {
+                guard let self, let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 else { return }
+                self.detectedAspect = Double(sz.width / sz.height)
+            }
+        }
+
+        // Observe playback failures and automatically fall back to secondary MP4/HLS URL
+        statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if p.currentItem?.status == .failed, self.currentURLIndex + 1 < self.candidateURLs.count {
+                    self.currentURLIndex += 1
+                    self.loadCandidate(at: self.currentURLIndex)
+                    self.player.play()
+                }
             }
         }
     }
@@ -88,17 +192,33 @@ final class PlayerModel: ObservableObject {
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    func seek(toProgress ratio: Double) {
+        guard let item = player.currentItem else { return }
+        let dur = item.duration.seconds
+        guard dur.isFinite, dur > 0 else { return }
+        let clamped = min(max(ratio, 0), 0.995)
+        let target = CMTime(seconds: dur * clamped, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        progress = clamped
+        currentSeconds = dur * clamped
+    }
+
     func teardown() {
         player.pause()
         is2xSpeed = false
         onClipEnded = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        sizeObservation?.invalidate()
+        sizeObservation = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
-        if let e = endObserver { NotificationCenter.default.removeObserver(e); endObserver = nil }
         looper?.disableLooping()
         looper = nil
         player.removeAllItems()
         prepared = false
         progress = 0
+        currentSeconds = 0
+        durationSeconds = 0
     }
 }
 
@@ -174,17 +294,33 @@ struct FeedView: View {
             if model.items.isEmpty { await model.loadMore() }
             fixCurrent()
         }
-        .onChange(of: model.items.count) { _, _ in fixCurrent() }
+        .onChange(of: model.items.count) { _, _ in
+            fixCurrent()
+            preloadUpcoming()
+        }
         .onChange(of: store.data.settings.autoScroll) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: store.data.settings.autoScrollDelay) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: store.data.settings.playVideosToEnd) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: currentID) { old, new in
-            if old != nil, new != nil {
-                let key = model.source.swipeKey
-                store.recordSwipe(kind: key.kind, name: key.name, displayTitle: model.source.displayTitle)
+            if let old { store.markSeen(old) }
+            if let new {
+                store.markSeen(new)
+                if old != nil {
+                    let key = model.source.swipeKey
+                    store.recordSwipe(kind: key.kind, name: key.name, displayTitle: model.source.displayTitle, postID: new)
+                }
             }
+            preloadUpcoming()
             scheduleAutoScrollTimer()
         }
+    }
+
+    private func preloadUpcoming() {
+        guard let curID = currentID,
+              let idx = model.items.firstIndex(where: { $0.id == curID }),
+              idx + 1 < model.items.count else { return }
+        let upcoming = Array(model.items[(idx + 1)...].prefix(2))
+        VideoPreloader.shared.preload(gifs: upcoming, hd: store.data.settings.hd)
     }
 
     private func scheduleAutoScrollTimer() {
@@ -211,7 +347,10 @@ struct FeedView: View {
 
     private func fixCurrent() {
         if currentID == nil || !model.items.contains(where: { $0.id == currentID }) {
-            currentID = model.items.first?.id
+            if let firstID = model.items.first?.id {
+                currentID = firstID
+                store.markSeen(firstID)
+            }
         }
     }
 }
@@ -257,7 +396,7 @@ struct FeedStateView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
                 Button {
-                    Task { await model.refresh() }
+                    Task { await model.refresh(rotateCursor: true) }
                 } label: {
                     Text("Retry")
                         .font(.subheadline.bold())
@@ -275,20 +414,20 @@ struct FeedStateView: View {
                         .foregroundStyle(.white.opacity(0.6))
                 }
             } else {
-                Image(systemName: "safari")
+                Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 38))
                     .foregroundStyle(Theme.accent)
-                Text("No posts found")
+                Text("Rotate More Videos")
                     .font(.headline)
                 HStack(spacing: 10) {
                     Button {
-                        Task { await model.refresh() }
+                        Task { await model.refresh(rotateCursor: true) }
                     } label: {
-                        Text("Reload")
+                        Text("Load Fresh Batch")
                             .font(.subheadline.bold())
                             .padding(.horizontal, 20)
                             .padding(.vertical, 11)
-                            .liquidGlassCapsule(tinted: true)
+                            .liquidGlassCapsule(tinted: true, active: true)
                     }
                     Button {
                         onOpenCategories()
@@ -297,7 +436,7 @@ struct FeedStateView: View {
                             .font(.subheadline.bold())
                             .padding(.horizontal, 22)
                             .padding(.vertical, 11)
-                            .liquidGlassCapsule(tinted: true, active: true)
+                            .liquidGlassCapsule(tinted: true)
                     }
                 }
             }
@@ -309,7 +448,7 @@ struct FeedStateView: View {
     }
 }
 
-// MARK: - Exact gooned.app Reel Cell (Liquid Glass Controls, No Text Over Video Until Hold)
+// MARK: - Exact gooned.app Reel Cell (Collapsible Controls, Proper Video Fit, Hold for Details)
 
 struct GoonedReelCell: View {
     let gif: Gif
@@ -331,11 +470,24 @@ struct GoonedReelCell: View {
     @State private var skipIndicator: Int? = nil // -5 or +5
     @State private var isHolding = false
     @State private var showMoreSheet = false
+    @State private var isScrubbing = false
+    @State private var localFitOverride: Bool? = nil // nil = use store.data.settings.videoFitScreen
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused }
-    private var fill: Bool { gif.aspect < 0.78 }
     private var liked: Bool { store.isLiked(gif) }
     private var tinted: Bool { store.data.settings.tintedGlass }
+    private var collapsed: Bool { store.data.settings.controlsCollapsed }
+
+    /// Determines whether the video should Fit inside the screen (`false`) or Fill edge-to-edge (`true`).
+    /// By default (`videoFitScreen == true`), every video fits completely inside the screen with zero cropping.
+    private var fill: Bool {
+        let fitMode = localFitOverride ?? store.data.settings.videoFitScreen
+        if fitMode { return false }
+        // Even in Fill mode, only fill when we know the video is genuinely vertical (9:16 portrait < 0.68)
+        let ratio = player.detectedAspect ?? gif.knownAspect
+        guard let ratio else { return false }
+        return ratio < 0.68
+    }
 
     private var isFollowed: Bool {
         if gif.isXPost, let u = gif.author {
@@ -404,8 +556,68 @@ struct GoonedReelCell: View {
                     holdDetailsHUD
                         .allowsHitTesting(false)
                         .transition(.opacity)
+                } else if collapsed {
+                    // Collapsed Clean View: Bottom UI is pushed down out of the way so 100% of the video is visible!
+                    VStack(spacing: 6) {
+                        Spacer()
+
+                        HStack {
+                            // Discreet button to bring the bottom-left UI & dock back up
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                    store.data.settings.controlsCollapsed = false
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "chevron.up")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text("Controls")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(.white.opacity(0.85))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .liquidGlassCapsule(tinted: tinted)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+
+                            Spacer()
+
+                            // Minimal Mute & Like pills in the corner when collapsed
+                            HStack(spacing: 8) {
+                                Button {
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    store.toggleLike(gif)
+                                } label: {
+                                    Image(systemName: "heart.fill")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(liked ? Theme.accent : .white.opacity(0.85))
+                                        .frame(width: 34, height: 34)
+                                        .liquidGlassCircle(tinted: tinted)
+                                }
+
+                                Button {
+                                    store.data.settings.muted.toggle()
+                                    UserStore.configureAudioSession(muted: store.data.settings.muted)
+                                } label: {
+                                    Image(systemName: store.data.settings.muted ? "speaker.slash" : "speaker.wave.2")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                        .frame(width: 34, height: 34)
+                                        .liquidGlassCircle(tinted: tinted)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14)
+
+                        scrubberBar(width: geo.size.width)
+                    }
+                    .padding(.bottom, 16)
+                    .foregroundStyle(.white)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
-                    // Exact gooned.app Liquid Glass Controls (NO text over the video!)
+                    // Full gooned.app Liquid Glass Controls (with `⌄` button to collapse down!)
                     VStack(spacing: 10) {
                         Spacer()
 
@@ -416,11 +628,12 @@ struct GoonedReelCell: View {
                         }
                         .padding(.horizontal, 14)
 
-                        // Pink Scrubber Progress Line right above the bottom dock
+                        // Interactive Pink Scrubber Progress Line right above the bottom dock
                         scrubberBar(width: geo.size.width)
                     }
                     .padding(.bottom, 84)
                     .foregroundStyle(.white)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -446,8 +659,9 @@ struct GoonedReelCell: View {
         }
         .onAppear {
             player.onClipEnded = onClipFinished
-            if !gif.isImage, let url = gif.videoURL(hd: store.data.settings.hd) {
-                player.prepare(url: url)
+            if !gif.isImage {
+                let urls = gif.allVideoURLs(hd: store.data.settings.hd)
+                player.prepare(urls: urls)
             }
             player.setMuted(store.data.settings.muted)
             syncPlayback()
@@ -456,35 +670,70 @@ struct GoonedReelCell: View {
             player.teardown()
             userPaused = false
             isHolding = false
+            localFitOverride = nil
         }
         .onChange(of: shouldPlay) { _, _ in syncPlayback() }
-        .onChange(of: store.data.settings.muted) { _, m in player.setMuted(m) }
+        .onChange(of: store.data.settings.muted) { _, m in
+            player.setMuted(m)
+            UserStore.configureAudioSession(muted: m)
+        }
     }
 
-    // MARK: - Exact gooned.app Left Control Cluster (`🔥 Hot` pill + `⊞` `🔀` `︾` `+` circles)
+    // MARK: - Left Control Cluster (`🔥 Hot` pill + `⌄` Collapse Down + `⊞` `🔀` `︾` `+` circles)
 
     private var leftControlCluster: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // `🔥 Hot` Sort Pill
-            Menu {
-                ForEach(FeedSort.allCases) { s in
-                    Button {
-                        onSelectSort(s)
-                    } label: {
-                        Label(s.label, systemImage: s.icon)
+            HStack(spacing: 8) {
+                // `🔥 Hot` Sort Pill
+                Menu {
+                    ForEach(FeedSort.allCases) { s in
+                        Button {
+                            onSelectSort(s)
+                        } label: {
+                            Label(s.label, systemImage: s.icon)
+                        }
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: sort.icon)
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(sort.label)
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 9)
+                    .liquidGlassCapsule(tinted: tinted)
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: sort.icon)
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(sort.label)
-                        .font(.system(size: 14, weight: .semibold))
+
+                // Fit / Fill Aspect Ratio Quick Button
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    let currentFit = localFitOverride ?? store.data.settings.videoFitScreen
+                    localFitOverride = !currentFit
+                } label: {
+                    Image(systemName: fill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .liquidGlassCircle(tinted: tinted)
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 9)
-                .liquidGlassCapsule(tinted: tinted)
+                .buttonStyle(ScalePressButtonStyle())
+
+                // Collapse Down (`⌄`) Button — pushes bottom-left UI and dock down out of the way!
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        store.data.settings.controlsCollapsed = true
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .liquidGlassCircle(tinted: tinted)
+                }
+                .buttonStyle(ScalePressButtonStyle())
             }
 
             // 4 Liquid Glass Circle Buttons: Categories (`⊞`), Shuffle (`🔀`), Auto-Scroll (`︾`), Follow (`+`)
@@ -608,6 +857,7 @@ struct GoonedReelCell: View {
             VStack(spacing: 4) {
                 Button {
                     store.data.settings.muted.toggle()
+                    UserStore.configureAudioSession(muted: store.data.settings.muted)
                 } label: {
                     Image(systemName: store.data.settings.muted ? "speaker.slash" : "speaker.wave.2")
                         .font(.system(size: 18, weight: .semibold))
@@ -651,7 +901,6 @@ struct GoonedReelCell: View {
 
             Spacer()
 
-            // Exact gooned.app caption layout (`wisconsinWife · /r/BustyPetite · 6d` or `@handle · 𝕏 · 2h`) shown ONLY while holding
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
                     if let author = gif.author {
@@ -690,7 +939,7 @@ struct GoonedReelCell: View {
 
                 HStack(spacing: 14) {
                     Label("\(shortCount(gif.upvotes)) likes", systemImage: "heart.fill")
-                    if let d = gif.duration {
+                    if let d = gif.duration ?? (player.durationSeconds > 0 ? player.durationSeconds : nil) {
                         Label("\(Int(d))s", systemImage: "clock")
                     }
                     if let w = gif.width, let h = gif.height {
@@ -774,7 +1023,9 @@ struct GoonedReelCell: View {
         if gif.isImage {
             AsyncImage(url: gif.imageURL) { phase in
                 if let img = phase.image {
-                    img.resizable().aspectRatio(contentMode: fill ? .fill : .fit)
+                    img.resizable()
+                        .aspectRatio(contentMode: fill ? .fill : .fit)
+                        .frame(width: size.width, height: size.height)
                 } else {
                     ShimmerPlaceholder()
                 }
@@ -785,7 +1036,9 @@ struct GoonedReelCell: View {
             ZStack {
                 AsyncImage(url: gif.posterURL) { phase in
                     if let img = phase.image {
-                        img.resizable().aspectRatio(contentMode: fill ? .fill : .fit)
+                        img.resizable()
+                            .aspectRatio(contentMode: fill ? .fill : .fit)
+                            .frame(width: size.width, height: size.height)
                     } else {
                         ShimmerPlaceholder()
                     }
@@ -795,18 +1048,53 @@ struct GoonedReelCell: View {
 
                 PlayerLayerView(player: player.player, fill: fill)
                     .frame(width: size.width, height: size.height)
+                    .clipped()
             }
+            .frame(width: size.width, height: size.height)
+            .clipped()
         }
     }
 
+    // MARK: - Interactive Touch-Scrubbable Progress Bar
+
     private func scrubberBar(width: CGFloat) -> some View {
-        ZStack(alignment: .leading) {
-            Rectangle().fill(Color.white.opacity(0.24))
-            Rectangle().fill(Theme.accent)
-                .frame(width: max(0, width * player.progress))
+        VStack(spacing: 4) {
+            if isScrubbing && player.durationSeconds > 0 {
+                Text("\(formatTime(player.currentSeconds)) / \(formatTime(player.durationSeconds))")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.65), in: Capsule())
+            }
+
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.white.opacity(0.24))
+                Rectangle().fill(Theme.accent)
+                    .frame(width: max(0, width * player.progress))
+            }
+            .frame(height: isScrubbing ? 6 : 2.5)
+            .frame(height: 16)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { val in
+                        isScrubbing = true
+                        let ratio = Double(val.location.x / max(width, 1))
+                        player.seek(toProgress: ratio)
+                    }
+                    .onEnded { _ in
+                        isScrubbing = false
+                    }
+            )
         }
-        .frame(height: 2.5)
         .opacity(gif.isImage ? 0 : 1)
+    }
+
+    private func formatTime(_ sec: Double) -> String {
+        guard sec.isFinite, sec >= 0 else { return "0:00" }
+        let total = Int(sec)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

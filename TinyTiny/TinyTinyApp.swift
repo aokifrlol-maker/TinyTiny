@@ -7,7 +7,7 @@ struct TinyTinyApp: App {
     @StateObject private var store = UserStore.shared
 
     init() {
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        UserStore.configureAudioSession(muted: UserStore.shared.data.settings.muted)
         URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024, diskCapacity: 400 * 1024 * 1024)
         UITabBar.appearance().isHidden = true
     }
@@ -181,14 +181,26 @@ struct GoonedMainShell: View {
                 .transition(.opacity)
             }
 
-            // 6. Floating Liquid Glass Bottom Dock (Hidden when full-screen Browse modal is open, matching gooned.app)
-            if activeTab != .browse {
+            // 6. Floating Liquid Glass Bottom Dock (Slides down when controlsCollapsed is active on Home, or swipe down on dock to collapse!)
+            if activeTab != .browse && !(activeTab == .home && store.data.settings.controlsCollapsed) {
                 VStack {
                     Spacer()
                     goonedBottomDock
                         .padding(.horizontal, 28)
                         .padding(.bottom, 14)
+                        .gesture(
+                            DragGesture(minimumDistance: 12)
+                                .onEnded { val in
+                                    if val.translation.height > 16 && activeTab == .home {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                            store.data.settings.controlsCollapsed = true
+                                        }
+                                    }
+                                }
+                        )
                 }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             // 7. Liquid Glass Settings Modal (Screenshot 4)
@@ -207,12 +219,13 @@ struct GoonedMainShell: View {
         }
         .animation(.easeInOut(duration: 0.18), value: activeTab)
         .animation(.easeInOut(duration: 0.18), value: showSettingsModal)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: store.data.settings.controlsCollapsed)
         .sheet(isPresented: $showXLoginSheet) {
             XLoginSheet {
                 let target = pendingXFeedAfterLogin ?? .xForYou
                 pendingXFeedAfterLogin = nil
                 selectFeed(target)
-                Task { await feedModel.refresh() }
+                Task { await feedModel.refresh(rotateCursor: true) }
             }
             .environmentObject(store)
         }
@@ -270,7 +283,8 @@ struct GoonedMainShell: View {
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         if case .forYou = feedModel.source {
-                            Task { await feedModel.refresh() }
+                            currentPostID = nil
+                            Task { await feedModel.refresh(rotateCursor: true) }
                         } else {
                             selectFeed(.forYou)
                         }
@@ -321,7 +335,8 @@ struct GoonedMainShell: View {
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             if active {
-                                Task { await feedModel.refresh() }
+                                currentPostID = nil
+                                Task { await feedModel.refresh(rotateCursor: true) }
                             } else {
                                 selectXFeedOrLogin(src)
                             }
@@ -402,7 +417,8 @@ struct GoonedMainShell: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             if isSelected && tab == .home {
                 if case .forYou = feedModel.source {
-                    Task { await feedModel.refresh() }
+                    currentPostID = nil
+                    Task { await feedModel.refresh(rotateCursor: true) }
                 } else {
                     selectFeed(.forYou)
                 }

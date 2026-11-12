@@ -1192,6 +1192,23 @@ struct GoonedSettingsModal: View {
                                     store.data.settings.hd = true
                                 }
                             }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            Text("Screen Fit")
+                                .font(.system(size: 16, weight: .bold))
+                            Text("Fit Screen shows the entire video with zero cropping. Fill expands vertical clips edge-to-edge.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.68))
+
+                            HStack(spacing: 10) {
+                                pillOption(title: "Fit Screen", active: store.data.settings.videoFitScreen) {
+                                    store.data.settings.videoFitScreen = true
+                                }
+                                pillOption(title: "Fill Screen", active: !store.data.settings.videoFitScreen) {
+                                    store.data.settings.videoFitScreen = false
+                                }
+                            }
                         }
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
@@ -1214,14 +1231,54 @@ struct GoonedSettingsModal: View {
                                     store.data.settings.tintedGlass = true
                                 }
                             }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            Text("Bottom Controls & Dock")
+                                .font(.system(size: 16, weight: .bold))
+                            Text("Collapse the bottom-left controls and dock down so they don't cover the video.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.68))
+
+                            HStack(spacing: 10) {
+                                pillOption(title: "Expanded", active: !store.data.settings.controlsCollapsed) {
+                                    store.data.settings.controlsCollapsed = false
+                                }
+                                pillOption(title: "Collapsed Down", active: store.data.settings.controlsCollapsed) {
+                                    store.data.settings.controlsCollapsed = true
+                                }
+                            }
                         }
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
 
-                        // VAULT SECURITY
-                        sectionHeader("SECURITY")
+                        // VAULT SECURITY & ROTATION
+                        sectionHeader("ROTATION & SECURITY")
 
                         VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Feed Rotation History")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text("\(store.data.seenIDs.count) watched videos excluded from repeating")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                Button {
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    store.clearSeenHistory()
+                                } label: {
+                                    Text("Reset Seen")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule()
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
                             if Biometrics.available {
                                 HStack {
                                     Text("Face ID Unlock")

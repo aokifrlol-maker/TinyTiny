@@ -18,7 +18,7 @@ enum FeedSource: Hashable {
         switch self {
         case .forYou: return "For You"
         case .following: return "Following"
-        case .category(let c): return c == "BigTits" ? "Big Tits" : c
+        case .category(let c): return c == "BigTits" ? "Big Tits" : (c == "Rule34" ? "Rule 34" : c)
         case .subreddit(let s): return "r/\(s)"
         case .user(let u): return "u/\(u)"
         case .xForYou: return "𝕏 For You"
@@ -105,8 +105,17 @@ final class FeedModel: ObservableObject {
         return hasMore
     }
 
+    private var cursorKey: String {
+        let k = source.swipeKey
+        return "\(k.kind):\(k.name.lowercased()):\(sort.rawValue)"
+    }
+
     func switchSource(_ newSource: FeedSource, initialItems: [Gif] = []) {
-        guard newSource != source || !initialItems.isEmpty else { return }
+        guard newSource != source || !initialItems.isEmpty else {
+            // If user re-selects the same feed, rotate/refresh with fresh unseen items
+            Task { await refresh(rotateCursor: true) }
+            return
+        }
         source = newSource
         if !initialItems.isEmpty {
             items = initialItems
@@ -116,31 +125,49 @@ final class FeedModel: ObservableObject {
             xMixAfterCursor = nil
             errorText = nil
         } else {
-            Task { await refresh() }
+            // Restore saved cursor if available so returning to a category/subreddit picks up with new videos
+            afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+            Task { await refresh(keepSavedCursor: true) }
         }
     }
 
     func setSort(_ newSort: FeedSort) {
         guard sort != newSort else { return }
         sort = newSort
-        Task { await refresh() }
+        afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+        Task { await refresh(keepSavedCursor: true) }
     }
 
+    /// Shuffles current items and pulls fresh unseen posts to the front.
     func shuffleItems() {
-        guard items.count > 1 else { return }
-        items.shuffle()
+        let store = UserStore.shared
+        if items.count > 2 {
+            let unseen = items.filter { !store.isSeen($0.id) }.shuffled()
+            let seen = items.filter { store.isSeen($0.id) }.shuffled()
+            items = unseen + seen
+        }
+        Task { await loadMore() }
     }
 
     func onItemAppear(_ g: Gif) {
-        if items.suffix(5).contains(where: { $0.id == g.id }) {
+        if items.suffix(6).contains(where: { $0.id == g.id }) {
             Task { await loadMore() }
         }
     }
 
-    func refresh() async {
+    func refresh(keepSavedCursor: Bool = false, rotateCursor: Bool = false) async {
         items = []
         ids = []
-        afterCursor = nil
+        if rotateCursor {
+            // Advance or randomize cursor so refresh always shows brand new videos
+            if case .forYou = source {
+                afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...4) * 50)
+            } else if afterCursor == nil {
+                afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+            }
+        } else if !keepSavedCursor {
+            afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+        }
         xMixAfterCursor = nil
         hasMore = true
         errorText = nil
@@ -156,77 +183,80 @@ final class FeedModel: ObservableObject {
         let api = GoonedAPI.shared
         let store = UserStore.shared
         do {
-            let resp: GoonedFeedResponse
-            switch source {
-            case .forYou:
-                resp = try await api.forYou(sort: sort.rawValue, after: afterCursor, limit: 15)
-                // If personal X is connected and Mix is enabled, asynchronously blend in X For You videos
-                if store.data.xSession.isConnected && store.data.xSession.mixIntoForYou {
-                    let currentXCursor = xMixAfterCursor
-                    Task { @MainActor [weak self] in
-                        let xResp = await XAPI.forYou(after: currentXCursor)
-                        guard let self, case .forYou = self.source else { return }
-                        self.xMixAfterCursor = xResp.after
-                        let freshX = xResp.posts.filter { self.ids.insert($0.id).inserted }
-                        guard !freshX.isEmpty else { return }
-                        // Interleave X posts every ~3 items from current end
-                        var combined = self.items
-                        var insertIdx = max(2, combined.count - 8)
-                        for xPost in freshX {
-                            if insertIdx <= combined.count {
-                                combined.insert(xPost, at: insertIdx)
-                                insertIdx += 3
-                            } else {
-                                combined.append(xPost)
-                            }
-                        }
-                        self.items = combined
+            var collectedUnseen: [Gif] = []
+            var fallbackSeen: [Gif] = []
+            var attempts = 0
+
+            // Up to 2 page hops if page 1 had mostly already-seen videos
+            while collectedUnseen.count < 8 && attempts < 2 && hasMore {
+                attempts += 1
+                let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
+
+                afterCursor = resp.after
+                store.setSavedCursor(resp.after, for: cursorKey)
+
+                if resp.posts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
+                    // If we hit the end of a saved cursor, wrap around once with a fresh cursor
+                    if attempts == 1 && store.savedCursor(for: cursorKey) != nil {
+                        store.setSavedCursor(nil, for: cursorKey)
+                        afterCursor = nil
+                        continue
+                    }
+                    hasMore = false
+                }
+
+                for post in resp.posts {
+                    guard ids.insert(post.id).inserted else { continue }
+                    if store.isSeen(post.id) {
+                        fallbackSeen.append(post)
+                    } else {
+                        collectedUnseen.append(post)
                     }
                 }
-            case .following:
-                let subs = store.data.followedSubreddits
-                let users = store.data.followedUsers
-                let xUsers = store.data.followedXUsers
-                if subs.isEmpty && users.isEmpty && xUsers.isEmpty && !store.data.xSession.isConnected {
-                    hasMore = false
-                    return
-                }
-                if !subs.isEmpty || !users.isEmpty {
-                    resp = try await api.following(subreddits: subs, users: users, after: afterCursor)
-                } else if let firstXUser = xUsers.first {
-                    resp = await XAPI.userMedia(firstXUser, after: afterCursor)
-                } else {
-                    resp = await XAPI.following(after: afterCursor)
-                }
-            case .category(let name):
-                resp = try await api.category(name, sort: sort.rawValue, after: afterCursor, limit: 15)
-            case .subreddit(let sub):
-                resp = try await api.subreddit(sub, sort: sort.rawValue, after: afterCursor, limit: 15)
-            case .user(let u):
-                resp = try await api.user(u, sort: sort.rawValue, after: afterCursor, limit: 15)
-            case .xForYou:
-                resp = await XAPI.forYou(after: afterCursor)
-            case .xFollowing:
-                resp = await XAPI.following(after: afterCursor)
-            case .xBookmarks:
-                resp = await XAPI.bookmarks(after: afterCursor)
-            case .xLikes:
-                resp = await XAPI.likes(after: afterCursor)
-            case .xSearch(let query):
-                resp = await XAPI.search(query, sort: sort.rawValue, after: afterCursor)
-            case .xUser(let handle):
-                resp = await XAPI.userMedia(handle, after: afterCursor)
-            case .list:
-                return
+
+                // For X feeds (which stream via WebView), 1 hop per scroll is sufficient
+                if source.isXFeed { break }
+                if resp.after == nil || resp.after?.isEmpty == true { break }
             }
 
-            afterCursor = resp.after
-            if resp.posts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
-                hasMore = false
+            // Rotate/shuffle incoming batch on For You and Category feeds so order is always fresh
+            switch source {
+            case .forYou, .category:
+                collectedUnseen.shuffle()
+            default:
+                break
             }
 
-            let fresh = resp.posts.filter { ids.insert($0.id).inserted }
-            items.append(contentsOf: fresh)
+            if !collectedUnseen.isEmpty {
+                items.append(contentsOf: collectedUnseen)
+            } else if items.isEmpty && !fallbackSeen.isEmpty {
+                // Only if a small subreddit/creator has zero unseen videos left, rotate their posts in random order
+                items.append(contentsOf: fallbackSeen.shuffled())
+            }
+
+            // If personal X is connected and Mix is enabled on For You, asynchronously blend X videos
+            if case .forYou = source, store.data.xSession.isConnected && store.data.xSession.mixIntoForYou {
+                let currentXCursor = xMixAfterCursor
+                Task { @MainActor [weak self] in
+                    let xResp = await XAPI.forYou(after: currentXCursor)
+                    guard let self, case .forYou = self.source else { return }
+                    self.xMixAfterCursor = xResp.after
+                    let freshX = xResp.posts.filter { !store.isSeen($0.id) && self.ids.insert($0.id).inserted }
+                    guard !freshX.isEmpty else { return }
+                    var combined = self.items
+                    var insertIdx = max(2, combined.count - 8)
+                    for xPost in freshX {
+                        if insertIdx <= combined.count {
+                            combined.insert(xPost, at: insertIdx)
+                            insertIdx += 3
+                        } else {
+                            combined.append(xPost)
+                        }
+                    }
+                    self.items = combined
+                }
+            }
+
             if items.isEmpty && source.isXFeed && !store.data.xSession.isConnected {
                 errorText = "Connect your personal X account to load X videos."
             } else {
@@ -234,6 +264,62 @@ final class FeedModel: ObservableObject {
             }
         } catch {
             errorText = "Couldn't load posts. Tap to retry."
+        }
+    }
+
+    private func fetchPage(api: GoonedAPI, store: UserStore, cursor: String?) async throws -> GoonedFeedResponse {
+        switch source {
+        case .forYou:
+            return try await api.forYou(sort: sort.rawValue, after: cursor, limit: 25)
+        case .following:
+            let subs = store.data.followedSubreddits
+            let users = store.data.followedUsers
+            let xUsers = store.data.followedXUsers
+            if subs.isEmpty && users.isEmpty && xUsers.isEmpty && !store.data.xSession.isConnected {
+                hasMore = false
+                return GoonedFeedResponse(posts: [], after: nil)
+            }
+            if !subs.isEmpty || !users.isEmpty {
+                return try await api.following(subreddits: subs, users: users, after: cursor)
+            } else if let firstXUser = xUsers.first {
+                return await XAPI.userMedia(firstXUser, after: cursor)
+            } else {
+                return await XAPI.following(after: cursor)
+            }
+        case .category(let name):
+            let recentSeen = Array(store.data.seenIDs.suffix(120))
+            let resp = try await api.category(
+                name,
+                sort: sort.rawValue,
+                after: cursor,
+                excludedHead: recentSeen,
+                limit: 25
+            )
+            // If category endpoint returned empty, rotate into one of the category's constituent subreddits
+            if resp.posts.isEmpty,
+               let cat = store.categories.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }),
+               let randomSub = cat.subreddits.randomElement() {
+                return try await api.subreddit(randomSub, sort: sort.rawValue, after: nil, limit: 25)
+            }
+            return resp
+        case .subreddit(let sub):
+            return try await api.subreddit(sub, sort: sort.rawValue, after: cursor, limit: 25)
+        case .user(let u):
+            return try await api.user(u, sort: sort.rawValue, after: cursor, limit: 25)
+        case .xForYou:
+            return await XAPI.forYou(after: cursor)
+        case .xFollowing:
+            return await XAPI.following(after: cursor)
+        case .xBookmarks:
+            return await XAPI.bookmarks(after: cursor)
+        case .xLikes:
+            return await XAPI.likes(after: cursor)
+        case .xSearch(let query):
+            return await XAPI.search(query, sort: sort.rawValue, after: cursor)
+        case .xUser(let handle):
+            return await XAPI.userMedia(handle, after: cursor)
+        case .list:
+            return GoonedFeedResponse(posts: [], after: nil)
         }
     }
 }

@@ -18,11 +18,13 @@ actor GoonedAPI {
 
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.default
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.httpAdditionalHeaders = [
             "User-Agent": Config.userAgent,
             "Accept": "application/json",
             "Origin": Config.origin,
-            "Referer": Config.referer
+            "Referer": Config.referer,
+            "Cache-Control": "no-cache"
         ]
         cfg.timeoutIntervalForRequest = 18
         return URLSession(configuration: cfg)
@@ -45,23 +47,59 @@ actor GoonedAPI {
         s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
     }
 
+    /// Generates a fresh random seed cursor `{"seed":"<random>","offset":0}` so `/reddit/foryou` rotates on every load instead of returning the static `foryou-ssr` cache.
+    static func randomForYouCursor(offset: Int = 0) -> String {
+        let seed = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(10))
+        let json = #"{"seed":"\#(seed)","offset":\#(offset)}"#
+        return Data(json.utf8).base64EncodedString()
+    }
+
+    /// Encodes a category exclusion cursor `{"categoryPool":{"from":null,"head":[...]}}` so `/reddit/category/{name}` excludes already-seen video IDs on the server.
+    static func categoryExclusionCursor(seenIDs: [String]) -> String? {
+        let clean = Array(seenIDs.filter { !$0.hasPrefix("x_") }.prefix(120))
+        guard !clean.isEmpty else { return nil }
+        let payload: [String: Any] = [
+            "categoryPool": [
+                "from": NSNull(),
+                "head": clean
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return nil }
+        return data.base64EncodedString()
+    }
+
     // MARK: - Feed Endpoints
 
-    func forYou(sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 15) async throws -> GoonedFeedResponse {
+    func forYou(sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 25) async throws -> GoonedFeedResponse {
         var q = ["sort": sort, "limit": "\(limit)"]
         if sort == "top" { q["t"] = time }
-        if let after, !after.isEmpty { q["after"] = after }
+        if let after, !after.isEmpty {
+            q["after"] = after
+        } else {
+            q["after"] = Self.randomForYouCursor(offset: 0)
+        }
         return try await get("/reddit/foryou", q)
     }
 
-    func category(_ name: String, sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 15) async throws -> GoonedFeedResponse {
+    func category(
+        _ name: String,
+        sort: String = "hot",
+        time: String = "all",
+        after: String? = nil,
+        excludedHead: [String] = [],
+        limit: Int = 25
+    ) async throws -> GoonedFeedResponse {
         var q = ["sort": sort, "limit": "\(limit)"]
         if sort == "top" { q["t"] = time }
-        if let after, !after.isEmpty { q["after"] = after }
+        if let after, !after.isEmpty {
+            q["after"] = after
+        } else if let cursor = Self.categoryExclusionCursor(seenIDs: excludedHead) {
+            q["after"] = cursor
+        }
         return try await get("/reddit/category/\(enc(name))", q)
     }
 
-    func subreddit(_ name: String, sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 15) async throws -> GoonedFeedResponse {
+    func subreddit(_ name: String, sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 25) async throws -> GoonedFeedResponse {
         let clean = name.replacingOccurrences(of: "r/", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "/", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,7 +109,7 @@ actor GoonedAPI {
         return try await get("/reddit/subreddit/\(enc(clean))", q)
     }
 
-    func user(_ username: String, sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 15) async throws -> GoonedFeedResponse {
+    func user(_ username: String, sort: String = "hot", time: String = "all", after: String? = nil, limit: Int = 25) async throws -> GoonedFeedResponse {
         let clean = username.replacingOccurrences(of: "u/", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "@", with: "")
             .replacingOccurrences(of: "/", with: "")

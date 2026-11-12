@@ -12,7 +12,7 @@ struct Lossy<T: Decodable>: Decodable {
     init(from decoder: Decoder) throws { value = try? T(from: decoder) }
 }
 
-/// Exact post model returned by `api.gooned.app`.
+/// Exact post model returned by `api.gooned.app` and `XService`.
 struct Gif: Codable, Identifiable, Hashable {
     let id: String
     var title: String?
@@ -45,24 +45,33 @@ struct Gif: Codable, Identifiable, Hashable {
         return videoURL(hd: true) == nil
     }
 
-    var aspect: Double {
-        guard let w = width, let h = height, w > 0, h > 0 else { return 9.0 / 16.0 }
+    /// Returns the actual width/height ratio only when real dimensions are known.
+    var knownAspect: Double? {
+        guard let w = width, let h = height, w > 0, h > 0 else { return nil }
         return Double(w) / Double(h)
     }
 
-    func videoURL(hd: Bool) -> URL? {
-        let candidates: [String?]
-        if hd {
-            candidates = [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
-        } else {
-            candidates = [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
-        }
+    var aspect: Double {
+        knownAspect ?? 1.0
+    }
+
+    func allVideoURLs(hd: Bool) -> [URL] {
+        guard mediaType != "image" else { return [] }
+        let candidates: [String?] = hd
+            ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
+            : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
+        var urls: [URL] = []
+        var seen = Set<String>()
         for c in candidates {
-            if let s = c, !s.isEmpty, mediaType != "image", let u = URL(string: s) {
-                return u
+            if let s = c, !s.isEmpty, seen.insert(s).inserted, let u = URL(string: s) {
+                urls.append(u)
             }
         }
-        return nil
+        return urls
+    }
+
+    func videoURL(hd: Bool) -> URL? {
+        allVideoURLs(hd: hd).first
     }
 
     var imageURL: URL? {

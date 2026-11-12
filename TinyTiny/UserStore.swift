@@ -1,13 +1,35 @@
 import SwiftUI
+import AVFoundation
 
 struct AppSettings: Codable {
     var hd: Bool = true
     var muted: Bool = true
     var faceID: Bool = false
     var autoScroll: Bool = false
-    var autoScrollDelay: Int = 6      // 3, 6, 10, 15 seconds (matches gooned.app Settings)
-    var playVideosToEnd: Bool = true  // matches gooned.app Settings
-    var tintedGlass: Bool = true      // Liquid Glass: Clear vs Tinted
+    var autoScrollDelay: Int = 6       // 3, 6, 10, 15 seconds (matches gooned.app Settings)
+    var playVideosToEnd: Bool = true   // matches gooned.app Settings
+    var tintedGlass: Bool = true       // Liquid Glass: Clear vs Tinted
+    var videoFitScreen: Bool = true    // Fit entire video on screen by default (prevents weird cropping)
+    var controlsCollapsed: Bool = false // Collapses bottom-left UI & dock down out of the way
+
+    enum CodingKeys: String, CodingKey {
+        case hd, muted, faceID, autoScroll, autoScrollDelay, playVideosToEnd, tintedGlass, videoFitScreen, controlsCollapsed
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hd = (try? c.decode(Bool.self, forKey: .hd)) ?? true
+        muted = (try? c.decode(Bool.self, forKey: .muted)) ?? true
+        faceID = (try? c.decode(Bool.self, forKey: .faceID)) ?? false
+        autoScroll = (try? c.decode(Bool.self, forKey: .autoScroll)) ?? false
+        autoScrollDelay = (try? c.decode(Int.self, forKey: .autoScrollDelay)) ?? 6
+        playVideosToEnd = (try? c.decode(Bool.self, forKey: .playVideosToEnd)) ?? true
+        tintedGlass = (try? c.decode(Bool.self, forKey: .tintedGlass)) ?? true
+        videoFitScreen = (try? c.decode(Bool.self, forKey: .videoFitScreen)) ?? true
+        controlsCollapsed = (try? c.decode(Bool.self, forKey: .controlsCollapsed)) ?? false
+    }
 }
 
 struct RecentFeedEntry: Codable, Hashable, Identifiable {
@@ -25,12 +47,14 @@ struct UserData: Codable {
     var followedUsers: [String] = []
     var followedXUsers: [String] = []
     var recentFeeds: [RecentFeedEntry] = []
+    var seenIDs: [String] = []
+    var savedCursors: [String: String] = [:]
     var swipedTotal: Int = 0
     var settings = AppSettings()
     var xSession = XAccountSession()
 
     enum CodingKeys: String, CodingKey {
-        case liked, followedSubreddits, followedUsers, followedXUsers, recentFeeds, swipedTotal, settings, xSession
+        case liked, followedSubreddits, followedUsers, followedXUsers, recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession
     }
 
     init() {}
@@ -42,6 +66,8 @@ struct UserData: Codable {
         followedUsers = (try? c.decode([String].self, forKey: .followedUsers)) ?? []
         followedXUsers = (try? c.decode([String].self, forKey: .followedXUsers)) ?? []
         recentFeeds = (try? c.decode([RecentFeedEntry].self, forKey: .recentFeeds)) ?? []
+        seenIDs = (try? c.decode([String].self, forKey: .seenIDs)) ?? []
+        savedCursors = (try? c.decode([String: String].self, forKey: .savedCursors)) ?? [:]
         swipedTotal = (try? c.decode(Int.self, forKey: .swipedTotal)) ?? 0
         settings = (try? c.decode(AppSettings.self, forKey: .settings)) ?? AppSettings()
         xSession = (try? c.decode(XAccountSession.self, forKey: .xSession)) ?? XAccountSession()
@@ -52,6 +78,7 @@ struct UserData: Codable {
 final class UserStore: ObservableObject {
     static let shared = UserStore()
 
+    private(set) var seenSet: Set<String>
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
@@ -69,8 +96,20 @@ final class UserStore: ObservableObject {
         } else {
             loaded = UserData()
         }
+        self.seenSet = Set(loaded.seenIDs)
         self.data = loaded
+        Self.configureAudioSession(muted: loaded.settings.muted)
         Task { await refreshCategories() }
+    }
+
+    static func configureAudioSession(muted: Bool) {
+        let session = AVAudioSession.sharedInstance()
+        if muted {
+            try? session.setCategory(.ambient, mode: .moviePlayback, options: [.mixWithOthers])
+        } else {
+            try? session.setCategory(.playback, mode: .moviePlayback, options: [])
+            try? session.setActive(true)
+        }
     }
 
     func refreshCategories() async {
@@ -92,6 +131,42 @@ final class UserStore: ObservableObject {
         if let raw = try? JSONEncoder().encode(data) {
             try? raw.write(to: Self.fileURL, options: [.atomic, .completeFileProtection])
         }
+    }
+
+    // MARK: - Seen History & Cursor Rotation (Prevents Repeating Videos)
+
+    func isSeen(_ id: String) -> Bool {
+        seenSet.contains(id)
+    }
+
+    func markSeen(_ id: String) {
+        guard !id.isEmpty, seenSet.insert(id).inserted else { return }
+        data.seenIDs.append(id)
+        if data.seenIDs.count > 4000 {
+            let overflow = data.seenIDs.count - 3500
+            let removed = data.seenIDs.prefix(overflow)
+            for r in removed { seenSet.remove(r) }
+            data.seenIDs.removeFirst(overflow)
+        }
+    }
+
+    func savedCursor(for key: String) -> String? {
+        data.savedCursors[key]
+    }
+
+    func setSavedCursor(_ cursor: String?, for key: String) {
+        if let cursor, !cursor.isEmpty {
+            data.savedCursors[key] = cursor
+        } else {
+            data.savedCursors.removeValue(forKey: key)
+        }
+    }
+
+    func clearSeenHistory() {
+        seenSet.removeAll()
+        data.seenIDs.removeAll()
+        data.savedCursors.removeAll()
+        saveNow()
     }
 
     // MARK: - Likes (Stash)
@@ -166,7 +241,8 @@ final class UserStore: ObservableObject {
 
     // MARK: - Pick Up Where You Left Off (Swipe Tracking)
 
-    func recordSwipe(kind: String, name: String, displayTitle: String) {
+    func recordSwipe(kind: String, name: String, displayTitle: String, postID: String? = nil) {
+        if let postID { markSeen(postID) }
         data.swipedTotal += 1
         if let idx = data.recentFeeds.firstIndex(where: { $0.kind == kind && $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
             var entry = data.recentFeeds.remove(at: idx)
@@ -184,6 +260,7 @@ final class UserStore: ObservableObject {
 
     func eraseAll() {
         saveTask?.cancel()
+        seenSet.removeAll()
         data = UserData()
         try? FileManager.default.removeItem(at: Self.fileURL)
         Task { await XWebEngine.shared.resetSession() }
