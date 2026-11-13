@@ -38,11 +38,13 @@ struct AlgorithmProfile: Codable {
     var subredditWeights: [String: Double] = [:]
     var creatorWeights: [String: Double] = [:]
     var tagWeights: [String: Double] = [:]
+    var boostedTags: [String] = []
+    var blockedTags: [String] = []
     var videoPreference: Double = 0.5   // > 0.5 favors videos over static images
     var totalSignals: Int = 0
 
     enum CodingKeys: String, CodingKey {
-        case subredditWeights, creatorWeights, tagWeights, videoPreference, totalSignals
+        case subredditWeights, creatorWeights, tagWeights, boostedTags, blockedTags, videoPreference, totalSignals
     }
 
     init() {}
@@ -52,6 +54,8 @@ struct AlgorithmProfile: Codable {
         subredditWeights = (try? c.decode([String: Double].self, forKey: .subredditWeights)) ?? [:]
         creatorWeights = (try? c.decode([String: Double].self, forKey: .creatorWeights)) ?? [:]
         tagWeights = (try? c.decode([String: Double].self, forKey: .tagWeights)) ?? [:]
+        boostedTags = (try? c.decode([String].self, forKey: .boostedTags)) ?? []
+        blockedTags = (try? c.decode([String].self, forKey: .blockedTags)) ?? []
         videoPreference = (try? c.decode(Double.self, forKey: .videoPreference)) ?? 0.5
         totalSignals = (try? c.decode(Int.self, forKey: .totalSignals)) ?? 0
     }
@@ -175,11 +179,20 @@ final class UserStore: ObservableObject {
         seenSet.contains(id)
     }
 
+    func isSeen(_ post: Gif) -> Bool {
+        seenSet.contains(post.id) || seenSet.contains(post.canonicalDedupeKey)
+    }
+
+    func markSeen(_ post: Gif) {
+        markSeen(post.id)
+        markSeen(post.canonicalDedupeKey)
+    }
+
     func markSeen(_ id: String) {
         guard !id.isEmpty, seenSet.insert(id).inserted else { return }
         data.seenIDs.append(id)
-        if data.seenIDs.count > 4000 {
-            let overflow = data.seenIDs.count - 3500
+        if data.seenIDs.count > 6000 {
+            let overflow = data.seenIDs.count - 5200
             let removed = data.seenIDs.prefix(overflow)
             for r in removed { seenSet.remove(r) }
             data.seenIDs.removeFirst(overflow)
@@ -392,18 +405,30 @@ final class UserStore: ObservableObject {
     func scorePost(_ post: Gif) -> Double {
         guard data.settings.algorithmEnabled else { return 0 }
         var score = 0.0
-        if let sub = post.subreddit?.lowercased() {
-            score += (data.algorithm.subredditWeights[sub] ?? 0) * 1.4
-            if isFollowingSubreddit(sub) { score += 3.5 }
+        let subLower = post.subreddit?.lowercased() ?? ""
+        let authorLower = post.author?.lowercased() ?? ""
+        let titleLower = post.title?.lowercased() ?? ""
+
+        if !subLower.isEmpty {
+            score += (data.algorithm.subredditWeights[subLower] ?? 0) * 1.4
+            if isFollowingSubreddit(subLower) { score += 3.5 }
         }
-        if let author = post.author?.lowercased() {
-            score += (data.algorithm.creatorWeights[author] ?? 0) * 1.6
-            if isFollowingUser(author) || isFollowingXUser(author) || isFollowingIGUser(author) {
+        if !authorLower.isEmpty {
+            score += (data.algorithm.creatorWeights[authorLower] ?? 0) * 1.6
+            if isFollowingUser(authorLower) || isFollowingXUser(authorLower) || isFollowingIGUser(authorLower) {
                 score += 4.0
             }
         }
-        for token in Self.extractTokens(from: post) {
+        let tokens = Self.extractTokens(from: post)
+        for token in tokens {
             score += (data.algorithm.tagWeights[token] ?? 0) * 0.8
+        }
+        for pinned in data.algorithm.boostedTags {
+            let p = pinned.lowercased()
+            let cleanP = p.replacingOccurrences(of: "_", with: "")
+            if subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) || tokens.contains(p) {
+                score += 14.0
+            }
         }
         if !post.isImage {
             score += (data.algorithm.videoPreference - 0.5) * 4.0
@@ -412,6 +437,65 @@ final class UserStore: ObservableObject {
             score += min(log10(Double(up)) * 0.6, 2.5)
         }
         return score
+    }
+
+    func isBlockedByAlgorithm(_ post: Gif) -> Bool {
+        guard data.settings.algorithmEnabled, !data.algorithm.blockedTags.isEmpty else { return false }
+        let sub = post.subreddit?.lowercased() ?? ""
+        let author = post.author?.lowercased() ?? ""
+        let title = post.title?.lowercased() ?? ""
+        for blocked in data.algorithm.blockedTags {
+            let b = blocked.lowercased()
+            if !b.isEmpty && (sub.contains(b) || author.contains(b) || title.contains(b)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    func addBoostedTags(_ rawInput: String) {
+        let parsed = Rule34API.parseTags(rawInput)
+        for tag in parsed {
+            if !data.algorithm.boostedTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+                data.algorithm.boostedTags.insert(tag, at: 0)
+            }
+            data.algorithm.tagWeights[tag] = max(data.algorithm.tagWeights[tag] ?? 0, 15.0)
+            let subKey = tag.replacingOccurrences(of: "_", with: "")
+            if !subKey.isEmpty {
+                data.algorithm.subredditWeights[subKey] = max(data.algorithm.subredditWeights[subKey] ?? 0, 12.0)
+            }
+        }
+    }
+
+    func removeBoostedTag(_ tag: String) {
+        let lower = tag.lowercased()
+        data.algorithm.boostedTags.removeAll { $0.lowercased() == lower }
+        data.algorithm.tagWeights.removeValue(forKey: lower)
+        let subKey = lower.replacingOccurrences(of: "_", with: "")
+        data.algorithm.subredditWeights.removeValue(forKey: subKey)
+    }
+
+    func removeLearnedSubreddit(_ sub: String) {
+        data.algorithm.subredditWeights.removeValue(forKey: sub.lowercased())
+    }
+
+    func removeLearnedTag(_ tag: String) {
+        data.algorithm.tagWeights.removeValue(forKey: tag.lowercased())
+    }
+
+    func addBlockedTags(_ rawInput: String) {
+        let parsed = Rule34API.parseTags(rawInput)
+        for tag in parsed {
+            if !data.algorithm.blockedTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+                data.algorithm.blockedTags.insert(tag, at: 0)
+            }
+            data.algorithm.tagWeights.removeValue(forKey: tag)
+        }
+    }
+
+    func removeBlockedTag(_ tag: String) {
+        let lower = tag.lowercased()
+        data.algorithm.blockedTags.removeAll { $0.lowercased() == lower }
     }
 
     /// Ranks posts using an 80/20 Exploit-Explore mix so For You feels personalized yet never repetitive.
@@ -446,14 +530,37 @@ final class UserStore: ObservableObject {
     }
 
     var topAlgorithmSubreddits: [String] {
-        data.algorithm.subredditWeights
+        var combined: [String] = data.algorithm.boostedTags.map { $0.replacingOccurrences(of: "_", with: "") }
+        let learned = data.algorithm.subredditWeights
             .filter { $0.value > 1.5 }
             .sorted { $0.value > $1.value }
             .prefix(5)
             .map(\.key)
+        for s in learned where !combined.contains(s) {
+            combined.append(s)
+        }
+        return Array(combined.prefix(6))
+    }
+
+    var topAlgorithmTags: [(String, Double)] {
+        data.algorithm.tagWeights
+            .filter { $0.value > 0.8 }
+            .sorted { $0.value > $1.value }
+            .prefix(16)
+            .map { ($0.key, $0.value) }
+    }
+
+    var topAlgorithmSubredditEntries: [(String, Double)] {
+        data.algorithm.subredditWeights
+            .filter { $0.value > 0.8 }
+            .sorted { $0.value > $1.value }
+            .prefix(12)
+            .map { ($0.key, $0.value) }
     }
 
     var topTasteSummary: String {
+        let pinned = data.algorithm.boostedTags.prefix(3).map { "#\($0)" }
+        if !pinned.isEmpty { return pinned.joined(separator: " · ") }
         let subs = topAlgorithmSubreddits.prefix(3).map { "r/\($0)" }
         if !subs.isEmpty { return subs.joined(separator: " · ") }
         let tags = data.algorithm.tagWeights.filter { $0.value > 1.0 }.sorted { $0.value > $1.value }.prefix(3).map { "#\($0.key)" }

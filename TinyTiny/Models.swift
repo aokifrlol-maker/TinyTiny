@@ -36,6 +36,30 @@ struct Gif: Codable, Identifiable, Hashable {
     static func == (a: Gif, b: Gif) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
 
+    /// Stable, query-stripped identifier so repeating posts across rotating CDN tokens,
+    /// Instagram `_userId` suffixes, or cross-posted URLs are always deduplicated.
+    var canonicalDedupeKey: String {
+        if isIGPost {
+            if let permalink,
+               let url = URL(string: permalink),
+               let code = url.pathComponents.last(where: { !$0.isEmpty && $0 != "reel" && $0 != "p" }),
+               code.count >= 5 {
+                return "ig_code_\(code)"
+            }
+            let raw = id.hasPrefix("ig_") ? String(id.dropFirst(3)) : id
+            let base = raw.split(separator: "_").first.map(String.init) ?? raw
+            return "ig_pk_\(base)"
+        }
+        let media = muxedUrlHd ?? muxedUrl ?? mediaUrl ?? posterUrl
+        if let media, let u = URL(string: media), let host = u.host {
+            let path = u.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !path.isEmpty {
+                return "media_\(host.lowercased())/\(path)"
+            }
+        }
+        return id.lowercased()
+    }
+
     var isXPost: Bool {
         id.hasPrefix("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
     }
@@ -123,23 +147,41 @@ struct Gif: Codable, Identifiable, Hashable {
     }
 
     var imageURL: URL? {
-        if let local = OfflineManager.localMediaURL(forId: id) {
-            return local
+        imageFallbackURLs.first
+    }
+
+    var imageFallbackURLs: [URL] {
+        var urls: [URL] = []
+        var seen = Set<String>()
+        if let local = OfflineManager.localMediaURL(forId: id), seen.insert(local.absoluteString).inserted {
+            urls.append(local)
         }
         for c in [mediaUrl, posterUrl, thumbnailUrl] {
-            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s), let u = URL(string: s) { return u }
+            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s),
+               seen.insert(s).inserted, let u = URL(string: s) {
+                urls.append(u)
+            }
         }
-        return nil
+        return urls
     }
 
     var posterURL: URL? {
-        if let localThumb = OfflineManager.localThumbURL(forId: id) {
-            return localThumb
+        posterFallbackURLs.first
+    }
+
+    var posterFallbackURLs: [URL] {
+        var urls: [URL] = []
+        var seen = Set<String>()
+        if let localThumb = OfflineManager.localThumbURL(forId: id), seen.insert(localThumb.absoluteString).inserted {
+            urls.append(localThumb)
         }
         for c in [posterUrl, thumbnailUrl, mediaUrl] {
-            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s), let u = URL(string: s) { return u }
+            if let s = c, !s.isEmpty, Self.isRenderableImageURLString(s),
+               seen.insert(s).inserted, let u = URL(string: s) {
+                urls.append(u)
+            }
         }
-        return nil
+        return urls
     }
 
     var thumbURL: URL? {

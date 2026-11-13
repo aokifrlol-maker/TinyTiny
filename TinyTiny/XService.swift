@@ -401,7 +401,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         let tweets = XTweetParser.parseTweets(from: data)
         guard !tweets.isEmpty else { return }
 
-        let fresh = tweets.filter { seenIds.insert($0.id).inserted }
+        let store = UserStore.shared
+        let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
         guard !fresh.isEmpty else { return }
 
         bufferedPosts.append(contentsOf: fresh)
@@ -432,7 +433,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         if isRefresh || activeRouteKey != routeKey {
             activeRouteKey = routeKey
             bufferedPosts.removeAll()
-            seenIds.removeAll()
+            // Preserve seenIds across refreshes so previously delivered tweets never repeat
             pageCounter = 0
             wv.load(URLRequest(url: targetURL))
 
@@ -483,7 +484,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         pageCounter += 1
         return GoonedFeedResponse(
             posts: posts,
-            after: posts.isEmpty ? nil : "xpage_\(pageCounter)"
+            after: "xpage_\(pageCounter)"
         )
     }
 

@@ -48,12 +48,19 @@ struct PlayerLayerView: UIViewRepresentable {
 // MARK: - Source-Aware HTTP Headers & Fast Cached Image/Video Preloaders
 
 enum MediaHeaders {
-    static func headers(for url: URL) -> [String: String] {
+    static func headers(for url: URL, includeReferer: Bool = true) -> [String: String] {
         let host = url.host?.lowercased() ?? ""
         var h: [String: String] = ["User-Agent": Config.userAgent]
+        guard includeReferer else { return h }
         if host.contains("redgifs.com") {
             h["Referer"] = "https://www.redgifs.com/"
-        } else if host.contains("rule34") || host.contains("yande.re") || host.contains("hypnohub") || host.contains("gelbooru") {
+        } else if host.contains("yande.re") {
+            h["Referer"] = "https://yande.re/"
+        } else if host.contains("hypnohub") {
+            h["Referer"] = "https://hypnohub.net/"
+        } else if host.contains("gelbooru") {
+            h["Referer"] = "https://gelbooru.com/"
+        } else if host.contains("rule34") {
             h["Referer"] = "https://rule34.xxx/"
         } else if host.contains("twimg.com") || host.contains("x.com") || host.contains("twitter.com") {
             h["Referer"] = "https://x.com/"
@@ -73,7 +80,7 @@ final class MediaImageLoader {
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 14
+        cfg.timeoutIntervalForRequest = 20
         cfg.urlCache = URLCache.shared
         return URLSession(configuration: cfg)
     }()
@@ -101,17 +108,19 @@ final class MediaImageLoader {
         if let task = inFlight[key] { return await task.value }
 
         let task = Task<UIImage?, Never> {
-            var req = URLRequest(url: url)
-            for (k, v) in MediaHeaders.headers(for: url) {
-                req.setValue(v, forHTTPHeaderField: k)
+            for useReferer in [true, false] {
+                var req = URLRequest(url: url)
+                for (k, v) in MediaHeaders.headers(for: url, includeReferer: useReferer) {
+                    req.setValue(v, forHTTPHeaderField: k)
+                }
+                if let (data, resp) = try? await session.data(for: req),
+                   (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
+                   let img = UIImage(data: data) {
+                    cache.setObject(img, forKey: key as NSString, cost: data.count)
+                    return img
+                }
             }
-            guard let (data, resp) = try? await session.data(for: req),
-                  (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
-                  let img = UIImage(data: data) else {
-                return nil
-            }
-            cache.setObject(img, forKey: key as NSString, cost: data.count)
-            return img
+            return nil
         }
         inFlight[key] = task
         let img = await task.value
@@ -128,6 +137,7 @@ final class MediaImageLoader {
 
 struct RemoteImageView: View {
     let url: URL?
+    var fallbackURLs: [URL] = []
     var fill: Bool = false
     var showSpinnerOnLoad: Bool = true
     var onFailed: (() -> Void)? = nil
@@ -135,6 +145,18 @@ struct RemoteImageView: View {
     @State private var image: UIImage?
     @State private var didFail = false
     @State private var reloadToken = 0
+
+    private var candidateURLs: [URL] {
+        var result: [URL] = []
+        var seen = Set<String>()
+        if let url, seen.insert(url.absoluteString).inserted {
+            result.append(url)
+        }
+        for fb in fallbackURLs where seen.insert(fb.absoluteString).inserted {
+            result.append(fb)
+        }
+        return result
+    }
 
     var body: some View {
         Group {
@@ -172,23 +194,28 @@ struct RemoteImageView: View {
             }
         }
         .task(id: "\(url?.absoluteString ?? "nil")_\(reloadToken)") {
-            guard let url else {
+            let candidates = candidateURLs
+            guard !candidates.isEmpty else {
                 didFail = true
                 onFailed?()
                 return
             }
-            if let cached = MediaImageLoader.shared.cached(url) {
-                image = cached
-                didFail = false
-                return
+            for candidate in candidates {
+                if let cached = MediaImageLoader.shared.cached(candidate) {
+                    image = cached
+                    didFail = false
+                    return
+                }
             }
-            if let loaded = await MediaImageLoader.shared.load(url) {
-                image = loaded
-                didFail = false
-            } else {
-                didFail = true
-                onFailed?()
+            for candidate in candidates {
+                if let loaded = await MediaImageLoader.shared.load(candidate) {
+                    image = loaded
+                    didFail = false
+                    return
+                }
             }
+            didFail = true
+            onFailed?()
         }
     }
 }
@@ -490,15 +517,21 @@ struct FeedView: View {
         .onChange(of: store.data.settings.playVideosToEnd) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: currentID) { old, new in
             if let old {
-                store.markSeen(old)
                 if let oldPost = model.items.first(where: { $0.id == old }) {
+                    store.markSeen(oldPost)
                     let dwell = Date().timeIntervalSince(currentItemShownAt)
                     store.recordDwellSignal(for: oldPost, secondsWatched: dwell)
+                } else {
+                    store.markSeen(old)
                 }
             }
             if let new {
                 currentItemShownAt = Date()
-                store.markSeen(new)
+                if let newPost = model.items.first(where: { $0.id == new }) {
+                    store.markSeen(newPost)
+                } else {
+                    store.markSeen(new)
+                }
                 if old != nil {
                     let key = model.source.swipeKey
                     store.recordSwipe(kind: key.kind, name: key.name, displayTitle: model.source.displayTitle, postID: new)
@@ -1330,17 +1363,27 @@ struct GoonedReelCell: View {
     @ViewBuilder
     private func mediaView(_ size: CGSize) -> some View {
         if gif.isImage {
-            RemoteImageView(url: gif.imageURL, fill: fill, showSpinnerOnLoad: true)
-                .frame(width: size.width, height: size.height)
-                .clipped()
+            RemoteImageView(
+                url: gif.imageURL,
+                fallbackURLs: gif.imageFallbackURLs,
+                fill: fill,
+                showSpinnerOnLoad: true
+            )
+            .frame(width: size.width, height: size.height)
+            .clipped()
         } else {
             ZStack {
                 Color.black
 
                 if let poster = gif.posterURL {
-                    RemoteImageView(url: poster, fill: fill, showSpinnerOnLoad: false)
-                        .frame(width: size.width, height: size.height)
-                        .clipped()
+                    RemoteImageView(
+                        url: poster,
+                        fallbackURLs: gif.posterFallbackURLs,
+                        fill: fill,
+                        showSpinnerOnLoad: false
+                    )
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
                 }
 
                 PlayerLayerView(player: player.player, fill: fill)

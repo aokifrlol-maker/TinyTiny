@@ -1441,11 +1441,13 @@ struct GoonedSettingsModal: View {
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
     var onSetupR34Key: () -> Void
+    var onReplayIntro: (() -> Void)? = nil
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
     @ObservedObject private var offline = OfflineManager.shared
     @State private var changingPasscode = false
     @State private var confirmErase = false
+    @State private var showAlgorithmEditor = false
 
     private let delays = [3, 6, 10, 15]
 
@@ -1497,21 +1499,67 @@ struct GoonedSettingsModal: View {
                                     .tint(Theme.accent)
                             }
 
-                            if store.data.settings.algorithmEnabled && store.data.algorithm.totalSignals > 0 {
+                            if store.data.settings.algorithmEnabled {
                                 Divider().overlay(Color.white.opacity(0.14))
-                                HStack {
-                                    Text("\(store.data.algorithm.totalSignals) signals learned on-device")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.white.opacity(0.55))
-                                    Spacer()
+
+                                if !store.data.algorithm.boostedTags.isEmpty {
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(spacing: 6) {
+                                            ForEach(store.data.algorithm.boostedTags, id: \.self) { tag in
+                                                HStack(spacing: 5) {
+                                                    Text("#\(tag)")
+                                                        .font(.system(size: 11.5, weight: .bold))
+                                                    Button {
+                                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                        store.removeBoostedTag(tag)
+                                                    } label: {
+                                                        Image(systemName: "xmark")
+                                                            .font(.system(size: 9, weight: .bold))
+                                                            .foregroundStyle(.white.opacity(0.8))
+                                                    }
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 5)
+                                                .liquidGlassCapsule(active: true)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HStack(spacing: 10) {
                                     Button {
                                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        store.resetAlgorithm()
+                                        showAlgorithmEditor = true
                                     } label: {
-                                        Text("Reset Taste")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(Theme.accentBright)
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "slider.horizontal.3")
+                                                .font(.system(size: 12, weight: .bold))
+                                            Text("Edit #Tags & Taste")
+                                                .font(.caption.bold())
+                                        }
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule(tinted: true)
                                     }
+
+                                    Spacer()
+
+                                    if store.data.algorithm.totalSignals > 0 {
+                                        Button {
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            store.resetAlgorithm()
+                                        } label: {
+                                            Text("Reset Taste")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(Theme.accentBright)
+                                        }
+                                    }
+                                }
+
+                                if store.data.algorithm.totalSignals > 0 {
+                                    Text("\(store.data.algorithm.totalSignals) signals learned on-device · \(store.topAlgorithmTags.count) #tags tracked")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.white.opacity(0.5))
                                 }
                             }
                         }
@@ -1774,6 +1822,30 @@ struct GoonedSettingsModal: View {
                                     store.data.settings.controlsCollapsed = true
                                 }
                             }
+
+                            if let onReplayIntro {
+                                Divider().overlay(Color.white.opacity(0.14))
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Welcome Motion Intro")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("Replay the 5s 'Welcome to Gooned' intro animation.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                    }
+                                    Spacer()
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        onReplayIntro()
+                                    } label: {
+                                        Text("Replay")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 13)
+                                            .padding(.vertical, 8)
+                                            .liquidGlassCapsule()
+                                    }
+                                }
+                            }
                         }
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
@@ -1881,6 +1953,10 @@ struct GoonedSettingsModal: View {
         .sheet(isPresented: $changingPasscode) {
             PasscodeSetupView(mode: .change)
         }
+        .sheet(isPresented: $showAlgorithmEditor) {
+            AlgorithmEditorSheet()
+                .environmentObject(store)
+        }
         .confirmationDialog("Erase all data and passcode?", isPresented: $confirmErase, titleVisibility: .visible) {
             Button("Erase Everything", role: .destructive) {
                 isPresented = false
@@ -1916,5 +1992,297 @@ struct GoonedSettingsModal: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Editable Smart Personalization (`#Tags`, Learned Sources, & Blocked `#Tags`)
+
+struct AlgorithmEditorSheet: View {
+    @EnvironmentObject var store: UserStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var boostInput = ""
+    @State private var blockInput = ""
+    @State private var suggestions: [Rule34TagSuggestion] = []
+    @State private var autocompleteTask: Task<Void, Never>?
+
+    private var parsedBoostTags: [String] {
+        Rule34API.parseTags(boostInput)
+    }
+
+    private var parsedBlockTags: [String] {
+        Rule34API.parseTags(blockInput)
+    }
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Edit Smart Personalization")
+                            .font(.system(size: 20, weight: .bold))
+                        Text("Spaces create new #tags · Underscores combine words")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.white.opacity(0.62))
+                    }
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 36, height: 36)
+                            .liquidGlassCircle()
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        // 1. Pinned #Tags (Heavy For You Boost)
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("PINNED #TAGS (BOOSTED)")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(1.2)
+                                .foregroundStyle(.white.opacity(0.58))
+
+                            HStack(spacing: 8) {
+                                HStack(spacing: 8) {
+                                    Text("#")
+                                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(Theme.accentBright)
+                                    TextField("e.g. hentai_femboy goth", text: $boostInput)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .font(.system(size: 15))
+                                        .onSubmit { addPinnedTags() }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                                Button {
+                                    addPinnedTags()
+                                } label: {
+                                    Text("Add")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .liquidGlassCapsule(active: !parsedBoostTags.isEmpty)
+                                }
+                                .disabled(parsedBoostTags.isEmpty)
+                            }
+
+                            if !parsedBoostTags.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(parsedBoostTags, id: \.self) { tag in
+                                            Text("#\(tag)")
+                                                .font(.system(size: 12, weight: .bold))
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 5)
+                                                .liquidGlassCapsule(active: true)
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !suggestions.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(suggestions.prefix(8)) { s in
+                                            Button {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                store.addBoostedTags(s.value)
+                                                boostInput = ""
+                                                suggestions = []
+                                            } label: {
+                                                Text("+ #\(s.value)")
+                                                    .font(.system(size: 11.5, weight: .semibold))
+                                                    .padding(.horizontal, 10)
+                                                    .padding(.vertical, 5)
+                                                    .liquidGlassCapsule(tinted: true)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if store.data.algorithm.boostedTags.isEmpty {
+                                Text("No pinned #tags yet. Add any tag above to prioritize it in For You.")
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(.white.opacity(0.55))
+                            } else {
+                                editableTagGrid(
+                                    items: store.data.algorithm.boostedTags.map { ("#\($0)", $0) },
+                                    tintActive: true
+                                ) { raw in
+                                    store.removeBoostedTag(raw)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
+                        // 2. Learned #Tags & Creators / Subreddits
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("LEARNED TASTE SIGNALS")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(1.2)
+                                .foregroundStyle(.white.opacity(0.58))
+
+                            if !store.topAlgorithmTags.isEmpty {
+                                Text("Tap × to remove any learned #tag")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.6))
+
+                                editableTagGrid(
+                                    items: store.topAlgorithmTags.map { ("#\($0.tag) · \(Int($0.score.rounded()))", $0.tag) },
+                                    tintActive: false
+                                ) { tag in
+                                    store.removeLearnedTag(tag)
+                                }
+                            }
+
+                            if !store.topAlgorithmSubredditEntries.isEmpty {
+                                Divider().overlay(Color.white.opacity(0.14))
+                                Text("Top sources & subreddits (tap × to unlearn)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.6))
+
+                                editableTagGrid(
+                                    items: store.topAlgorithmSubredditEntries.map { ("r/\($0.name)", $0.name) },
+                                    tintActive: false
+                                ) { sub in
+                                    store.removeLearnedSubreddit(sub)
+                                }
+                            }
+
+                            if store.topAlgorithmTags.isEmpty && store.topAlgorithmSubredditEntries.isEmpty {
+                                Text("Watch, like, or save videos and your on-device taste signals will appear here.")
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(.white.opacity(0.55))
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
+                        // 3. Blocked / Muted #Tags
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("BLOCKED #TAGS (HIDDEN EVERYWHERE)")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(1.2)
+                                .foregroundStyle(.white.opacity(0.58))
+
+                            HStack(spacing: 8) {
+                                HStack(spacing: 8) {
+                                    Text("#")
+                                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(.red.opacity(0.85))
+                                    TextField("e.g. tag_to_hide", text: $blockInput)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .font(.system(size: 15))
+                                        .onSubmit { addBlockedTags() }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                                Button {
+                                    addBlockedTags()
+                                } label: {
+                                    Text("Block")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .liquidGlassCapsule()
+                                }
+                                .disabled(parsedBlockTags.isEmpty)
+                            }
+
+                            if !store.data.algorithm.blockedTags.isEmpty {
+                                editableTagGrid(
+                                    items: store.data.algorithm.blockedTags.map { ("#\($0)", $0) },
+                                    tintActive: false
+                                ) { tag in
+                                    store.removeBlockedTag(tag)
+                                }
+                            } else {
+                                Text("No blocked #tags. Anything added here is automatically filtered out of For You, Search, Rule34, X, and IG.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.55))
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 28)
+                }
+            }
+            .foregroundStyle(.white)
+        }
+        .onChange(of: boostInput) { _, newValue in
+            autocompleteTask?.cancel()
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                suggestions = []
+                return
+            }
+            autocompleteTask = Task {
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                guard !Task.isCancelled else { return }
+                let fetched = await Rule34API.shared.autocomplete(trimmed)
+                await MainActor.run { suggestions = fetched }
+            }
+        }
+    }
+
+    private func addPinnedTags() {
+        guard !boostInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        store.addBoostedTags(boostInput)
+        boostInput = ""
+        suggestions = []
+    }
+
+    private func addBlockedTags() {
+        guard !blockInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        store.addBlockedTags(blockInput)
+        blockInput = ""
+    }
+
+    private func editableTagGrid(
+        items: [(label: String, key: String)],
+        tintActive: Bool,
+        onRemove: @escaping (String) -> Void
+    ) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(items, id: \.key) { item in
+                    HStack(spacing: 6) {
+                        Text(item.label)
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            onRemove(item.key)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                    }
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6)
+                    .liquidGlassCapsule(active: tintActive, tinted: !tintActive)
+                }
+            }
+        }
     }
 }

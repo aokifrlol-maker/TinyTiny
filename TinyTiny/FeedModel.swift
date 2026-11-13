@@ -65,6 +65,11 @@ enum FeedSource: Hashable {
         return false
     }
 
+    var isList: Bool {
+        if case .list = self { return true }
+        return false
+    }
+
     var swipeKey: (kind: String, name: String) {
         switch self {
         case .forYou: return ("foryou", "foryou")
@@ -124,13 +129,17 @@ final class FeedModel: ObservableObject {
     private var igMixAfterCursor: String? = nil
     private var hasMore = true
     private var ids = Set<String>()
+    private var mediaKeys = Set<String>()
     private var activeLoadTask: Task<Void, Never>?
     private var emptyPageStreak = 0
+    private var followingRoundRobin = 0
+    private var followingCursors: [String: String] = [:]
 
     init(source: FeedSource = .forYou, items: [Gif] = []) {
         self.source = source
         self.items = items
         self.ids = Set(items.map(\.id))
+        self.mediaKeys = Set(items.map(\.canonicalDedupeKey))
         if case .list = source { hasMore = false }
     }
 
@@ -161,9 +170,12 @@ final class FeedModel: ObservableObject {
         activeLoadTask?.cancel()
         source = newSource
         emptyPageStreak = 0
+        followingRoundRobin = 0
+        followingCursors = [:]
         if !initialItems.isEmpty {
             items = initialItems
             ids = Set(initialItems.map(\.id))
+            mediaKeys = Set(initialItems.map(\.canonicalDedupeKey))
             hasMore = false
             isSwitching = false
             afterCursor = nil
@@ -173,6 +185,7 @@ final class FeedModel: ObservableObject {
         } else {
             items = []
             ids = []
+            mediaKeys = []
             hasMore = true
             isSwitching = true
             isLoading = false
@@ -199,8 +212,8 @@ final class FeedModel: ObservableObject {
     func shuffleItems() {
         let store = UserStore.shared
         if items.count > 2 {
-            let unseen = items.filter { !store.isSeen($0.id) }.shuffled()
-            let seen = items.filter { store.isSeen($0.id) }.shuffled()
+            let unseen = items.filter { !store.isSeen($0) }.shuffled()
+            let seen = items.filter { store.isSeen($0) }.shuffled()
             items = unseen + seen
         }
         Task { await loadMore() }
@@ -215,7 +228,10 @@ final class FeedModel: ObservableObject {
     func refresh(keepSavedCursor: Bool = false, rotateCursor: Bool = false) async {
         items = []
         ids = []
+        mediaKeys = []
         emptyPageStreak = 0
+        followingRoundRobin = 0
+        followingCursors = [:]
         if rotateCursor {
             if case .forYou = source {
                 afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...6) * 25)
@@ -247,8 +263,10 @@ final class FeedModel: ObservableObject {
         do {
             var totalAddedThisCall = 0
             var attempts = 0
+            var fallbackSeen: [Gif] = []
+            let maxAttempts = (source.isXFeed || source.isIGFeed || source == .following) ? 4 : 3
 
-            while totalAddedThisCall < 8 && attempts < 2 && hasMore {
+            while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
                 attempts += 1
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
@@ -256,12 +274,14 @@ final class FeedModel: ObservableObject {
                 afterCursor = resp.after
                 store.setSavedCursor(resp.after, for: cursorKey)
 
-                let playablePosts = resp.posts.filter { $0.hasPlayableMedia }
+                let playablePosts = resp.posts.filter {
+                    $0.hasPlayableMedia && !store.isBlockedByAlgorithm($0)
+                }
 
                 if playablePosts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
                     if isInfiniteSource {
                         if case .forYou = source {
-                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...8) * 25)
+                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...12) * 25)
                         } else if case .rule34 = source {
                             let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
                             afterCursor = "\(nextP)"
@@ -280,11 +300,11 @@ final class FeedModel: ObservableObject {
                 }
 
                 var batchUnseen: [Gif] = []
-                var batchSeen: [Gif] = []
                 for post in playablePosts {
                     guard ids.insert(post.id).inserted else { continue }
-                    if store.isSeen(post.id) {
-                        batchSeen.append(post)
+                    guard mediaKeys.insert(post.canonicalDedupeKey).inserted else { continue }
+                    if store.isSeen(post) {
+                        fallbackSeen.append(post)
                     } else {
                         batchUnseen.append(post)
                     }
@@ -299,60 +319,75 @@ final class FeedModel: ObservableObject {
                     break
                 }
 
-                // Stream items into the feed immediately on the first response instead of blocking!
+                // Stream unseen items into the feed immediately (never recycle seen items mid-scroll!)
                 if !batchUnseen.isEmpty {
                     emptyPageStreak = 0
                     items.append(contentsOf: batchUnseen)
                     totalAddedThisCall += batchUnseen.count
                     isSwitching = false
-                } else if !batchSeen.isEmpty {
-                    emptyPageStreak = 0
-                    items.append(contentsOf: batchSeen.shuffled())
-                    totalAddedThisCall += batchSeen.count
-                    isSwitching = false
                 } else {
                     emptyPageStreak += 1
-                    if !isInfiniteSource && emptyPageStreak >= 2 {
+                    if !isInfiniteSource && emptyPageStreak >= 3 {
                         hasMore = false
                     }
                     if isInfiniteSource {
                         if case .forYou = source {
-                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...10) * 25)
+                            afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...16) * 25)
+                        } else if case .rule34 = source {
+                            let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
+                            afterCursor = "\(nextP)"
                         } else if resp.after == nil || resp.after?.isEmpty == true {
                             afterCursor = nil
                         }
                     }
                 }
 
-                if (source.isXFeed || source.isIGFeed) && !playablePosts.isEmpty { break }
+                if (source.isXFeed || source.isIGFeed) && !batchUnseen.isEmpty { break }
                 if resp.after == nil || resp.after?.isEmpty == true {
                     if !isInfiniteSource { break }
                 }
             }
 
-            // Algorithm Taste Boost: when enabled on For You, pull a small fresh batch from top-liked subreddit
+            // Only if the entire screen is still empty after trying multiple fresh pages (e.g. brand-new small account),
+            // allow non-IG/non-X feeds to show a shuffled batch instead of a blank black screen.
+            if items.isEmpty && !fallbackSeen.isEmpty && !source.isIGFeed && !source.isXFeed && source != .following {
+                items.append(contentsOf: fallbackSeen.shuffled())
+            }
+
+            // Algorithm Taste Boost: when enabled on For You, pull fresh posts from pinned #tags or top-liked subreddit
             if case .forYou = source,
-               store.data.settings.algorithmEnabled,
-               let favSub = store.topAlgorithmSubreddits.randomElement() {
+               store.data.settings.algorithmEnabled {
+                let favSub = store.topAlgorithmSubreddits.randomElement()
+                let boostedTag = store.data.algorithm.boostedTags.randomElement()
                 Task { @MainActor [weak self] in
                     guard let self, case .forYou = self.source else { return }
-                    if let subResp = try? await api.subreddit(favSub, sort: self.sort.rawValue, after: nil, limit: 8) {
-                        let freshFavs = subResp.posts.filter {
-                            $0.hasPlayableMedia && !store.isSeen($0.id) && self.ids.insert($0.id).inserted
-                        }
-                        guard !freshFavs.isEmpty else { return }
-                        var combined = self.items
-                        var idx = max(2, combined.count - 6)
-                        for p in freshFavs.prefix(3) {
-                            if idx <= combined.count {
-                                combined.insert(p, at: idx)
-                                idx += 3
-                            } else {
-                                combined.append(p)
-                            }
-                        }
-                        self.items = combined
+                    var boostedPosts: [Gif] = []
+                    if let sub = favSub,
+                       let subResp = try? await api.subreddit(sub, sort: self.sort.rawValue, after: nil, limit: 8) {
+                        boostedPosts.append(contentsOf: subResp.posts)
+                    } else if let tag = boostedTag,
+                              let searchResp = try? await api.search(tag, after: nil) {
+                        boostedPosts.append(contentsOf: searchResp.gifs)
                     }
+                    let freshFavs = boostedPosts.filter {
+                        $0.hasPlayableMedia
+                        && !store.isBlockedByAlgorithm($0)
+                        && !store.isSeen($0)
+                        && self.ids.insert($0.id).inserted
+                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
+                    }
+                    guard !freshFavs.isEmpty else { return }
+                    var combined = self.items
+                    var idx = max(2, combined.count - 6)
+                    for p in freshFavs.prefix(3) {
+                        if idx <= combined.count {
+                            combined.insert(p, at: idx)
+                            idx += 3
+                        } else {
+                            combined.append(p)
+                        }
+                    }
+                    self.items = combined
                 }
             }
 
@@ -363,7 +398,12 @@ final class FeedModel: ObservableObject {
                     let xResp = await XAPI.forYou(after: currentXCursor)
                     guard let self, case .forYou = self.source else { return }
                     self.xMixAfterCursor = xResp.after
-                    let freshX = xResp.posts.filter { !store.isSeen($0.id) && self.ids.insert($0.id).inserted }
+                    let freshX = xResp.posts.filter {
+                        !store.isBlockedByAlgorithm($0)
+                        && !store.isSeen($0)
+                        && self.ids.insert($0.id).inserted
+                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
+                    }
                     guard !freshX.isEmpty else { return }
                     var combined = self.items
                     var insertIdx = max(2, combined.count - 8)
@@ -386,7 +426,12 @@ final class FeedModel: ObservableObject {
                     let igResp = await InstagramAPI.reels(after: currentIGCursor)
                     guard let self, case .forYou = self.source else { return }
                     self.igMixAfterCursor = igResp.after
-                    let freshIG = igResp.posts.filter { !store.isSeen($0.id) && self.ids.insert($0.id).inserted }
+                    let freshIG = igResp.posts.filter {
+                        !store.isBlockedByAlgorithm($0)
+                        && !store.isSeen($0)
+                        && self.ids.insert($0.id).inserted
+                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
+                    }
                     guard !freshIG.isEmpty else { return }
                     var combined = self.items
                     var insertIdx = max(3, combined.count - 6)
@@ -428,21 +473,42 @@ final class FeedModel: ObservableObject {
             let users = store.data.followedUsers
             let xUsers = store.data.followedXUsers
             let igUsers = store.data.followedIGUsers
-            if subs.isEmpty && users.isEmpty && xUsers.isEmpty && igUsers.isEmpty && !store.data.xSession.isConnected && !store.data.igSession.isConnected {
+
+            var poolKeys: [String] = []
+            if !subs.isEmpty || !users.isEmpty { poolKeys.append("reddit") }
+            if store.data.igSession.isConnected { poolKeys.append("ig_following") }
+            if store.data.xSession.isConnected { poolKeys.append("x_following") }
+            for xu in xUsers { poolKeys.append("x_user:\(xu)") }
+            for iu in igUsers { poolKeys.append("ig_user:\(iu)") }
+
+            guard !poolKeys.isEmpty else {
                 hasMore = false
                 return GoonedFeedResponse(posts: [], after: nil)
             }
-            if !subs.isEmpty || !users.isEmpty {
-                return try await api.following(subreddits: subs, users: users, after: cursor)
-            } else if let firstXUser = xUsers.first {
-                return await XAPI.userMedia(firstXUser, after: cursor)
-            } else if let firstIGUser = igUsers.first {
-                return await InstagramAPI.userReels(firstIGUser, after: cursor)
-            } else if store.data.xSession.isConnected {
-                return await XAPI.following(after: cursor)
+
+            let poolKey = poolKeys[followingRoundRobin % poolKeys.count]
+            let poolCursor = followingCursors[poolKey]
+            followingRoundRobin += 1
+
+            let resp: GoonedFeedResponse
+            if poolKey == "reddit" {
+                resp = try await api.following(subreddits: subs, users: users, after: poolCursor)
+            } else if poolKey == "ig_following" {
+                resp = await InstagramAPI.following(after: poolCursor)
+            } else if poolKey == "x_following" {
+                resp = await XAPI.following(after: poolCursor)
+            } else if poolKey.hasPrefix("x_user:") {
+                let handle = String(poolKey.dropFirst("x_user:".count))
+                resp = await XAPI.userMedia(handle, after: poolCursor)
             } else {
-                return await InstagramAPI.following(after: cursor)
+                let handle = String(poolKey.dropFirst("ig_user:".count))
+                resp = await InstagramAPI.userReels(handle, after: poolCursor)
             }
+
+            if let next = resp.after, !next.isEmpty {
+                followingCursors[poolKey] = next
+            }
+            return GoonedFeedResponse(posts: resp.posts, after: "following_\(followingRoundRobin)")
         case .category(let name):
             let recentSeen = Array(store.data.seenIDs.suffix(120))
             let resp = try await api.category(

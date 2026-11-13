@@ -243,19 +243,24 @@ actor Rule34API {
 
         var posts: [Gif] = []
         for item in rawArray {
-            guard let fileUrl = item["file_url"] as? String, !fileUrl.isEmpty else { continue }
-            let sampleUrl = (item["sample_url"] as? String) ?? fileUrl
-            let previewUrl = (item["preview_url"] as? String) ?? sampleUrl
+            guard let rawFile = item["file_url"] as? String, !rawFile.isEmpty else { continue }
+            let fileUrl = normalizeHTTPS(rawFile)
+            let sampleUrl = normalizeHTTPS((item["sample_url"] as? String) ?? fileUrl)
+            let previewUrl = normalizeHTTPS((item["preview_url"] as? String) ?? sampleUrl)
 
-            let lower = fileUrl.lowercased()
+            let lower = fileUrl.lowercased().split(separator: "?").first.map(String.init) ?? fileUrl.lowercased()
+            let sampleLower = sampleUrl.lowercased().split(separator: "?").first.map(String.init) ?? sampleUrl.lowercased()
             // Skip raw .webm files unless sample_url is an .mp4 (iOS AVPlayer plays .mp4/.mov natively, not VP8/VP9 .webm)
-            let isMp4 = lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || sampleUrl.lowercased().hasSuffix(".mp4")
+            let isMp4 = lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || sampleLower.hasSuffix(".mp4")
             let isGif = lower.hasSuffix(".gif")
-            let isImage = lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png")
+            let isImage = lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".webp")
+                || sampleLower.hasSuffix(".jpg") || sampleLower.hasSuffix(".jpeg") || sampleLower.hasSuffix(".png")
 
             guard isMp4 || isGif || isImage else { continue }
 
-            let playableVideoUrl: String? = isMp4 ? (lower.hasSuffix(".mp4") ? fileUrl : sampleUrl) : nil
+            let playableVideoUrl: String? = isMp4 ? ((lower.hasSuffix(".mp4") || lower.hasSuffix(".mov")) ? fileUrl : sampleUrl) : nil
+            let sampleIsFastImg = !isGif && (sampleLower.hasSuffix(".jpg") || sampleLower.hasSuffix(".jpeg") || sampleLower.hasSuffix(".png") || sampleLower.hasSuffix(".webp"))
+            let preferredImageUrl = isGif ? fileUrl : (sampleIsFastImg ? sampleUrl : fileUrl)
             let idVal: String
             if let i = item["id"] as? Int {
                 idVal = "\(i)"
@@ -294,11 +299,11 @@ actor Rule34API {
                     width: width,
                     height: height,
                     mediaType: mediaType,
-                    mediaUrl: playableVideoUrl ?? fileUrl,
+                    mediaUrl: playableVideoUrl ?? preferredImageUrl,
                     muxedUrl: playableVideoUrl,
                     muxedUrlHd: playableVideoUrl,
                     hlsUrl: nil,
-                    posterUrl: previewUrl,
+                    posterUrl: sampleIsFastImg ? fileUrl : previewUrl,
                     thumbnailUrl: previewUrl,
                     sourceUrl: "\(basePermalink)\(idVal)",
                     permalink: "\(basePermalink)\(idVal)",
@@ -315,16 +320,21 @@ actor Rule34API {
         }
         var posts: [Gif] = []
         for item in arr {
-            guard let fileUrl = (item["file_url"] as? String) ?? (item["sample_url"] as? String),
-                  !fileUrl.isEmpty else { continue }
-            let lower = fileUrl.lowercased()
-            let isMp4 = lower.hasSuffix(".mp4")
-            let isImage = lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".gif")
+            guard let rawFile = (item["file_url"] as? String) ?? (item["jpeg_url"] as? String) ?? (item["sample_url"] as? String),
+                  !rawFile.isEmpty else { continue }
+            let fileUrl = normalizeHTTPS(rawFile)
+            let sampleUrl = normalizeHTTPS((item["sample_url"] as? String) ?? (item["jpeg_url"] as? String) ?? fileUrl)
+            let previewUrl = normalizeHTTPS((item["preview_url"] as? String) ?? sampleUrl)
+
+            let lower = fileUrl.lowercased().split(separator: "?").first.map(String.init) ?? fileUrl.lowercased()
+            let sampleLower = sampleUrl.lowercased().split(separator: "?").first.map(String.init) ?? sampleUrl.lowercased()
+            let isMp4 = lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || sampleLower.hasSuffix(".mp4")
+            let isGif = lower.hasSuffix(".gif")
+            let isImage = isGif || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".webp")
+                || sampleLower.hasSuffix(".jpg") || sampleLower.hasSuffix(".jpeg")
             guard isMp4 || isImage else { continue }
 
             let idVal = (item["id"] as? Int).map { "\($0)" } ?? UUID().uuidString
-            let previewUrl = (item["preview_url"] as? String) ?? (item["sample_url"] as? String) ?? fileUrl
-            let sampleUrl = (item["sample_url"] as? String) ?? fileUrl
             let score = (item["score"] as? Int) ?? 0
             let width = item["width"] as? Int
             let height = item["height"] as? Int
@@ -332,6 +342,7 @@ actor Rule34API {
             let rawTags = (item["tags"] as? String) ?? ""
             let topTags = rawTags.split(separator: " ").prefix(8).map { "#\($0)" }.joined(separator: " ")
 
+            let preferredImage = isGif ? fileUrl : sampleUrl
             posts.append(
                 Gif(
                     id: "\(sourcePrefix)_\(idVal)",
@@ -343,11 +354,11 @@ actor Rule34API {
                     width: width,
                     height: height,
                     mediaType: isMp4 ? "video" : "image",
-                    mediaUrl: isMp4 ? fileUrl : sampleUrl,
+                    mediaUrl: isMp4 ? fileUrl : preferredImage,
                     muxedUrl: isMp4 ? fileUrl : nil,
                     muxedUrlHd: isMp4 ? fileUrl : nil,
                     hlsUrl: nil,
-                    posterUrl: previewUrl,
+                    posterUrl: fileUrl == preferredImage ? previewUrl : fileUrl,
                     thumbnailUrl: previewUrl,
                     sourceUrl: "https://rule34.xxx",
                     permalink: "https://rule34.xxx",
@@ -356,6 +367,12 @@ actor Rule34API {
             )
         }
         return posts
+    }
+
+    private func normalizeHTTPS(_ raw: String) -> String {
+        if raw.hasPrefix("//") { return "https:\(raw)" }
+        if raw.hasPrefix("http://") { return "https://" + raw.dropFirst(7) }
+        return raw
     }
 }
 

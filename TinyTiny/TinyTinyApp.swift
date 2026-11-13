@@ -79,8 +79,17 @@ struct GoonedMainShell: View {
     @StateObject private var igModel = FeedModel(source: .igReels)
     @StateObject private var customModel = FeedModel(source: .forYou)
 
+    private struct CustomBackHistoryItem {
+        let channel: HomeChannel
+        let customSource: FeedSource?
+        let customItems: [Gif]
+        let postID: String?
+        let returnTab: GoonedDockTab
+    }
+
     @State private var activeChannel: HomeChannel = .forYou
     @State private var slotPostIDs: [HomeChannel: String] = [:]
+    @State private var customBackStack: [CustomBackHistoryItem] = []
     @State private var activeTab: GoonedDockTab = .home
     @State private var showSettingsModal = false
     @State private var showXLoginSheet = false
@@ -88,6 +97,7 @@ struct GoonedMainShell: View {
     @State private var showR34KeySheet = false
     @State private var pendingFeedAfterLogin: FeedSource? = nil
     @State private var didPrewarm = false
+    @AppStorage("tt_bella_intro_seen_v1") private var hasSeenBellaIntro = false
 
     private var tinted: Bool { store.data.settings.tintedGlass }
 
@@ -118,7 +128,7 @@ struct GoonedMainShell: View {
             // 1. Main Full-Screen Feed Scroller (persistent per-channel models + instant horizontal swipe)
             FeedView(
                 model: activeModel,
-                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
+                isVisible: activeTab == .home && hasSeenBellaIntro && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
                 currentID: currentPostIDBinding,
                 onOpenCategories: {
                     withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
@@ -185,6 +195,7 @@ struct GoonedMainShell: View {
                         }
                     },
                     onPlayLikedPost: { post in
+                        pushCustomBackHistory(returnTab: .likes)
                         customModel.switchSource(.list(title: "Liked"), initialItems: store.data.liked)
                         slotPostIDs[.custom] = post.id
                         activeChannel = .custom
@@ -193,6 +204,7 @@ struct GoonedMainShell: View {
                         }
                     },
                     onPlayOfflinePost: { post in
+                        pushCustomBackHistory(returnTab: .likes)
                         customModel.switchSource(.list(title: "Offline Vault"), initialItems: store.data.downloaded)
                         slotPostIDs[.custom] = post.id
                         activeChannel = .custom
@@ -300,10 +312,27 @@ struct GoonedMainShell: View {
                     onSetupR34Key: {
                         showSettingsModal = false
                         showR34KeySheet = true
+                    },
+                    onReplayIntro: {
+                        showSettingsModal = false
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            hasSeenBellaIntro = false
+                        }
                     }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 .zIndex(30)
+            }
+
+            // 8. First-Time 5-Second 18+ Motion Graphics Intro ("Welcome to Gooned / By Bella")
+            if !hasSeenBellaIntro {
+                BellaGoonedIntroOverlay {
+                    withAnimation(.easeInOut(duration: 0.38)) {
+                        hasSeenBellaIntro = true
+                    }
+                }
+                .transition(.opacity)
+                .zIndex(80)
             }
         }
         .animation(.easeOut(duration: 0.14), value: activeTab)
@@ -346,39 +375,84 @@ struct GoonedMainShell: View {
         }
     }
 
+    private func pushCustomBackHistory(returnTab: GoonedDockTab = .home) {
+        let item = CustomBackHistoryItem(
+            channel: activeChannel,
+            customSource: activeChannel == .custom ? customModel.source : nil,
+            customItems: activeChannel == .custom && customModel.source.isList ? customModel.items : [],
+            postID: slotPostIDs[activeChannel],
+            returnTab: returnTab
+        )
+        customBackStack.append(item)
+        if customBackStack.count > 16 {
+            customBackStack.removeFirst(customBackStack.count - 16)
+        }
+    }
+
+    private func popCustomFeed() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if let prev = customBackStack.popLast() {
+            if prev.channel == .custom {
+                customModel.switchSource(prev.customSource ?? .forYou, initialItems: prev.customItems)
+                slotPostIDs[.custom] = prev.postID
+                activeChannel = .custom
+            } else {
+                activeChannel = prev.channel
+                if let pid = prev.postID {
+                    slotPostIDs[prev.channel] = pid
+                }
+            }
+            if activeTab != prev.returnTab {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    activeTab = prev.returnTab
+                }
+            }
+        } else {
+            selectFeed(.forYou)
+        }
+    }
+
     private func selectFeed(_ src: FeedSource, forceReload: Bool = false) {
         switch src {
         case .following:
+            customBackStack.removeAll()
             activeChannel = .following
             if forceReload {
                 slotPostIDs[.following] = nil
                 Task { await followingModel.refresh(rotateCursor: true) }
             }
         case .forYou:
+            customBackStack.removeAll()
             activeChannel = .forYou
             if forceReload {
                 slotPostIDs[.forYou] = nil
                 Task { await forYouModel.refresh(rotateCursor: true) }
             }
         case .xForYou, .xFollowing, .xBookmarks:
+            customBackStack.removeAll()
             activeChannel = .x
             if xModel.source != src || forceReload {
                 slotPostIDs[.x] = nil
                 xModel.switchSource(src)
             }
         case .rule34(let tag) where tag.isEmpty:
+            customBackStack.removeAll()
             activeChannel = .rule34
             if forceReload {
                 slotPostIDs[.rule34] = nil
                 Task { await r34Model.refresh(rotateCursor: true) }
             }
         case .igReels, .igFollowing, .igSaved:
+            customBackStack.removeAll()
             activeChannel = .ig
             if igModel.source != src || forceReload {
                 slotPostIDs[.ig] = nil
                 igModel.switchSource(src)
             }
         default:
+            if activeChannel != .custom || customModel.source != src {
+                pushCustomBackHistory(returnTab: .home)
+            }
             activeChannel = .custom
             if customModel.source != src || forceReload {
                 slotPostIDs[.custom] = nil
@@ -603,28 +677,25 @@ struct GoonedMainShell: View {
     }
 
     private var customFeedTitlePill: some View {
-        HStack(spacing: 8) {
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                selectFeed(.forYou)
-            } label: {
+        Button {
+            popCustomFeed()
+        } label: {
+            HStack(spacing: 7) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
+                    .font(.system(size: 12.5, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.9))
 
-            Button {
-                activeTab = .browse
-            } label: {
                 Text(customModel.source.displayTitle)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
             }
+            .padding(.horizontal, 15)
+            .padding(.vertical, 8)
+            .contentShape(Capsule())
+            .liquidGlassCapsule(tinted: tinted)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .liquidGlassCapsule(tinted: tinted)
+        .buttonStyle(ScalePressButtonStyle())
     }
 
     // MARK: - Floating Liquid Glass Bottom Dock (`🏠` `🤍` `🧭` `👤`)
@@ -784,5 +855,391 @@ struct BrandLogoInstagram: View {
         }
         .opacity(active ? 1.0 : 0.90)
         .frame(width: 26, height: 26)
+    }
+}
+
+// MARK: - First-Time 5-Second 18+ Motion Graphics Intro ("Welcome to Gooned / By Bella")
+
+struct BellaGoonedIntroOverlay: View {
+    var onFinish: () -> Void
+
+    @State private var startDate = Date()
+    @State private var finished = false
+    @State private var lastSwipeStage = 0
+
+    private let totalDuration: Double = 5.0
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let elapsed = min(totalDuration, max(0, timeline.date.timeIntervalSince(startDate)))
+            let outroP = smoothstep(4.35, 5.0, elapsed)
+            let zoomScale = 1.0 + outroP * 0.14
+            let overallOpacity = 1.0 - smoothstep(4.5, 5.0, elapsed)
+
+            ZStack {
+                // Deep obsidian + velvet rose/magenta 18+ ambient stage
+                Color(red: 0.025, green: 0.012, blue: 0.032)
+                    .ignoresSafeArea()
+
+                ambientAura(t: elapsed)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    Spacer(minLength: 18)
+
+                    // Top 18+ Editorial Tagline
+                    let badgeIn = smoothstep(0.12, 0.72, elapsed)
+                    HStack(spacing: 8) {
+                        Text("18+")
+                            .font(.system(size: 11, weight: .black, design: .rounded))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(red: 1.0, green: 0.25, blue: 0.56), Color(red: 1.0, green: 0.50, blue: 0.72)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                in: Capsule()
+                            )
+
+                        Text("PRIVATE REEL VAULT")
+                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                            .tracking(2.2)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 0.8))
+                    .opacity(badgeIn)
+                    .offset(y: (1.0 - badgeIn) * 14)
+
+                    Spacer(minLength: 18)
+
+                    // Hero Kinetic Title: "Welcome to Gooned" + "By Bella"
+                    let welcomeIn = smoothstep(0.32, 0.95, elapsed)
+                    let goonedIn = smoothstep(0.50, 1.20, elapsed)
+                    let bellaIn = smoothstep(0.85, 1.45, elapsed)
+                    let shimmerX = (elapsed - 0.8) * 1.15
+
+                    VStack(spacing: 6) {
+                        Text("WELCOME TO")
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .tracking(4.5)
+                            .foregroundStyle(.white.opacity(0.68))
+                            .opacity(welcomeIn)
+                            .offset(y: (1.0 - welcomeIn) * 12)
+
+                        Text("Gooned")
+                            .font(.system(size: 54, weight: .black, design: .rounded))
+                            .tracking(-1.2)
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [
+                                        .white,
+                                        Color(red: 1.0, green: 0.78, blue: 0.90),
+                                        Color(red: 1.0, green: 0.22, blue: 0.54)
+                                    ],
+                                    startPoint: UnitPoint(x: max(-0.4, min(1.2, shimmerX - 0.3)), y: 0),
+                                    endPoint: UnitPoint(x: max(0.0, min(1.6, shimmerX + 0.5)), y: 1)
+                                )
+                            )
+                            .shadow(color: Color(red: 1.0, green: 0.16, blue: 0.52).opacity(0.45), radius: 22, y: 6)
+                            .scaleEffect(0.86 + 0.14 * goonedIn)
+                            .opacity(goonedIn)
+
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkle")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Color(red: 1.0, green: 0.40, blue: 0.68))
+                            Text("By Bella")
+                                .font(.system(size: 15, weight: .semibold, design: .serif))
+                                .italic()
+                                .foregroundStyle(.white.opacity(0.92))
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 1.0, green: 0.18, blue: 0.52).opacity(0.14))
+                                .overlay(Capsule().stroke(Color(red: 1.0, green: 0.42, blue: 0.72).opacity(0.38), lineWidth: 0.9))
+                        )
+                        .opacity(bellaIn)
+                        .scaleEffect(0.92 + 0.08 * bellaIn)
+                    }
+
+                    Spacer(minLength: 20)
+
+                    // 3D Floating Scrolling iPhone Mockup
+                    let phoneIn = smoothstep(0.95, 1.65, elapsed)
+                    phoneScrollingShowcase(t: elapsed)
+                        .scaleEffect(0.84 + 0.16 * phoneIn)
+                        .opacity(phoneIn)
+                        .offset(y: (1.0 - phoneIn) * 38)
+
+                    Spacer(minLength: 18)
+
+                    // Subtle Progress Timeline Bar + Skip Pill
+                    HStack(spacing: 12) {
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.14))
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color(red: 1.0, green: 0.25, blue: 0.56), Color.white],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: max(8, 128 * CGFloat(elapsed / totalDuration)))
+                        }
+                        .frame(width: 128, height: 3)
+
+                        if elapsed > 0.9 {
+                            Button {
+                                complete()
+                            } label: {
+                                Text("Skip")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 5)
+                                    .background(Color.white.opacity(0.08), in: Capsule())
+                                    .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.7))
+                            }
+                            .transition(.opacity)
+                        }
+                    }
+                    .padding(.bottom, 28)
+                }
+                .padding(.horizontal, 20)
+                .scaleEffect(zoomScale)
+                .opacity(overallOpacity)
+            }
+            .onChange(of: swipeStage(for: elapsed)) { _, newStage in
+                if newStage > lastSwipeStage {
+                    lastSwipeStage = newStage
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.75)
+                }
+            }
+        }
+        .onAppear {
+            startDate = Date()
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            complete()
+        }
+    }
+
+    private func complete() {
+        guard !finished else { return }
+        finished = true
+        onFinish()
+    }
+
+    private func swipeStage(for t: Double) -> Int {
+        if t >= 3.45 { return 3 }
+        if t >= 2.65 { return 2 }
+        if t >= 1.85 { return 1 }
+        return 0
+    }
+
+    @ViewBuilder
+    private func ambientAura(t: Double) -> some View {
+        let pulse = sin(t * 1.8) * 0.5 + 0.5
+        ZStack {
+            RadialGradient(
+                colors: [
+                    Color(red: 0.96, green: 0.14, blue: 0.48).opacity(0.32 + 0.10 * pulse),
+                    Color(red: 0.48, green: 0.06, blue: 0.34).opacity(0.18),
+                    .clear
+                ],
+                center: UnitPoint(x: 0.5 + 0.08 * cos(t * 1.1), y: 0.36 + 0.05 * sin(t * 0.9)),
+                startRadius: 20,
+                endRadius: 340
+            )
+
+            RadialGradient(
+                colors: [
+                    Color(red: 0.65, green: 0.16, blue: 0.92).opacity(0.22),
+                    .clear
+                ],
+                center: UnitPoint(x: 0.25, y: 0.78),
+                startRadius: 10,
+                endRadius: 290
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func phoneScrollingShowcase(t: Double) -> some View {
+        let scrollOffset =
+            smoothstep(1.85, 2.35, t) * 1.0 +
+            smoothstep(2.65, 3.15, t) * 1.0 +
+            smoothstep(3.45, 3.95, t) * 1.0
+        let swipeVelocity =
+            pulseWindow(1.85, 2.35, t) +
+            pulseWindow(2.65, 3.15, t) +
+            pulseWindow(3.45, 3.95, t)
+        let tiltY = sin(t * 1.5) * 7.0
+        let tiltX = 6.0 - swipeVelocity * 4.0
+
+        let cardH: CGFloat = 296
+        let cardW: CGFloat = 172
+
+        let reels: [(badge: String, title: String, subtitle: String, colors: [Color])] = [
+            ("For You", "Smart Taste Engine", "#neon · #afterhours", [Color(red: 0.88, green: 0.12, blue: 0.46), Color(red: 0.16, green: 0.04, blue: 0.14)]),
+            ("𝕏 Videos", "HD Loop Stream", "@nightfall · 4K 60fps", [Color(red: 0.14, green: 0.16, blue: 0.28), Color(red: 0.58, green: 0.12, blue: 0.44)]),
+            ("Rule34.xxx", "Instant Zero-Wait", "#animated_mp4 · #hq", [Color(red: 0.14, green: 0.42, blue: 0.22), Color(red: 0.06, green: 0.12, blue: 0.10)]),
+            ("IG Reels", "Personal Vault", "Zero repeats · Offline", [Color(red: 0.82, green: 0.22, blue: 0.48), Color(red: 0.34, green: 0.12, blue: 0.62)])
+        ]
+
+        ZStack {
+            // Outer glow behind the phone
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .fill(Color(red: 1.0, green: 0.18, blue: 0.52).opacity(0.24 + 0.14 * swipeVelocity))
+                .frame(width: cardW + 24, height: cardH + 24)
+                .blur(radius: 26)
+
+            // Phone Chassis
+            ZStack(alignment: .top) {
+                // Viewport Screen clipping vertical reel stack
+                ZStack(alignment: .top) {
+                    VStack(spacing: 0) {
+                        ForEach(0..<reels.count, id: \.self) { idx in
+                            let reel = reels[idx]
+                            ZStack(alignment: .bottomLeading) {
+                                LinearGradient(
+                                    colors: reel.colors,
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+
+                                // Animated ambient motion bar inside reel
+                                Circle()
+                                    .fill(Color.white.opacity(0.14))
+                                    .frame(width: 96, height: 96)
+                                    .blur(radius: 18)
+                                    .offset(x: 40 + sin(t * 2.4 + Double(idx)) * 18, y: -110)
+
+                                // Simulated right-side action buttons inside the mini phone
+                                VStack(spacing: 12) {
+                                    Image(systemName: "heart.fill")
+                                        .font(.system(size: 15, weight: .bold))
+                                        .foregroundStyle(Color(red: 1.0, green: 0.28, blue: 0.56))
+                                        .scaleEffect(1.0 + 0.22 * swipeVelocity)
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                    Image(systemName: "speaker.wave.2.fill")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.75))
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                                .padding(.trailing, 10)
+                                .padding(.bottom, 34)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(reel.badge)
+                                        .font(.system(size: 10, weight: .black, design: .rounded))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2.5)
+                                        .background(.white.opacity(0.18), in: Capsule())
+                                    Text(reel.title)
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text(reel.subtitle)
+                                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.76))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(12)
+                                .padding(.bottom, 12)
+                            }
+                            .frame(width: cardW, height: cardH)
+                        }
+                    }
+                    .offset(y: -scrollOffset * cardH)
+
+                    // Simulated animated finger / swipe-up ribbon gesture inside screen
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.white.opacity(0.85), Color(red: 1.0, green: 0.25, blue: 0.56).opacity(0.15)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 18, height: 42 + swipeVelocity * 28)
+                        .blur(radius: 1.5)
+                        .opacity(0.20 + swipeVelocity * 0.72)
+                        .offset(y: cardH * 0.58 - swipeVelocity * 74)
+                }
+                .frame(width: cardW, height: cardH)
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+
+                // Top Status Bar & Dynamic Island overlay inside phone
+                Capsule()
+                    .fill(Color.black)
+                    .frame(width: 54, height: 15)
+                    .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.6))
+                    .padding(.top, 9)
+
+                // Subtle bottom home indicator inside phone
+                VStack {
+                    Spacer()
+                    Capsule()
+                        .fill(Color.white.opacity(0.65))
+                        .frame(width: 54, height: 3.5)
+                        .padding(.bottom, 7)
+                }
+            }
+            .frame(width: cardW, height: cardH)
+            .padding(6)
+            .background(
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .fill(Color(red: 0.08, green: 0.05, blue: 0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 34, style: .continuous)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.50), Color(red: 1.0, green: 0.30, blue: 0.62).opacity(0.45), .white.opacity(0.18)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1.4
+                            )
+                    )
+            )
+            .shadow(color: .black.opacity(0.65), radius: 24, y: 14)
+
+            // Floating Heart Sparks popping beside phone on swipes
+            ForEach(0..<3, id: \.self) { i in
+                Image(systemName: "heart.fill")
+                    .font(.system(size: CGFloat(12 + i * 3)))
+                    .foregroundStyle(Color(red: 1.0, green: 0.25 + Double(i) * 0.12, blue: 0.58))
+                    .opacity(swipeVelocity * (0.9 - Double(i) * 0.2))
+                    .offset(
+                        x: cardW * 0.58 + CGFloat(i * 10),
+                        y: CGFloat(40 - i * 36) - swipeVelocity * CGFloat(44 + i * 16)
+                    )
+                    .scaleEffect(0.75 + swipeVelocity * 0.45)
+            }
+        }
+        .rotation3DEffect(.degrees(tiltY), axis: (x: 0, y: 1, z: 0), perspective: 0.55)
+        .rotation3DEffect(.degrees(tiltX), axis: (x: 1, y: 0, z: 0), perspective: 0.55)
+    }
+
+    private func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
+        let t = max(0, min(1, (x - edge0) / max(0.0001, edge1 - edge0)))
+        return t * t * (3 - 2 * t)
+    }
+
+    private func pulseWindow(_ start: Double, _ end: Double, _ x: Double) -> Double {
+        guard x >= start, x <= end else { return 0 }
+        let p = (x - start) / max(0.0001, end - start)
+        return sin(p * .pi)
     }
 }

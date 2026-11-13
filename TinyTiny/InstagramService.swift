@@ -45,12 +45,16 @@ enum InstagramParser {
 
             let author = extractUsername(from: dict) ?? inheritedAuthor
 
-            if let gif = extractGif(fromMediaDict: dict, fallbackAuthor: author),
-               seen.insert(gif.id).inserted {
-                results.append(gif)
+            var didExtractMediaWrapper = false
+            if let gif = extractGif(fromMediaDict: dict, fallbackAuthor: author) {
+                didExtractMediaWrapper = (dict["media"] != nil)
+                if seen.insert(gif.canonicalDedupeKey).inserted {
+                    results.append(gif)
+                }
             }
 
-            for (_, value) in dict {
+            for (key, value) in dict {
+                if didExtractMediaWrapper && key == "media" { continue }
                 walk(node: value, inheritedAuthor: author, results: &results, seen: &seen)
             }
         } else if let arr = node as? [Any] {
@@ -114,20 +118,25 @@ enum InstagramParser {
             poster = thumbSrc
         }
 
-        let rawId: String
-        if let pk = media["pk"] as? String, !pk.isEmpty {
-            rawId = pk
-        } else if let pkInt = media["pk"] as? Int {
-            rawId = "\(pkInt)"
-        } else if let idStr = media["id"] as? String, !idStr.isEmpty {
-            rawId = idStr
-        } else if let code = media["code"] as? String, !code.isEmpty {
-            rawId = code
-        } else {
-            rawId = UUID().uuidString
-        }
-
         let code = (media["code"] as? String) ?? (media["shortcode"] as? String) ?? ""
+
+        let rawCandidate: String
+        if let pk = media["pk"] as? String, !pk.isEmpty {
+            rawCandidate = pk
+        } else if let pkInt = media["pk"] as? Int {
+            rawCandidate = "\(pkInt)"
+        } else if let idStr = media["id"] as? String, !idStr.isEmpty {
+            rawCandidate = idStr
+        } else if !code.isEmpty {
+            rawCandidate = code
+        } else if let urlSlug = URL(string: videoUrl)?.lastPathComponent, !urlSlug.isEmpty {
+            rawCandidate = urlSlug
+        } else {
+            rawCandidate = UUID().uuidString
+        }
+        // Normalize "34567890123_987654" -> "34567890123" so REST v1 and GraphQL yield the exact same ID
+        let rawId = rawCandidate.split(separator: "_").first.map(String.init) ?? rawCandidate
+
         let author = extractUsername(from: media) ?? fallbackAuthor ?? "instagram"
 
         var captionText = ""
@@ -184,6 +193,23 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     private var seenIds = Set<String>()
     private var waiters: [CheckedContinuation<[Gif], Never>] = []
     private var pageCounter: Int = 0
+    private var nextMaxIdByRoute: [String: String] = [:]
+
+    func currentMaxId(for routeKey: String) -> String? {
+        nextMaxIdByRoute[routeKey]
+    }
+
+    private func extractMaxId(from data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let paging = root["paging_info"] as? [String: Any],
+           let maxId = paging["max_id"] as? String, !maxId.isEmpty {
+            return maxId
+        }
+        if let nextMax = root["next_max_id"] as? String, !nextMax.isEmpty {
+            return nextMax
+        }
+        return nil
+    }
 
     override private init() {
         super.init()
@@ -304,10 +330,15 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
               let jsonText = body["body"] as? String,
               let data = jsonText.data(using: .utf8) else { return }
 
+        if !activeRouteKey.isEmpty, let maxId = extractMaxId(from: data) {
+            nextMaxIdByRoute[activeRouteKey] = maxId
+        }
+
         let reels = InstagramParser.parseReels(from: data)
         guard !reels.isEmpty else { return }
 
-        let fresh = reels.filter { seenIds.insert($0.id).inserted }
+        let store = UserStore.shared
+        let fresh = reels.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
         guard !fresh.isEmpty else { return }
 
         bufferedPosts.append(contentsOf: fresh)
@@ -336,7 +367,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         if isRefresh || activeRouteKey != routeKey {
             activeRouteKey = routeKey
             bufferedPosts.removeAll()
-            seenIds.removeAll()
+            // Keep seenIds across refreshes so previously delivered reels never repeat
             pageCounter = 0
             wv.load(URLRequest(url: targetURL))
 
@@ -350,6 +381,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             let scrollJS = """
             window.scrollBy(0, 3200);
             if (document.scrollingElement) { document.scrollingElement.scrollTop += 3200; }
+            window.dispatchEvent(new Event('scroll'));
             """
             _ = try? await wv.evaluateJavaScript(scrollJS)
             if let apiTriggerJS {
@@ -369,7 +401,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_400_000_000)
                 if !self.waiters.isEmpty {
-                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400);")
+                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400); window.dispatchEvent(new Event('scroll'));")
                 }
                 try? await Task.sleep(nanoseconds: 2_800_000_000)
                 if !self.waiters.isEmpty {
@@ -387,7 +419,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         pageCounter += 1
         return GoonedFeedResponse(
             posts: posts,
-            after: posts.isEmpty ? nil : "igpage_\(pageCounter)"
+            after: "igpage_\(pageCounter)"
         )
     }
 
@@ -395,6 +427,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         activeRouteKey = ""
         bufferedPosts.removeAll()
         seenIds.removeAll()
+        nextMaxIdByRoute.removeAll()
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
         for c in cookies where c.domain.contains("instagram.com") {
@@ -411,6 +444,11 @@ enum InstagramAPI {
     @MainActor
     static func reels(after: String?) async -> GoonedFeedResponse {
         let url = URL(string: "https://www.instagram.com/reels/")!
+        let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_reels") ?? "") : ""
+        let escapedMax = maxId.replacingOccurrences(of: "'", with: "")
+        let bodyExpr = escapedMax.isEmpty
+            ? "'container_module=clips_viewer_clips_tab'"
+            : "'container_module=clips_viewer_clips_tab&max_id=\(escapedMax)'"
         let triggerClipsJS = """
         (async function() {
             try {
@@ -424,7 +462,7 @@ enum InstagramAPI {
                         'X-Requested-With': 'XMLHttpRequest',
                         'Content-Type': 'application/x-www-form-urlencoded'
                     },
-                    body: 'container_module=clips_viewer_clips_tab'
+                    body: \(bodyExpr)
                 });
             } catch (e) {}
         })();
@@ -441,10 +479,12 @@ enum InstagramAPI {
     @MainActor
     static func following(after: String?) async -> GoonedFeedResponse {
         let url = URL(string: "https://www.instagram.com/?variant=following")!
+        let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_following") ?? "") : ""
+        let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
         let triggerFeedJS = """
         (async function() {
             try {
-                await fetch('https://www.instagram.com/api/v1/feed/timeline/', {
+                await fetch('https://www.instagram.com/api/v1/feed/timeline/\(query)', {
                     headers: {
                         'X-IG-App-ID': '936619743392459',
                         'X-Requested-With': 'XMLHttpRequest'
@@ -465,10 +505,12 @@ enum InstagramAPI {
     @MainActor
     static func saved(after: String?) async -> GoonedFeedResponse {
         let url = URL(string: "https://www.instagram.com/reels/")!
+        let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_saved") ?? "") : ""
+        let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
         let triggerSavedJS = """
         (async function() {
             try {
-                await fetch('https://www.instagram.com/api/v1/feed/saved/posts/', {
+                await fetch('https://www.instagram.com/api/v1/feed/saved/posts/\(query)', {
                     headers: {
                         'X-IG-App-ID': '936619743392459',
                         'X-Requested-With': 'XMLHttpRequest'
