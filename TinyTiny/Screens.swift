@@ -2157,7 +2157,7 @@ struct AlgorithmEditorSheet: View {
                                 if !store.topAlgorithmTags.isEmpty || !store.topAlgorithmSubredditEntries.isEmpty {
                                     Button {
                                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                        store.resetAlgorithmProfile()
+                                        store.resetAlgorithm()
                                     } label: {
                                         Text("Reset Profile")
                                             .font(.system(size: 11, weight: .bold))
