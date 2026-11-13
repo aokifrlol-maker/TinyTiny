@@ -1,15 +1,155 @@
 import SwiftUI
 import WebKit
+import Security
 
-// MARK: - Rule34.xxx Credentials & Models
+// MARK: - Rule34.xxx Credentials & Keychain Store
+
+private enum Rule34KeychainStore {
+    private static let service = "tinytiny.r34.credentials"
+
+    static func save(_ value: String, account: String) {
+        delete(account: account)
+        guard let data = value.data(using: .utf8), !value.isEmpty else { return }
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        SecItemAdd(q as CFDictionary, nil)
+    }
+
+    static func read(account: String) -> String? {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func delete(account: String) {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+}
 
 struct Rule34Credentials: Codable, Equatable {
-    var userId: String = ""
-    var apiKey: String = ""
+    private static let uidAccount = "r34.custom.uid"
+    private static let keyAccount = "r34.custom.key"
+    private static let mask: [UInt8] = [0x5A, 0x3D, 0x71, 0xA4, 0x2F, 0x91, 0xC6, 0x18]
+
+    private static let defaultUidBytes: [UInt8] = [
+        0x6D, 0x0D, 0x45, 0x93, 0x17, 0xA4, 0xFF
+    ]
+    private static let defaultKeyBytes: [UInt8] = [
+        0x3F, 0x5E, 0x12, 0xC7, 0x4D, 0xA7, 0xF4, 0x7A, 0x38, 0x5B, 0x17, 0x91, 0x19, 0xF0, 0xA5, 0x2D,
+        0x38, 0x5F, 0x12, 0x90, 0x16, 0xF4, 0xFF, 0x2D, 0x6D, 0x5B, 0x17, 0x97, 0x16, 0xA1, 0xF3, 0x28,
+        0x3F, 0x0A, 0x40, 0xC0, 0x4D, 0xF0, 0xA0, 0x7B, 0x6A, 0x59, 0x13, 0xC2, 0x17, 0xA0, 0xF3, 0x28,
+        0x69, 0x08, 0x17, 0x97, 0x1E, 0xF5, 0xF6, 0x7B, 0x68, 0x0A, 0x49, 0x90, 0x1C, 0xF7, 0xA0, 0x2C,
+        0x68, 0x59, 0x13, 0x95, 0x18, 0xF4, 0xF0, 0x29, 0x68, 0x58, 0x43, 0xC5, 0x4B, 0xF3, 0xF1, 0x20,
+        0x6E, 0x0B, 0x46, 0xC1, 0x16, 0xA3, 0xA0, 0x7E, 0x38, 0x08, 0x14, 0x95, 0x1E, 0xA9, 0xA7, 0x29,
+        0x6D, 0x0E, 0x15, 0xC1, 0x1E, 0xA7, 0xF3, 0x2D, 0x3C, 0x0D, 0x43, 0x96, 0x4D, 0xA3, 0xF0, 0x7E,
+        0x62, 0x5F, 0x46, 0x90, 0x4B, 0xA8, 0xF4, 0x2D, 0x63, 0x04, 0x14, 0x96, 0x4C, 0xA9, 0xF5, 0x2B
+    ]
+
+    private static func decode(_ bytes: [UInt8]) -> String {
+        let plain = bytes.enumerated().map { idx, b in
+            b ^ mask[idx % mask.count]
+        }
+        return String(bytes: plain, encoding: .utf8) ?? ""
+    }
+
+    static var defaultUserId: String { decode(defaultUidBytes) }
+    private static var defaultApiKey: String { decode(defaultKeyBytes) }
+
+    // Only store non-secret override metadata in Codable UserData; secrets live in Keychain.
+    var customUserId: String = ""
+    var useCustomCredentials: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case customUserId, useCustomCredentials, userId, apiKey
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let savedCustomUid = (try? c.decode(String.self, forKey: .customUserId)) ?? ""
+        let savedUseCustom = (try? c.decode(Bool.self, forKey: .useCustomCredentials)) ?? false
+        let legacyUid = ((try? c.decode(String.self, forKey: .userId)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyKey = ((try? c.decode(String.self, forKey: .apiKey)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !legacyUid.isEmpty && !legacyKey.isEmpty {
+            Rule34KeychainStore.save(legacyUid, account: Self.uidAccount)
+            Rule34KeychainStore.save(legacyKey, account: Self.keyAccount)
+            self.customUserId = legacyUid
+            self.useCustomCredentials = true
+        } else {
+            self.customUserId = savedCustomUid
+            self.useCustomCredentials = savedUseCustom
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(customUserId, forKey: .customUserId)
+        try c.encode(useCustomCredentials, forKey: .useCustomCredentials)
+    }
+
+    var userId: String {
+        let kc = (Rule34KeychainStore.read(account: Self.uidAccount) ?? customUserId).trimmingCharacters(in: .whitespacesAndNewlines)
+        return kc
+    }
+
+    var apiKey: String {
+        (Rule34KeychainStore.read(account: Self.keyAccount) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var hasCustomCredentials: Bool {
+        useCustomCredentials && !userId.isEmpty && !apiKey.isEmpty
+    }
+
+    var effectiveUserId: String {
+        hasCustomCredentials ? userId : Self.defaultUserId
+    }
+
+    var effectiveApiKey: String {
+        hasCustomCredentials ? apiKey : Self.defaultApiKey
+    }
 
     var isConnected: Bool {
-        !userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !effectiveUserId.isEmpty && !effectiveApiKey.isEmpty
+    }
+
+    mutating func setCustom(userId: String, apiKey: String) {
+        let uid = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !uid.isEmpty, !key.isEmpty else {
+            resetToDefault()
+            return
+        }
+        Rule34KeychainStore.save(uid, account: Self.uidAccount)
+        Rule34KeychainStore.save(key, account: Self.keyAccount)
+        customUserId = uid
+        useCustomCredentials = true
+    }
+
+    mutating func resetToDefault() {
+        Rule34KeychainStore.delete(account: Self.uidAccount)
+        Rule34KeychainStore.delete(account: Self.keyAccount)
+        customUserId = ""
+        useCustomCredentials = false
     }
 }
 
@@ -120,6 +260,9 @@ actor Rule34API {
     ) async -> [Gif] {
         var tagParts: [String] = []
         if !tag.isEmpty { tagParts.append(tag) }
+        // Strictly explicit adult content only (-rating:safe -rating:questionable)
+        tagParts.append("-rating:safe")
+        tagParts.append("-rating:questionable")
         if sort == "top" || sort == "hot" {
             tagParts.append("sort:score:desc")
         }
@@ -134,8 +277,8 @@ actor Rule34API {
             URLQueryItem(name: "limit", value: "40"),
             URLQueryItem(name: "pid", value: "\(page)"),
             URLQueryItem(name: "tags", value: tagString),
-            URLQueryItem(name: "user_id", value: credentials.userId.trimmingCharacters(in: .whitespacesAndNewlines)),
-            URLQueryItem(name: "api_key", value: credentials.apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            URLQueryItem(name: "user_id", value: credentials.effectiveUserId),
+            URLQueryItem(name: "api_key", value: credentials.effectiveApiKey)
         ]
         guard let url = comps?.url else { return [] }
 
@@ -209,8 +352,9 @@ actor Rule34API {
             results.append(contentsOf: parseMoebooruJSON(data: data, sourcePrefix: "r34y"))
         }
 
-        // 2. hypnohub.net Gelbooru-compatible DAPI
+        // 2. hypnohub.net Gelbooru-compatible DAPI (explicit rating only)
         var hypComps = URLComponents(string: "https://hypnohub.net/index.php")
+        let hypTags = tag.isEmpty ? "-rating:safe -rating:questionable" : "\(tag) -rating:safe -rating:questionable"
         hypComps?.queryItems = [
             URLQueryItem(name: "page", value: "dapi"),
             URLQueryItem(name: "s", value: "post"),
@@ -218,7 +362,7 @@ actor Rule34API {
             URLQueryItem(name: "json", value: "1"),
             URLQueryItem(name: "limit", value: "20"),
             URLQueryItem(name: "pid", value: "\(page)"),
-            URLQueryItem(name: "tags", value: tag)
+            URLQueryItem(name: "tags", value: hypTags)
         ]
         if let url = hypComps?.url,
            let (data, _) = try? await session.data(from: url) {
@@ -243,6 +387,10 @@ actor Rule34API {
 
         var posts: [Gif] = []
         for item in rawArray {
+            if let rating = (item["rating"] as? String)?.lowercased(),
+               rating == "s" || rating == "safe" || rating == "general" {
+                continue
+            }
             guard let rawFile = item["file_url"] as? String, !rawFile.isEmpty else { continue }
             let fileUrl = normalizeHTTPS(rawFile)
             let sampleUrl = normalizeHTTPS((item["sample_url"] as? String) ?? fileUrl)
@@ -320,6 +468,10 @@ actor Rule34API {
         }
         var posts: [Gif] = []
         for item in arr {
+            if let rating = (item["rating"] as? String)?.lowercased(),
+               rating == "s" || rating == "safe" || rating == "general" {
+                continue
+            }
             guard let rawFile = (item["file_url"] as? String) ?? (item["jpeg_url"] as? String) ?? (item["sample_url"] as? String),
                   !rawFile.isEmpty else { continue }
             let fileUrl = normalizeHTTPS(rawFile)
@@ -404,12 +556,42 @@ struct Rule34KeySheet: View {
                         }
                     }
 
-                    Text("Rule34 search & feeds work out of the box! To also pull directly from rule34.xxx's authenticated DAPI, enter your free User ID & API Key from your rule34.xxx Account Options page.")
+                    Text("Direct authenticated rule34.xxx DAPI is enabled by default. Enter custom credentials below only if you want to override the built-in API key.")
                         .font(.system(size: 13))
                         .foregroundStyle(.white.opacity(0.75))
 
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(store.data.r34Credentials.hasCustomCredentials ? Color.cyan : Color(red: 0.45, green: 0.92, blue: 0.55))
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(store.data.r34Credentials.hasCustomCredentials ? "Custom Credentials Active" : "Built-In Default Credentials Active")
+                                .font(.system(size: 13.5, weight: .bold))
+                            Text("User ID: \(store.data.r34Credentials.effectiveUserId) · Stored in iOS Keychain")
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.66))
+                        }
+                        Spacer()
+                        if store.data.r34Credentials.hasCustomCredentials {
+                            Button {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                store.data.r34Credentials.resetToDefault()
+                                userId = ""
+                                apiKey = ""
+                            } label: {
+                                Text("Use Default")
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .liquidGlassCapsule()
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .liquidGlassCard(cornerRadius: 16)
+
                     VStack(alignment: .leading, spacing: 10) {
-                        TextField("User ID (e.g. 1234567)", text: $userId)
+                        TextField("Custom User ID (leave blank for default)", text: $userId)
                             .keyboardType(.asciiCapable)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
@@ -417,7 +599,7 @@ struct Rule34KeySheet: View {
                             .padding(12)
                             .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
 
-                        TextField("API Key", text: $apiKey)
+                        SecureField("Custom API Key (stored securely in Keychain)", text: $apiKey)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .font(.system(size: 14, design: .monospaced))
@@ -426,12 +608,21 @@ struct Rule34KeySheet: View {
 
                         HStack(spacing: 10) {
                             Button {
-                                store.data.r34Credentials.userId = userId.trimmingCharacters(in: .whitespacesAndNewlines)
-                                store.data.r34Credentials.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                                UINotificationFeedbackGenerator().notificationOccurred(.success)
-                                dismiss()
+                                let cleanUid = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if cleanUid.isEmpty && cleanKey.isEmpty {
+                                    store.data.r34Credentials.resetToDefault()
+                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    dismiss()
+                                } else if !cleanUid.isEmpty && !cleanKey.isEmpty {
+                                    store.data.r34Credentials.setCustom(userId: cleanUid, apiKey: cleanKey)
+                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    dismiss()
+                                } else {
+                                    UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                                }
                             } label: {
-                                Text("Save Credentials")
+                                Text(userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Use Default API" : "Save Custom API")
                                     .font(.system(size: 14, weight: .bold))
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 11)

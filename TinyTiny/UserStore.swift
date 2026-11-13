@@ -138,6 +138,7 @@ final class UserStore: ObservableObject {
         }
         self.seenSet = Set(loaded.seenIDs)
         self.data = loaded
+        sanitizeLearnedProfile()
         Self.configureAudioSession(muted: loaded.settings.muted)
         Task { await refreshCategories() }
     }
@@ -227,10 +228,10 @@ final class UserStore: ObservableObject {
     func toggleLike(_ g: Gif) {
         if let i = data.liked.firstIndex(where: { $0.id == g.id }) {
             data.liked.remove(at: i)
-            recordAlgorithmSignal(for: g, weight: -2.0)
+            recordAlgorithmSignal(for: g, weight: -2.5)
         } else {
             data.liked.insert(g, at: 0)
-            recordAlgorithmSignal(for: g, weight: 4.5)
+            recordAlgorithmSignal(for: g, weight: 5.0)
         }
     }
 
@@ -243,7 +244,7 @@ final class UserStore: ObservableObject {
             data.downloaded[i] = g
         } else {
             data.downloaded.insert(g, at: 0)
-            recordAlgorithmSignal(for: g, weight: 5.5)
+            recordAlgorithmSignal(for: g, weight: 6.5)
         }
     }
 
@@ -344,61 +345,91 @@ final class UserStore: ObservableObject {
         }
     }
 
-    // MARK: - Smart On-Device For You Algorithm
+    // MARK: - Porn-Specific Preference Learning & Content Filtering
 
-    private static let algoStopWords: Set<String> = [
-        "the", "and", "for", "with", "you", "your", "this", "that", "from", "have",
-        "just", "like", "what", "when", "here", "more", "some", "out", "all", "are",
-        "was", "but", "not", "can", "who", "how", "she", "her", "his", "him", "its"
-    ]
-
-    private static func extractTokens(from post: Gif) -> [String] {
-        guard let raw = post.title?.lowercased(), !raw.isEmpty else { return [] }
-        let cleaned = raw
-            .replacingOccurrences(of: "#", with: " ")
-            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).inverted)
-        var tokens: [String] = []
-        for t in cleaned where t.count >= 3 && t.count <= 24 && !algoStopWords.contains(t) {
-            tokens.append(t)
+    private func sanitizeLearnedProfile() {
+        var normalizedTags: [String: Double] = [:]
+        for (rawKey, weight) in data.algorithm.tagWeights {
+            guard abs(weight) > 0.2,
+                  let canonical = PornTagCatalog.normalize(rawKey, categories: categories) else { continue }
+            normalizedTags[canonical] = min(max((normalizedTags[canonical] ?? 0) + weight, -12), 45)
         }
-        return Array(tokens.prefix(8))
+        data.algorithm.tagWeights = normalizedTags
     }
 
     func recordAlgorithmSignal(for post: Gif, weight: Double) {
         guard data.settings.algorithmEnabled else { return }
 
-        // Periodic gentle time-decay so recent tastes always outweigh stale ones
+        // Time decay so recent preferences outweigh stale ones
         data.algorithm.totalSignals += 1
-        if data.algorithm.totalSignals % 40 == 0 {
-            data.algorithm.subredditWeights = data.algorithm.subredditWeights.mapValues { $0 * 0.94 }.filter { abs($0.value) > 0.15 }
-            data.algorithm.creatorWeights = data.algorithm.creatorWeights.mapValues { $0 * 0.94 }.filter { abs($0.value) > 0.15 }
-            data.algorithm.tagWeights = data.algorithm.tagWeights.mapValues { $0 * 0.94 }.filter { abs($0.value) > 0.15 }
+        if data.algorithm.totalSignals % 35 == 0 {
+            data.algorithm.subredditWeights = data.algorithm.subredditWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
+            data.algorithm.creatorWeights = data.algorithm.creatorWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
+            data.algorithm.tagWeights = data.algorithm.tagWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
         }
 
-        if let sub = post.subreddit?.lowercased(), !sub.isEmpty {
+        if let sub = post.subreddit?.lowercased(), !sub.isEmpty,
+           !AdultContentClassifier.sfwBlockedSubreddits.contains(sub) {
             let cur = data.algorithm.subredditWeights[sub] ?? 0
-            data.algorithm.subredditWeights[sub] = min(max(cur + weight, -10), 40)
+            data.algorithm.subredditWeights[sub] = min(max(cur + weight, -12), 45)
         }
-        if let author = post.author?.lowercased(), !author.isEmpty {
+        if let author = post.author?.lowercased(), !author.isEmpty,
+           author != "instagram", author != "x_user", author != "rule34" {
             let cur = data.algorithm.creatorWeights[author] ?? 0
-            data.algorithm.creatorWeights[author] = min(max(cur + weight * 1.15, -10), 40)
-        }
-        for token in Self.extractTokens(from: post) {
-            let cur = data.algorithm.tagWeights[token] ?? 0
-            data.algorithm.tagWeights[token] = min(max(cur + weight * 0.45, -8), 30)
+            data.algorithm.creatorWeights[author] = min(max(cur + weight * 1.15, -12), 45)
         }
 
-        // Track video vs image preference smoothly
+        // Only learn recognized pornographic categories and verified adult tags — never arbitrary words!
+        let recognized = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
+        for tag in recognized {
+            let cur = data.algorithm.tagWeights[tag] ?? 0
+            let updated = min(max(cur + weight * 0.85, -12), 45)
+            if abs(updated) < 0.15 {
+                data.algorithm.tagWeights.removeValue(forKey: tag)
+            } else {
+                data.algorithm.tagWeights[tag] = updated
+            }
+        }
+
         let target: Double = post.isImage ? 0.0 : 1.0
         let alpha = weight > 0 ? 0.06 : 0.02
         data.algorithm.videoPreference = min(max(data.algorithm.videoPreference + (target - data.algorithm.videoPreference) * alpha, 0.1), 0.95)
     }
 
     func recordDwellSignal(for post: Gif, secondsWatched: TimeInterval) {
-        if secondsWatched >= 4.0 {
+        if secondsWatched >= 9.0 {
+            recordAlgorithmSignal(for: post, weight: 2.6)
+        } else if secondsWatched >= 3.5 {
             recordAlgorithmSignal(for: post, weight: 1.4)
-        } else if secondsWatched < 1.2 {
-            recordAlgorithmSignal(for: post, weight: -0.6)
+        } else if secondsWatched < 1.3 {
+            // Immediate skip reduces relevance
+            recordAlgorithmSignal(for: post, weight: -1.2)
+        }
+    }
+
+    func recordLoopSignal(for post: Gif) {
+        // Repeatedly watching / looping a clip strengthens its category affinity
+        recordAlgorithmSignal(for: post, weight: 2.2)
+    }
+
+    func recordSearchSignal(_ rawQuery: String) {
+        guard data.settings.algorithmEnabled else { return }
+        let matched = PornTagCatalog.extractRecognizedTags(fromQuery: rawQuery, categories: categories)
+        guard !matched.isEmpty else { return }
+        data.algorithm.totalSignals += 1
+        for tag in matched {
+            let cur = data.algorithm.tagWeights[tag] ?? 0
+            data.algorithm.tagWeights[tag] = min(max(cur + 3.5, -12), 45)
+        }
+    }
+
+    func adjustLearnedTag(_ tag: String, delta: Double) {
+        let key = PornTagCatalog.normalize(tag, categories: categories) ?? tag.lowercased()
+        let next = (data.algorithm.tagWeights[key] ?? 0) + delta
+        if next <= 0.25 {
+            data.algorithm.tagWeights.removeValue(forKey: key)
+        } else {
+            data.algorithm.tagWeights[key] = min(next, 45)
         }
     }
 
@@ -419,22 +450,38 @@ final class UserStore: ObservableObject {
                 score += 4.0
             }
         }
-        let tokens = Self.extractTokens(from: post)
-        for token in tokens {
-            score += (data.algorithm.tagWeights[token] ?? 0) * 0.8
+
+        let recognizedTags = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
+        for tag in recognizedTags {
+            let direct = data.algorithm.tagWeights[tag] ?? 0
+            score += direct * 1.8
+
+            // Cross-tag cluster synergy: consistent interest in related categories boosts companion tags
+            if let related = PornTagCatalog.relatedTags[tag] {
+                var clusterBonus = 0.0
+                for rel in related {
+                    let relWeight = data.algorithm.tagWeights[rel] ?? 0
+                    if relWeight >= 3.0 {
+                        clusterBonus += relWeight * 0.30
+                    }
+                }
+                score += min(clusterBonus, 6.0)
+            }
         }
+
         for pinned in data.algorithm.boostedTags {
             let p = pinned.lowercased()
             let cleanP = p.replacingOccurrences(of: "_", with: "")
-            if subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) || tokens.contains(p) {
-                score += 14.0
+            let canonicalPinned = PornTagCatalog.normalize(p, categories: categories) ?? p
+            if recognizedTags.contains(canonicalPinned) || subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) {
+                score += 15.0
             }
         }
         if !post.isImage {
             score += (data.algorithm.videoPreference - 0.5) * 4.0
         }
         if let up = post.upvotes, up > 0 {
-            score += min(log10(Double(up)) * 0.6, 2.5)
+            score += min(log10(Double(up)) * 0.55, 2.2)
         }
         return score
     }
@@ -444,9 +491,11 @@ final class UserStore: ObservableObject {
         let sub = post.subreddit?.lowercased() ?? ""
         let author = post.author?.lowercased() ?? ""
         let title = post.title?.lowercased() ?? ""
+        let postTags = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
         for blocked in data.algorithm.blockedTags {
             let b = blocked.lowercased()
-            if !b.isEmpty && (sub.contains(b) || author.contains(b) || title.contains(b)) {
+            let canonicalBlocked = PornTagCatalog.normalize(b, categories: categories) ?? b
+            if !b.isEmpty && (postTags.contains(canonicalBlocked) || sub.contains(b) || author.contains(b) || title.contains(b)) {
                 return true
             }
         }
@@ -456,22 +505,25 @@ final class UserStore: ObservableObject {
     func addBoostedTags(_ rawInput: String) {
         let parsed = Rule34API.parseTags(rawInput)
         for tag in parsed {
-            if !data.algorithm.boostedTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
-                data.algorithm.boostedTags.insert(tag, at: 0)
+            let key = PornTagCatalog.normalize(tag, categories: categories) ?? tag
+            if !data.algorithm.boostedTags.contains(where: { $0.caseInsensitiveCompare(key) == .orderedSame }) {
+                data.algorithm.boostedTags.insert(key, at: 0)
             }
-            data.algorithm.tagWeights[tag] = max(data.algorithm.tagWeights[tag] ?? 0, 15.0)
-            let subKey = tag.replacingOccurrences(of: "_", with: "")
+            data.algorithm.tagWeights[key] = max(data.algorithm.tagWeights[key] ?? 0, 15.0)
+            let subKey = key.replacingOccurrences(of: "_", with: "")
             if !subKey.isEmpty {
-                data.algorithm.subredditWeights[subKey] = max(data.algorithm.subredditWeights[subKey] ?? 0, 12.0)
+                data.algorithm.subredditWeights[subKey] = max(data.algorithm.subredditWeights[subKey] ?? 0, 10.0)
             }
         }
     }
 
     func removeBoostedTag(_ tag: String) {
         let lower = tag.lowercased()
-        data.algorithm.boostedTags.removeAll { $0.lowercased() == lower }
+        let norm = PornTagCatalog.normalize(lower, categories: categories) ?? lower
+        data.algorithm.boostedTags.removeAll { $0.lowercased() == lower || $0.lowercased() == norm }
+        data.algorithm.tagWeights.removeValue(forKey: norm)
         data.algorithm.tagWeights.removeValue(forKey: lower)
-        let subKey = lower.replacingOccurrences(of: "_", with: "")
+        let subKey = norm.replacingOccurrences(of: "_", with: "")
         data.algorithm.subredditWeights.removeValue(forKey: subKey)
     }
 
@@ -486,9 +538,11 @@ final class UserStore: ObservableObject {
     func addBlockedTags(_ rawInput: String) {
         let parsed = Rule34API.parseTags(rawInput)
         for tag in parsed {
-            if !data.algorithm.blockedTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
-                data.algorithm.blockedTags.insert(tag, at: 0)
+            let key = PornTagCatalog.normalize(tag, categories: categories) ?? tag
+            if !data.algorithm.blockedTags.contains(where: { $0.caseInsensitiveCompare(key) == .orderedSame }) {
+                data.algorithm.blockedTags.insert(key, at: 0)
             }
+            data.algorithm.tagWeights.removeValue(forKey: key)
             data.algorithm.tagWeights.removeValue(forKey: tag)
         }
     }
@@ -530,7 +584,18 @@ final class UserStore: ObservableObject {
     }
 
     var topAlgorithmSubreddits: [String] {
-        var combined: [String] = data.algorithm.boostedTags.map { $0.replacingOccurrences(of: "_", with: "") }
+        var combined: [String] = []
+        for pinned in data.algorithm.boostedTags {
+            let key = PornTagCatalog.normalize(pinned, categories: categories) ?? pinned
+            if let cat = categories.first(where: { $0.name.lowercased() == key.replacingOccurrences(of: "_", with: "") }),
+               let sub = cat.subreddits.first,
+               !combined.contains(sub) {
+                combined.append(sub)
+            } else {
+                let clean = key.replacingOccurrences(of: "_", with: "")
+                if !clean.isEmpty && !combined.contains(clean) { combined.append(clean) }
+            }
+        }
         let learned = data.algorithm.subredditWeights
             .filter { $0.value > 1.5 }
             .sorted { $0.value > $1.value }
@@ -544,7 +609,7 @@ final class UserStore: ObservableObject {
 
     var topAlgorithmTags: [(tag: String, score: Double)] {
         data.algorithm.tagWeights
-            .filter { $0.value > 0.8 }
+            .filter { $0.value > 0.6 }
             .sorted { $0.value > $1.value }
             .prefix(16)
             .map { (tag: $0.key, score: $0.value) }
@@ -559,13 +624,13 @@ final class UserStore: ObservableObject {
     }
 
     var topTasteSummary: String {
-        let pinned = data.algorithm.boostedTags.prefix(3).map { "#\($0)" }
+        let pinned = data.algorithm.boostedTags.prefix(3).map { PornTagCatalog.displayTitle(for: $0) }
         if !pinned.isEmpty { return pinned.joined(separator: " · ") }
+        let tags = data.algorithm.tagWeights.filter { $0.value > 1.0 }.sorted { $0.value > $1.value }.prefix(3).map { PornTagCatalog.displayTitle(for: $0.key) }
+        if !tags.isEmpty { return tags.joined(separator: " · ") }
         let subs = topAlgorithmSubreddits.prefix(3).map { "r/\($0)" }
         if !subs.isEmpty { return subs.joined(separator: " · ") }
-        let tags = data.algorithm.tagWeights.filter { $0.value > 1.0 }.sorted { $0.value > $1.value }.prefix(3).map { "#\($0.key)" }
-        if !tags.isEmpty { return tags.joined(separator: " · ") }
-        return "Learning from your likes & watch time"
+        return "Learning from your likes, loops & watch time"
     }
 
     func resetAlgorithm() {
@@ -576,11 +641,370 @@ final class UserStore: ObservableObject {
         saveTask?.cancel()
         seenSet.removeAll()
         OfflineManager.shared.clearAllDownloads()
-        data = UserData()
+        var fresh = UserData()
+        fresh.r34Credentials.resetToDefault()
+        data = fresh
         try? FileManager.default.removeItem(at: Self.fileURL)
         Task {
             await XWebEngine.shared.resetSession()
             await InstagramWebEngine.shared.resetSession()
         }
+    }
+}
+
+// MARK: - Canonical Porn-Specific Category & Tag Catalog
+
+enum PornTagCatalog {
+    static let quickPickerCategories: [String] = [
+        "ebony", "femboy", "trans", "goth", "hentai", "rule34", "latina", "asian",
+        "milf", "petite", "curvy", "big_tits", "ass", "anal", "blowjob", "creampie",
+        "cumshot", "futanari", "ahegao", "cosplay", "bdsm", "femdom", "lesbian",
+        "threesome", "pov", "amateur", "public", "solo", "squirt", "interracial"
+    ]
+
+    static let canonicalTags: Set<String> = [
+        "ebony", "femboy", "trans", "futanari", "hentai", "rule34", "ahegao", "cosplay",
+        "goth", "bimbo", "milf", "mature", "teen", "petite", "curvy", "thick", "pawg",
+        "bbw", "latina", "asian", "jav", "indian", "interracial", "bbc", "redhead",
+        "blonde", "brunette", "amateur", "homemade", "onlyfans", "tiktok_nsfw", "snapchat_nsfw",
+        "lesbian", "gay", "twink", "bisexual", "threesome", "gangbang", "cuckold", "hotwife",
+        "freeuse", "public", "pov", "solo", "masturbation", "joi", "vintage", "anal", "ass",
+        "twerk", "big_tits", "boobs", "natural_tits", "blowjob", "deepthroat", "facefuck",
+        "handjob", "titfuck", "paizuri", "creampie", "breeding", "cumshot", "facial",
+        "cumslut", "squirt", "orgasm", "grool", "pussy", "innie", "gape", "fisting", "bdsm",
+        "bondage", "femdom", "pegging", "facesitting", "spanking", "choking", "rough",
+        "hardcore", "feet", "footjob", "stockings", "thigh_highs", "lingerie", "latex",
+        "upskirt", "flashing", "oil", "tentacle", "hypno", "monster_girl", "elf",
+        "succubus", "bunny_girl", "maid", "nurse", "flexible", "riding", "cowgirl",
+        "doggystyle", "missionary", "prone_bone", "dildo", "vibrator", "fucking_machine",
+        "gooning"
+    ]
+
+    static let aliases: [String: String] = [
+        // Identities / Orientations / Niches
+        "ebony": "ebony", "ebonycuties": "ebony", "ebonyhomemade": "ebony",
+        "ebonythroatqueens": "ebony", "blacktittyworld": "ebony", "blackgirl": "ebony", "darkskin": "ebony",
+        "femboy": "femboy", "femboys": "femboy", "sissy": "femboy", "sissies": "femboy",
+        "trap": "femboy", "traps": "femboy", "trapsgonewild": "femboy", "straighttosissy": "femboy", "boypussy": "femboy",
+        "trans": "trans", "transgender": "trans", "tgirl": "trans", "tgirls": "trans",
+        "transgirl": "trans", "transgirls": "trans", "transporn": "trans", "gonewildtrans": "trans",
+        "mtf": "trans", "shemale": "trans", "ladyboy": "trans", "transwoman": "trans",
+        "futa": "futanari", "futanari": "futanari", "futanarigifs": "futanari", "dickgirl": "futanari",
+        "hentai": "hentai", "hentai_gif": "hentai", "hentai__videos": "hentai", "doujinshi": "hentai", "ecchi": "hentai",
+        "rule34": "rule34", "r34": "rule34", "overwatch_porn": "rule34",
+        "ahegao": "ahegao", "realahegao": "ahegao", "ahegao_irl": "ahegao", "ahegaogirls": "ahegao", "ahegaos": "ahegao", "ahegaohardcore": "ahegao",
+        "cosplay": "cosplay", "cosplaygirls": "cosplay", "nsfwcosplay": "cosplay", "cosplaybabes": "cosplay", "cosplaypornvideos": "cosplay", "cosplaylewd": "cosplay",
+        "goth": "goth", "gothgirl": "goth", "gothgf": "goth", "bigtiddygothgf": "goth", "gothsluts": "goth", "altgonewild": "goth", "gothgirlsgw": "goth", "suicidegirls": "goth",
+        "bimbo": "bimbo", "bimbofetish": "bimbo", "bimbocumsluts": "bimbo", "bimbolovers": "bimbo", "enhancedfucktoys": "bimbo",
+        // Ages / Builds / Ethnicities
+        "milf": "milf", "milfs": "milf", "maturemilf": "milf", "realmoms": "milf", "gonewild30plus": "milf", "mommy": "milf",
+        "teen": "teen", "teens": "teen", "legalteens": "teen", "barelylegalteens": "teen", "18_19": "teen", "teenbeauties": "teen", "collegeamateurs": "teen",
+        "petite": "petite", "petitegonewild": "petite", "bustypetite": "petite", "lipsthatgrip": "petite", "tiny": "petite",
+        "curvy": "curvy", "massivetitsnass": "curvy", "slimthick": "curvy", "thickwhitegirls": "curvy",
+        "pawg": "pawg", "thick": "thick", "thicc": "thick", "chubby": "bbw", "bbw": "bbw", "bbwhardcore": "bbw", "bbwvideos": "bbw",
+        "latina": "latina", "latinas": "latina", "latinacuties": "latina", "mexicana": "latina", "latinchickswhitedicks": "latina",
+        "asian": "asian", "asiansgonewild": "asian", "asianhotties": "asian", "bustyasians": "asian", "nsfw_japan": "asian", "asiancumsluts": "asian",
+        "jav": "jav", "indian": "indian", "indiansgonewild": "indian", "indianhotwife": "indian", "desiindiansex": "indian",
+        "interracial": "interracial", "blacked": "interracial", "blackedpawgs": "interracial", "blackchickswhitedicks": "interracial",
+        "bbc": "bbc", "bbcparadise": "bbc",
+        "redhead": "redhead", "redheads": "redhead", "ginger": "redhead", "gingerbeauties": "redhead", "petitegingers": "redhead", "redheadmilfs": "redhead", "redheadsporn": "redhead",
+        // Styles / Platforms
+        "amateur": "amateur", "realgirls": "amateur", "homemadexxx": "homemade", "homemade": "homemade", "onoff": "amateur", "gonewild": "amateur",
+        "onlyfans": "onlyfans", "onlyfans101": "onlyfans", "slutsofonlyfans": "onlyfans", "onlyfanshottest": "onlyfans", "onlyfans_blessed": "onlyfans", "onlyfans_wild": "onlyfans",
+        "tiktokporn": "tiktok_nsfw", "tiktoknsfw": "tiktok_nsfw", "tiktokthots": "tiktok_nsfw", "tiktok_ass": "tiktok_nsfw", "tiktok_tits": "tiktok_nsfw",
+        "slutsofsnapchat": "snapchat_nsfw", "nsfw_snapchat": "snapchat_nsfw",
+        "lesbian": "lesbian", "lesbians": "lesbian", "girlskissing": "lesbian", "girlswithgirls": "lesbian", "lesbian_gifs": "lesbian", "cutelesbians": "lesbian", "wlw": "lesbian",
+        "gay": "gay", "gayporn": "gay", "malesmasturbating": "gay", "gaybrosgonewild": "gay", "twink": "twink",
+        "threesome": "threesome", "threesomesnsfw": "threesome", "threesomegw": "threesome",
+        "gangbang": "gangbang", "groupsex_gw": "gangbang", "groupsexnsfw": "gangbang",
+        "cuckold": "cuckold", "hotwife": "hotwife", "hotwifecuckolds": "cuckold", "wifesharing": "cuckold",
+        "freeuse": "freeuse", "public": "public", "publicsexporn": "public", "publicflashing": "public", "flashing": "flashing", "upskirt": "upskirt",
+        "pov": "pov", "cheatingpov": "pov", "femalepov": "pov", "doggystylepov": "pov",
+        "solo": "solo", "gettingherselfoff": "solo", "jilling": "solo", "fingering": "solo", "masturbation": "masturbation", "joi": "joi",
+        "vintage": "vintage", "vintagebabes": "vintage", "vintagesmut": "vintage",
+        // Body Parts & Acts
+        "anal": "anal", "analgw": "anal", "analgonewild": "anal", "anal_gifs": "anal", "upherbutt": "anal", "buttsex": "anal", "asshole": "anal",
+        "ass": "ass", "bigass": "ass", "bigasses": "ass", "booty": "ass", "twerk": "twerk", "twerking": "twerk",
+        "bigtits": "big_tits", "big_tits": "big_tits", "big_breasts": "big_tits", "large_breasts": "big_tits", "tittydrop": "big_tits", "boobbounce": "big_tits", "stacked": "big_tits", "busty": "big_tits",
+        "boobs": "boobs", "tits": "boobs", "boobies": "boobs", "breasts": "boobs", "natural_tits": "natural_tits",
+        "blowjob": "blowjob", "blowjobs": "blowjob", "oral": "blowjob", "sucking": "blowjob", "girlsfinishingthejob": "blowjob", "gawkgawkgawk": "blowjob",
+        "deepthroat": "deepthroat", "facefuck": "facefuck", "handjob": "handjob", "femdomhandjob": "handjob", "titfuck": "titfuck", "paizuri": "paizuri",
+        "creampie": "creampie", "creampies": "creampie", "creampieflowingout": "creampie", "breeding": "breeding", "breeding_her": "breeding", "breedmedaddy": "breeding", "breedingmaterial": "breeding",
+        "cumshot": "cumshot", "cumshots": "cumshot", "cum": "cumshot", "coveredincum": "cumshot", "facial": "facial", "facials": "facial", "cumslut": "cumslut", "cumsluts": "cumslut",
+        "squirt": "squirt", "squirting": "squirt", "orgasm": "orgasm", "orgasms": "orgasm", "grool": "grool",
+        "pussy": "pussy", "rearpussy": "pussy", "pussy_perfection": "pussy", "innie": "innie", "innies": "innie", "gape": "gape", "fisting": "fisting", "pussystretching": "fisting",
+        // Kinks / Positions / Fantasy
+        "bdsm": "bdsm", "bdsmgw": "bdsm", "bondage": "bondage", "sheLikesitrough": "bdsm", "shelikesitrough": "bdsm", "dominated": "bdsm",
+        "femdom": "femdom", "pegging": "pegging", "facesitting": "facesitting", "spanking": "spanking", "strapon": "femdom",
+        "hardcore": "hardcore", "hardcorensfw": "hardcore", "nsfwhardcore": "hardcore", "roughporn": "rough", "rough": "rough", "rough_sex": "rough",
+        "feet": "feet", "feetfuckers": "feet", "feet_nsfw": "feet", "feetinyourface": "feet", "vipfeet": "feet", "footjob": "footjob",
+        "stockings": "stockings", "thighhighs": "thigh_highs", "thigh_highs": "thigh_highs", "lingerie": "lingerie", "latex": "latex",
+        "oilporn": "oil", "wetoil": "oil", "oil": "oil", "tentai": "tentacle", "tentacle": "tentacle", "tentacles": "tentacle",
+        "hypno": "hypno", "monstergirl": "monster_girl", "monster_girl": "monster_girl", "elf": "elf", "succubus": "succubus", "bunny_girl": "bunny_girl", "maid": "maid", "nurse": "nurse",
+        "cowgirl": "cowgirl", "riding": "riding", "doggystyle": "doggystyle", "missionary": "missionary", "pronebone": "prone_bone", "prone_bone": "prone_bone",
+        "dildo": "dildo", "hugedildos": "dildo", "vibrator": "vibrator", "fuckingmachine": "fucking_machine", "fuckingmachines": "fucking_machine", "fucking_machine": "fucking_machine",
+        "gooned": "gooning", "gooning": "gooning", "pornrelapsed": "gooning"
+    ]
+
+    static let relatedTags: [String: [String]] = [
+        "ebony": ["curvy", "ass", "interracial", "bbc", "big_tits"],
+        "femboy": ["trans", "anal", "thigh_highs", "solo", "dildo"],
+        "trans": ["femboy", "anal", "blowjob", "solo", "threesome"],
+        "futanari": ["hentai", "rule34", "creampie", "big_tits"],
+        "hentai": ["rule34", "ahegao", "futanari", "tentacle", "paizuri"],
+        "rule34": ["hentai", "futanari", "cosplay", "ahegao"],
+        "goth": ["alt", "amateur", "big_tits", "bdsm", "stockings"],
+        "latina": ["curvy", "ass", "pawg", "big_tits"],
+        "asian": ["petite", "jav", "amateur", "cosplay"],
+        "milf": ["mature", "curvy", "big_tits", "creampie"],
+        "petite": ["teen", "anal", "blowjob", "pov"],
+        "curvy": ["thick", "pawg", "ass", "big_tits"],
+        "big_tits": ["boobs", "natural_tits", "titfuck", "milf", "curvy"],
+        "anal": ["ass", "gape", "creampie", "doggystyle", "femboy"],
+        "blowjob": ["deepthroat", "facefuck", "facial", "cumshot", "cumslut"],
+        "creampie": ["breeding", "pussy", "hardcore", "cumshot"],
+        "bdsm": ["femdom", "bondage", "rough", "hardcore", "spanking"],
+        "femdom": ["bdsm", "pegging", "facesitting", "handjob"],
+        "cosplay": ["ahegao", "hentai", "rule34", "stockings"],
+        "lesbian": ["solo", "facesitting", "pussy", "squirt"]
+    ]
+
+    static func normalize(_ raw: String, categories: [GoonedCategory]) -> String? {
+        let cleaned = raw.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+            .replacingOccurrences(of: "r/", with: "")
+        guard !cleaned.isEmpty else { return nil }
+        if canonicalTags.contains(cleaned) { return cleaned }
+        if let mapped = aliases[cleaned] { return mapped }
+        for cat in categories {
+            if cat.name.lowercased() == cleaned { return cat.name.lowercased() }
+            if cat.subreddits.contains(where: { $0.lowercased() == cleaned }) {
+                let cName = cat.name.lowercased()
+                return aliases[cName] ?? (canonicalTags.contains(cName) ? cName : nil)
+            }
+        }
+        return nil
+    }
+
+    static func extractRecognizedTags(from post: Gif, categories: [GoonedCategory]) -> [String] {
+        var found = Set<String>()
+
+        if let sub = post.subreddit, !sub.isEmpty {
+            if let norm = normalize(sub, categories: categories) {
+                found.insert(norm)
+            } else {
+                let subLower = sub.lowercased()
+                for key in ["ebony", "femboy", "trans", "futanari", "hentai", "rule34", "latina", "asian", "milf", "goth", "cosplay", "lesbian", "bdsm", "femdom", "anal", "blowjob", "creampie", "cumshot", "squirt", "petite", "curvy", "pawg", "bbw", "amateur", "redhead", "interracial", "threesome", "onlyfans"] {
+                    if subLower.contains(key) {
+                        found.insert(key)
+                    }
+                }
+            }
+        }
+
+        if let title = post.title?.lowercased(), !title.isEmpty {
+            let rawTokens = title
+                .replacingOccurrences(of: "#", with: " ")
+                .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).inverted)
+                .filter { !$0.isEmpty }
+
+            for i in rawTokens.indices {
+                let t = rawTokens[i]
+                if let norm = normalize(t, categories: categories) {
+                    found.insert(norm)
+                }
+                if i + 1 < rawTokens.count {
+                    let pair = "\(t)_\(rawTokens[i + 1])"
+                    if let normPair = normalize(pair, categories: categories) {
+                        found.insert(normPair)
+                    }
+                }
+            }
+        }
+
+        return Array(found)
+    }
+
+    static func extractRecognizedTags(fromQuery rawQuery: String, categories: [GoonedCategory]) -> [String] {
+        var found = Set<String>()
+        let tokens = rawQuery.lowercased()
+            .replacingOccurrences(of: "#", with: " ")
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).inverted)
+            .filter { !$0.isEmpty }
+        for i in tokens.indices {
+            if let norm = normalize(tokens[i], categories: categories) {
+                found.insert(norm)
+            }
+            if i + 1 < tokens.count {
+                let pair = "\(tokens[i])_\(tokens[i + 1])"
+                if let normPair = normalize(pair, categories: categories) {
+                    found.insert(normPair)
+                }
+            }
+        }
+        return Array(found)
+    }
+
+    static func displayTitle(for tag: String) -> String {
+        switch tag.lowercased() {
+        case "femboy": return "Femboys"
+        case "ebony": return "Ebony"
+        case "trans": return "Trans"
+        case "milf": return "MILF"
+        case "bdsm": return "BDSM"
+        case "pov": return "POV"
+        case "bbw": return "BBW"
+        case "bbc": return "BBC"
+        case "pawg": return "PAWG"
+        case "jav": return "JAV"
+        case "joi": return "JOI"
+        case "big_tits": return "Big Tits"
+        case "natural_tits": return "Natural Tits"
+        case "thigh_highs": return "Thigh Highs"
+        case "monster_girl": return "Monster Girl"
+        case "bunny_girl": return "Bunny Girl"
+        case "fucking_machine": return "Fucking Machine"
+        case "prone_bone": return "Prone Bone"
+        case "tiktok_nsfw": return "TikTok NSFW"
+        case "snapchat_nsfw": return "Snapchat NSFW"
+        default:
+            return tag.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+// MARK: - Strict Porn-Only Content Eligibility Classifier
+
+enum AdultContentClassifier {
+    static let sfwBlockedSubreddits: Set<String> = [
+        "earthporn", "foodporn", "carporn", "fightporn", "spaceporn", "cityporn",
+        "natureporn", "historyporn", "mapporn", "designporn", "roomporn", "houseporn",
+        "powerwashingporn", "artporn", "movieporn", "abandonedporn", "architectureporn",
+        "humanporn", "animalporn", "weatherporn", "botanicalporn", "mechanicalgifs",
+        "gaming", "funny", "memes", "dankmemes", "videos", "pics", "news", "worldnews",
+        "politics", "sports", "nba", "nfl", "soccer", "ufc", "mma", "formula1",
+        "minecraft", "fortnitebr", "valorant", "leagueoflegends", "callofduty",
+        "tiktokcringe", "publicfreakout", "nextfuckinglevel", "interestingasfuck",
+        "damnthatsinteresting", "wholesomememes", "aww", "animals", "eyebleach",
+        "teenagers", "livestreamfail", "cryptocurrency", "wallstreetbets", "stocks",
+        "technology", "science", "askreddit", "movies", "television", "music", "hiphopheads"
+    ]
+
+    static let sfwBlockedTerms: [String] = [
+        "#nba", "#nfl", "#ufc", "#fifa", "#mlb", "#nhl", "#premierleague", "#championsleague",
+        "#election", "#trump", "#biden", "#kamala", "#breakingnews", "#foxnews", "#cnn", "#msnbc",
+        "#minecraft", "#roblox", "#valorant", "#warzone", "#esports", "#callofduty", "#fortnitebr",
+        "#bitcoin", "#ethereum", "#crypto", "#stockmarket", "#forex", "#tradingview",
+        "#recipe", "#cooking", "#baking", "#mealprep", "#workoutroutine", "#gymmotivation",
+        "street fight", "knockout", "car crash", "dashcam", "bodycam", "police shooting",
+        "press conference", "box score", "touchdown", "home run", "earnings report"
+    ]
+
+    private static let explicitAdultMarkers: [String] = [
+        "nsfw", "18+", "onlyfans", "fansly", "manyvids", "pornhub", "xvideos", "xhamster",
+        "redgifs", "brazzers", "chaturbate", "camgirl", "xxx", "porn", "nude", "nudes",
+        "lewd", "hentai", "rule34", "r34", "futanari", "femboy", "tgirl", "shemale",
+        "ladyboy", "ebony", "milf", "anal", "blowjob", "deepthroat", "facefuck", "creampie",
+        "cumshot", "cumslut", "gangbang", "threesome", "cuckold", "hotwife", "bdsm",
+        "femdom", "pegging", "boobs", "tits", "pussy", "cock", "dick", "sucking",
+        "riding", "doggystyle", "squirt", "orgasm", "masturbat", "nsfwtwt", "hornytwt",
+        "lewdtok", "18plus", "uncensored", "goon", "gooned", "gooning", "edging",
+        "fisting", "ahegao", "paizuri", "bukkake", "freeuse", "bimbo", "slut",
+        "link in bio", "vip page", "full video", "dm for"
+    ]
+
+    static func containsSFWBlockedTerm(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return sfwBlockedTerms.contains { lower.contains($0) }
+    }
+
+    static func hasExplicitAdultIndicators(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if explicitAdultMarkers.contains(where: { lower.contains($0) }) {
+            return true
+        }
+        return !PornTagCatalog.extractRecognizedTags(fromQuery: lower, categories: GoonedCategory.defaultCategories).isEmpty
+    }
+
+    static func isEligibleXTweet(
+        text: String,
+        author: String,
+        authorBio: String,
+        possiblySensitive: Bool,
+        hasAdultWarning: Bool,
+        hasGraphicViolenceOnly: Bool,
+        routeKey: String
+    ) -> Bool {
+        if hasGraphicViolenceOnly { return false }
+        let combined = "\(text) \(author) \(authorBio)"
+        if containsSFWBlockedTerm(combined) { return false }
+
+        // User-curated bookmarks/likes or direct creator feeds still undergo SFW blocklist check,
+        // while discovery timelines (x_foryou, x_following, x_search) enforce strict adult verification.
+        if routeKey == "x_bookmarks" || routeKey.hasPrefix("x_likes_") || routeKey.hasPrefix("x_user_") {
+            return hasAdultWarning || possiblySensitive || hasExplicitAdultIndicators(combined)
+        }
+        return hasAdultWarning || possiblySensitive || hasExplicitAdultIndicators(combined)
+    }
+
+    static func isEligibleIGReel(caption: String, author: String, routeKey: String) -> Bool {
+        let combined = "\(caption) \(author)"
+        if containsSFWBlockedTerm(combined) { return false }
+        // Exclude blatantly non-adult everyday content across all IG feeds
+        let sfwIGNoise = ["recipe", "cooking", "baby", "toddler", "kindergarten", "homework", "stock market", "real estate", "mortgage", "nfl", "nba", "premier league", "unboxing", "tech review", "sermon", "bible study"]
+        let lower = combined.lowercased()
+        if sfwIGNoise.contains(where: { lower.contains($0) }) { return false }
+
+        if routeKey == "ig_reels" {
+            // Public Reels discovery must carry explicit adult/creator/glamour markers
+            return hasExplicitAdultIndicators(combined)
+        }
+        // Personal Following, Saved, and explicit @user feeds are allowed once SFW-clean
+        return true
+    }
+
+    @MainActor
+    static func isEligible(_ post: Gif, source: FeedSource, categories: [GoonedCategory], store: UserStore) -> Bool {
+        guard post.hasPlayableMedia else { return false }
+        guard !store.isBlockedByAlgorithm(post) else { return false }
+
+        if let sub = post.subreddit?.lowercased(), !sub.isEmpty {
+            if sfwBlockedSubreddits.contains(sub) { return false }
+        }
+
+        let combinedText = "\(post.title ?? "") \(post.author ?? "") \(post.subreddit ?? "")"
+        if containsSFWBlockedTerm(combinedText) { return false }
+
+        if post.isRule34Post {
+            return true
+        }
+        if post.isXPost {
+            // Tweets already passed XTweetParser verification, re-check against blocked terms
+            return !containsSFWBlockedTerm(combinedText)
+        }
+        if post.isIGPost {
+            return !containsSFWBlockedTerm(combinedText)
+        }
+
+        // Personal saved lists (Liked / Offline Vault) were explicitly chosen by user
+        if source.isList { return true }
+
+        // Reddit / Gooned posts: verify known adult subreddit, redgifs host, or recognized porn tags
+        if let sub = post.subreddit?.lowercased(), !sub.isEmpty {
+            if categories.contains(where: { $0.subreddits.contains { $0.lowercased() == sub } }) {
+                return true
+            }
+            if sub.contains("porn") || sub.contains("nsfw") || sub.contains("gonewild") || sub.contains("hentai") || sub.contains("rule34") || sub.contains("xxx") || sub.contains("sluts") || sub.contains("fetish") || sub.contains("goon") {
+                return true
+            }
+        }
+        if let media = post.mediaUrl?.lowercased(), media.contains("redgifs.com") {
+            return true
+        }
+        if !PornTagCatalog.extractRecognizedTags(from: post, categories: categories).isEmpty {
+            return true
+        }
+        return hasExplicitAdultIndicators(combinedText)
     }
 }

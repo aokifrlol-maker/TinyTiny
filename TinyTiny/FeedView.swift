@@ -470,6 +470,7 @@ struct FeedView: View {
                         onSelectIGUser: onSelectIGUser,
                         onSelectRule34Tag: onSelectRule34Tag,
                         onClipFinished: {
+                            store.recordLoopSignal(for: gif)
                             if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
                                 advanceToNext(from: gif.id)
                             }
@@ -480,7 +481,7 @@ struct FeedView: View {
                     .onAppear { model.onItemAppear(gif) }
                 }
 
-                if model.canLoadMore || model.errorText != nil || model.items.isEmpty {
+                if model.items.isEmpty || (!model.canLoadMore && !model.isLoading) {
                     FeedStateView(
                         model: model,
                         onOpenCategories: onOpenCategories,
@@ -496,6 +497,23 @@ struct FeedView: View {
         .scrollPosition(id: $currentID)
         .background(Color.black)
         .ignoresSafeArea()
+        .overlay(alignment: .bottom) {
+            if model.isLoading && !model.items.isEmpty && currentID == model.items.last?.id {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(0.8)
+                    Text("Loading more...")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.9))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .liquidGlassCapsule(tinted: true, active: false)
+                .padding(.bottom, 106)
+                .allowsHitTesting(false)
+            }
+        }
         .onAppear {
             onScreen = true
             scheduleAutoScrollTimer()
@@ -539,6 +557,7 @@ struct FeedView: View {
             }
             preloadUpcoming()
             scheduleAutoScrollTimer()
+            model.prefetchIfNeeded(currentID: new)
         }
     }
 

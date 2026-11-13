@@ -18,14 +18,21 @@ struct XAccountSession: Codable, Equatable {
 // MARK: - Recursive X GraphQL / REST Video Tweet Parser
 
 enum XTweetParser {
-    /// Recursively walks any X GraphQL or REST JSON payload and extracts all video/GIF posts as `Gif` items.
-    static func parseTweets(from data: Data) -> [Gif] {
+    /// Recursively walks any X GraphQL or REST JSON payload and extracts eligible adult video/GIF posts as `Gif` items.
+    static func parseTweets(from data: Data, routeKey: String = "") -> [Gif] {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return []
         }
         var results: [Gif] = []
         var seen = Set<String>()
-        walk(node: root, inheritedAuthor: nil, results: &results, seen: &seen)
+        walk(
+            node: root,
+            inheritedAuthor: nil,
+            inheritedBio: nil,
+            routeKey: routeKey,
+            results: &results,
+            seen: &seen
+        )
         return results
     }
 
@@ -53,6 +60,8 @@ enum XTweetParser {
     private static func walk(
         node: Any,
         inheritedAuthor: String?,
+        inheritedBio: String?,
+        routeKey: String,
         results: inout [Gif],
         seen: inout Set<String>
     ) {
@@ -66,49 +75,79 @@ enum XTweetParser {
                 return
             }
 
-            let currentAuthor = extractAuthor(from: dict) ?? inheritedAuthor
+            let authorMeta = extractAuthorAndBio(from: dict)
+            let currentAuthor = authorMeta.screenName ?? inheritedAuthor
+            let currentBio = authorMeta.bio ?? inheritedBio
 
             // Check if this dictionary is a Tweet object with `legacy` or direct `extended_entities`
-            if let gif = extractGif(fromTweetDict: dict, fallbackAuthor: currentAuthor),
-               seen.insert(gif.id).inserted {
+            if let gif = extractGif(
+                fromTweetDict: dict,
+                fallbackAuthor: currentAuthor,
+                fallbackBio: currentBio,
+                routeKey: routeKey
+            ), seen.insert(gif.id).inserted {
                 results.append(gif)
             }
 
             // Continue walking children
             for (key, value) in dict {
                 if key == "promotedMetadata" { continue }
-                walk(node: value, inheritedAuthor: currentAuthor, results: &results, seen: &seen)
+                walk(
+                    node: value,
+                    inheritedAuthor: currentAuthor,
+                    inheritedBio: currentBio,
+                    routeKey: routeKey,
+                    results: &results,
+                    seen: &seen
+                )
             }
         } else if let array = node as? [Any] {
             for item in array {
-                walk(node: item, inheritedAuthor: inheritedAuthor, results: &results, seen: &seen)
+                walk(
+                    node: item,
+                    inheritedAuthor: inheritedAuthor,
+                    inheritedBio: inheritedBio,
+                    routeKey: routeKey,
+                    results: &results,
+                    seen: &seen
+                )
             }
         }
     }
 
-    private static func extractAuthor(from dict: [String: Any]) -> String? {
-        // GraphQL tweet -> core -> user_results -> result -> (core | legacy) -> screen_name
+    private static func extractAuthorAndBio(from dict: [String: Any]) -> (screenName: String?, bio: String?) {
+        // GraphQL tweet -> core -> user_results -> result -> (core | legacy) -> (screen_name, description)
         if let core = dict["core"] as? [String: Any],
            let userResults = core["user_results"] as? [String: Any],
            let result = userResults["result"] as? [String: Any] {
-            if let innerCore = result["core"] as? [String: Any],
-               let sn = innerCore["screen_name"] as? String, !sn.isEmpty {
-                return sn
-            }
-            if let innerLegacy = result["legacy"] as? [String: Any],
-               let sn = innerLegacy["screen_name"] as? String, !sn.isEmpty {
-                return sn
+            let innerCore = result["core"] as? [String: Any]
+            let innerLegacy = result["legacy"] as? [String: Any]
+            let sn = (innerCore?["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? (innerLegacy?["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let bio = (innerLegacy?["description"] as? String)
+                ?? (innerCore?["description"] as? String)
+                ?? (result["description"] as? String)
+            if sn != nil || bio != nil {
+                return (sn, bio)
             }
         }
-        // REST / v1.1 tweet -> user -> screen_name
-        if let user = dict["user"] as? [String: Any],
-           let sn = user["screen_name"] as? String, !sn.isEmpty {
-            return sn
+        // REST / v1.1 tweet -> user -> (screen_name, description)
+        if let user = dict["user"] as? [String: Any] {
+            let sn = (user["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let bio = user["description"] as? String
+            if sn != nil || bio != nil {
+                return (sn, bio)
+            }
         }
-        return nil
+        return (nil, nil)
     }
 
-    private static func extractGif(fromTweetDict dict: [String: Any], fallbackAuthor: String?) -> Gif? {
+    private static func extractGif(
+        fromTweetDict dict: [String: Any],
+        fallbackAuthor: String?,
+        fallbackBio: String?,
+        routeKey: String
+    ) -> Gif? {
         // Avoid extracting twice from outer `retweeted_status_result` wrapper if inner `result` will be visited
         let legacy = (dict["legacy"] as? [String: Any]) ?? dict
 
@@ -157,9 +196,32 @@ enum XTweetParser {
                 ?? (media["id_str"] as? String)
                 ?? UUID().uuidString
 
-            let author = extractAuthor(from: dict) ?? fallbackAuthor ?? "x_user"
+            let authorMeta = extractAuthorAndBio(from: dict)
+            let author = authorMeta.screenName ?? fallbackAuthor ?? "x_user"
+            let authorBio = authorMeta.bio ?? fallbackBio ?? ""
             let rawText = (legacy["full_text"] as? String) ?? (legacy["text"] as? String) ?? ""
             let cleanTitle = cleanTweetText(rawText)
+
+            let possiblySensitive = (legacy["possibly_sensitive"] as? Bool)
+                ?? (dict["possibly_sensitive"] as? Bool)
+                ?? false
+            let warningDict = (media["sensitive_media_warning"] as? [String: Any])
+                ?? (media["ext_sensitive_media_warning"] as? [String: Any])
+            let hasAdultWarning = (warningDict?["adult_content"] as? Bool == true)
+                || (warningDict?["nudity"] as? Bool == true)
+            let hasGraphicViolenceOnly = (warningDict?["graphic_violence"] as? Bool == true) && !hasAdultWarning
+
+            guard AdultContentClassifier.isEligibleXTweet(
+                text: cleanTitle,
+                author: author,
+                authorBio: authorBio,
+                possiblySensitive: possiblySensitive,
+                hasAdultWarning: hasAdultWarning,
+                hasGraphicViolenceOnly: hasGraphicViolenceOnly,
+                routeKey: routeKey
+            ) else {
+                continue
+            }
 
             let favCount = (legacy["favorite_count"] as? Int) ?? 0
             let durationMs = (videoInfo["duration_millis"] as? Int)
@@ -235,6 +297,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private var seenIds = Set<String>()
     private var waiters: [CheckedContinuation<[Gif], Never>] = []
     private var pageCounter: Int = 0
+    private var pumpTask: Task<Void, Never>?
+    private var zeroAdultScrolls: Int = 0
+    private var didRedirectAdultSupplement: Bool = false
 
     // Dynamically captured headers & GraphQL queryIds from X's own live web client
     private(set) var bearerToken: String = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
@@ -397,16 +462,40 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             UserStore.shared.data.xSession.screenName = sn
         }
 
-        // Parse video tweets from intercepted GraphQL / REST payload
-        let tweets = XTweetParser.parseTweets(from: data)
-        guard !tweets.isEmpty else { return }
+        // Parse eligible adult video tweets from intercepted GraphQL / REST payload
+        let tweets = XTweetParser.parseTweets(from: data, routeKey: activeRouteKey)
+        if !tweets.isEmpty {
+            let store = UserStore.shared
+            let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
+            if !fresh.isEmpty {
+                zeroAdultScrolls = 0
+                bufferedPosts.append(contentsOf: fresh)
+                flushWaitersIfNeeded()
+                if bufferedPosts.count < 24, let wv = webView {
+                    scheduleBackgroundPump(for: activeRouteKey, wv: wv)
+                }
+                return
+            }
+        }
 
-        let store = UserStore.shared
-        let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
-        guard !fresh.isEmpty else { return }
-
-        bufferedPosts.append(contentsOf: fresh)
-        flushWaitersIfNeeded()
+        // Track dry adult scrolls so x_foryou can pivot to NSFW search if timeline is SFW-heavy
+        zeroAdultScrolls += 1
+        if activeRouteKey == "x_foryou",
+           !didRedirectAdultSupplement,
+           zeroAdultScrolls >= 3,
+           bufferedPosts.isEmpty,
+           let wv = webView {
+            didRedirectAdultSupplement = true
+            let topTag = UserStore.shared.data.algorithm.learnedTags
+                .filter { $0.value > 0 }
+                .sorted { $0.value > $1.value }
+                .first?.key
+            let query = topTag.map { "nsfw \($0) filter:videos" } ?? "nsfw filter:videos"
+            if let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+               let supplementURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=live") {
+                wv.load(URLRequest(url: supplementURL))
+            }
+        }
     }
 
     private func flushWaitersIfNeeded() {
@@ -417,6 +506,25 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         waiters.removeAll()
         for w in currentWaiters {
             w.resume(returning: batch)
+        }
+    }
+
+    private func scheduleBackgroundPump(for routeKey: String, wv: WKWebView) {
+        guard pumpTask == nil || pumpTask?.isCancelled == true else { return }
+        pumpTask = Task { @MainActor [weak self] in
+            defer { self?.pumpTask = nil }
+            for _ in 0..<3 {
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                guard let self,
+                      !Task.isCancelled,
+                      self.activeRouteKey == routeKey,
+                      self.bufferedPosts.count < 24 else { return }
+                let scrollJS = """
+                window.scrollBy(0, 3600);
+                if (document.scrollingElement) { document.scrollingElement.scrollTop += 3600; }
+                """
+                _ = try? await wv.evaluateJavaScript(scrollJS)
+            }
         }
     }
 
@@ -431,15 +539,19 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         let wv = await ensureWebView()
 
         if isRefresh || activeRouteKey != routeKey {
+            pumpTask?.cancel()
+            pumpTask = nil
             activeRouteKey = routeKey
             bufferedPosts.removeAll()
+            zeroAdultScrolls = 0
+            didRedirectAdultSupplement = false
             // Preserve seenIds across refreshes so previously delivered tweets never repeat
             pageCounter = 0
             wv.load(URLRequest(url: targetURL))
 
             if let postLoadJS {
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 1_100_000_000)
+                    try? await Task.sleep(nanoseconds: 900_000_000)
                     _ = try? await wv.evaluateJavaScript(postLoadJS)
                 }
             }
@@ -452,23 +564,24 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             _ = try? await wv.evaluateJavaScript(scrollJS)
         }
 
-        // If we already have buffered posts waiting, return them immediately
+        // If we already have buffered posts waiting, return them immediately and keep prefetching
         if !bufferedPosts.isEmpty {
             let posts = bufferedPosts
             bufferedPosts.removeAll()
             pageCounter += 1
+            scheduleBackgroundPump(for: routeKey, wv: wv)
             return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
         }
 
-        // Otherwise wait up to 4.5 seconds for X's GraphQL response to arrive (nudging early)
+        // Wait up to 1.8 seconds for X's GraphQL response to arrive (nudging early) so scrolling stays responsive
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append(cont)
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                try? await Task.sleep(nanoseconds: 800_000_000)
                 if !self.waiters.isEmpty {
-                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400);")
+                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2600);")
                 }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if !self.waiters.isEmpty {
                     let pending = self.waiters
                     self.waiters.removeAll()
@@ -481,6 +594,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             }
         }
 
+        scheduleBackgroundPump(for: routeKey, wv: wv)
         pageCounter += 1
         return GoonedFeedResponse(
             posts: posts,
@@ -489,9 +603,13 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     }
 
     func resetSession() async {
+        pumpTask?.cancel()
+        pumpTask = nil
         activeRouteKey = ""
         bufferedPosts.removeAll()
         seenIds.removeAll()
+        zeroAdultScrolls = 0
+        didRedirectAdultSupplement = false
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
         for cookie in cookies where cookie.domain.contains("x.com") || cookie.domain.contains("twitter.com") {

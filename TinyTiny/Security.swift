@@ -109,70 +109,213 @@ struct PasscodePad: View {
     @Binding var code: String
     var shakes: Int
     var showFaceID = false
+    var stepBadge: String? = nil
+    var showSignature: Bool = false
     var onFaceID: () -> Void = {}
     var onComplete: (String) -> Void
 
     private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["face", "0", "del"]]
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
+        ZStack(alignment: .bottomTrailing) {
+            // Soft Ambient Liquid Glass Backdrop
             ZStack {
-                Circle()
-                    .stroke(Theme.ringGradient, lineWidth: 2)
-                    .frame(width: 68, height: 68)
-                Circle()
-                    .fill(Theme.surfaceElevated)
-                    .frame(width: 60, height: 60)
-                    .overlay(
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 24, weight: .bold))
-                            .foregroundStyle(Theme.accent)
-                    )
+                Theme.bg.ignoresSafeArea()
+
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.72, green: 0.16, blue: 0.38).opacity(0.28),
+                        Color(red: 0.36, green: 0.08, blue: 0.24).opacity(0.12),
+                        .clear
+                    ],
+                    center: UnitPoint(x: 0.22, y: 0.16),
+                    startRadius: 20,
+                    endRadius: 380
+                )
+                .ignoresSafeArea()
+
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.44, green: 0.14, blue: 0.52).opacity(0.20),
+                        .clear
+                    ],
+                    center: UnitPoint(x: 0.84, y: 0.82),
+                    startRadius: 15,
+                    endRadius: 340
+                )
+                .ignoresSafeArea()
             }
 
-            VStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 21, weight: .bold, design: .rounded))
-                    .multilineTextAlignment(.center)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 42)
+            VStack(spacing: 22) {
+                Spacer()
+
+                if let stepBadge {
+                    Text(stepBadge)
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .tracking(1.6)
+                        .foregroundStyle(.white.opacity(0.68))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [.white.opacity(0.32), .white.opacity(0.08)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 0.8
+                                )
+                        )
+                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
-            }
 
-            HStack(spacing: 18) {
-                ForEach(0..<4, id: \.self) { i in
+                // Liquid Glass Lock Emblem
+                ZStack {
                     Circle()
-                        .fill(i < code.count ? Theme.accent : Color.white.opacity(0.10))
-                        .overlay(Circle().stroke(i < code.count ? Theme.accent : Color.white.opacity(0.32), lineWidth: 1.5))
-                        .frame(width: 15, height: 15)
-                        .scaleEffect(i < code.count ? 1.12 : 1.0)
-                        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: code.count)
+                        .fill(Theme.accent.opacity(0.22))
+                        .frame(width: 78, height: 78)
+                        .blur(radius: 16)
+
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 68, height: 68)
+                        .overlay(
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.white.opacity(0.18), .white.opacity(0.02)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [.white.opacity(0.55), Theme.accentBright.opacity(0.35), .white.opacity(0.10)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.1
+                                )
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
+                        .overlay(
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(
+                                    LinearGradient(
+                                        colors: [.white, Color(red: 1.0, green: 0.72, blue: 0.84)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                        )
                 }
-            }
-            .padding(.top, 4)
-            .modifier(Shake(animatableData: CGFloat(shakes)))
-            .animation(.default, value: shakes)
 
-            Spacer()
-
-            VStack(spacing: 16) {
-                ForEach(rows, id: \.self) { row in
-                    HStack(spacing: 24) {
-                        ForEach(row, id: \.self) { key in keyView(key) }
+                VStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 23, weight: .semibold, design: .rounded))
+                        .tracking(-0.3)
+                        .multilineTextAlignment(.center)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 13.5, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 42)
                     }
                 }
+                .animation(.easeOut(duration: 0.2), value: title)
+
+                // Liquid Glass Passcode Indicator Well
+                HStack(spacing: 20) {
+                    ForEach(0..<4, id: \.self) { i in
+                        let filled = i < code.count
+                        Circle()
+                            .fill(filled ? Theme.accentBright : Color.white.opacity(0.10))
+                            .overlay(
+                                Circle()
+                                    .stroke(filled ? Color.white.opacity(0.55) : Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .frame(width: 13, height: 13)
+                            .shadow(color: filled ? Theme.accentBright.opacity(0.70) : .clear, radius: 7)
+                            .scaleEffect(filled ? 1.18 : 1.0)
+                            .animation(.spring(response: 0.24, dampingFraction: 0.68), value: code.count)
+                    }
+                }
+                .padding(.horizontal, 26)
+                .padding(.vertical, 14)
+                .background(
+                    ZStack {
+                        Capsule().fill(.ultraThinMaterial)
+                        Capsule().fill(Color.white.opacity(0.05))
+                    }
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(
+                            LinearGradient(
+                                colors: [.white.opacity(0.34), .white.opacity(0.10)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.9
+                        )
+                )
+                .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
+                .padding(.top, 2)
+                .modifier(Shake(animatableData: CGFloat(shakes)))
+                .animation(.default, value: shakes)
+
+                Spacer()
+
+                // Apple-style Translucent Glass Keypad
+                VStack(spacing: 16) {
+                    ForEach(rows, id: \.self) { row in
+                        HStack(spacing: 24) {
+                            ForEach(row, id: \.self) { key in keyView(key) }
+                        }
+                    }
+                }
+                .padding(.bottom, showSignature ? 46 : 36)
             }
-            .padding(.bottom, 36)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if showSignature {
+                Text("by bella")
+                    .font(.system(size: 12, weight: .medium, design: .serif))
+                    .italic()
+                    .tracking(0.8)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.white.opacity(0.62), Color(red: 1.0, green: 0.72, blue: 0.85).opacity(0.52)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.24), .white.opacity(0.06)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.7
+                            )
+                    )
+                    .padding(.trailing, 22)
+                    .padding(.bottom, 16)
+            }
         }
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.bg.ignoresSafeArea())
     }
 
     @ViewBuilder
@@ -181,20 +324,44 @@ struct PasscodePad: View {
         case "face":
             Button(action: onFaceID) {
                 Image(systemName: "faceid")
-                    .font(.system(size: 28))
-                    .frame(width: 76, height: 76)
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .frame(width: 78, height: 78)
+                    .background(
+                        ZStack {
+                            Circle().fill(.ultraThinMaterial)
+                            Circle().fill(Color.white.opacity(0.04))
+                        }
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.28), .white.opacity(0.06)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.85
+                            )
+                    )
             }
+            .buttonStyle(ScalePressButtonStyle())
             .opacity(showFaceID ? 1 : 0)
             .disabled(!showFaceID)
         case "del":
             Button {
-                if !code.isEmpty { code.removeLast() }
+                if !code.isEmpty {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    code.removeLast()
+                }
             } label: {
-                Image(systemName: "delete.left.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 76, height: 76)
+                Image(systemName: "delete.backward")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(.white.opacity(code.isEmpty ? 0.35 : 0.82))
+                    .frame(width: 78, height: 78)
+                    .contentShape(Circle())
             }
+            .buttonStyle(ScalePressButtonStyle())
         default:
             Button {
                 guard code.count < 4 else { return }
@@ -202,17 +369,37 @@ struct PasscodePad: View {
                 code.append(key)
                 if code.count == 4 {
                     let c = code
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { onComplete(c) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { onComplete(c) }
                 }
             } label: {
                 Text(key)
-                    .font(.system(size: 30, weight: .medium, design: .rounded))
-                    .frame(width: 76, height: 76)
+                    .font(.system(size: 30, weight: .regular, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(width: 78, height: 78)
                     .background(
-                        Circle()
-                            .fill(Theme.surfaceElevated)
-                            .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+                        ZStack {
+                            Circle().fill(.ultraThinMaterial)
+                            Circle().fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.15), .white.opacity(0.03)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                        }
                     )
+                    .overlay(
+                        Circle()
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.42), .white.opacity(0.10)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.9
+                            )
+                    )
+                    .shadow(color: .black.opacity(0.30), radius: 10, y: 5)
             }
             .buttonStyle(ScalePressButtonStyle())
         }
@@ -326,8 +513,24 @@ struct PasscodeSetupView: View {
         return nil
     }
 
+    private var stepBadge: String? {
+        guard mode == .create else { return nil }
+        switch step {
+        case .enter: return "STEP 1 OF 2"
+        case .confirm: return "STEP 2 OF 2"
+        case .current: return nil
+        }
+    }
+
     var body: some View {
-        PasscodePad(title: title, subtitle: subtitle, code: $code, shakes: shakes) { c in
+        PasscodePad(
+            title: title,
+            subtitle: subtitle,
+            code: $code,
+            shakes: shakes,
+            stepBadge: stepBadge,
+            showSignature: true
+        ) { c in
             handle(c)
         }
         .alert("Enable Face ID Unlock?", isPresented: $askFaceID) {

@@ -220,7 +220,20 @@ final class FeedModel: ObservableObject {
     }
 
     func onItemAppear(_ g: Gif) {
-        if items.suffix(10).contains(where: { $0.id == g.id }) {
+        if items.suffix(15).contains(where: { $0.id == g.id }) {
+            Task { await loadMore() }
+        }
+    }
+
+    func prefetchIfNeeded(currentID: String?) {
+        guard !isLoading, canLoadMore else { return }
+        if items.count < 18 {
+            Task { await loadMore() }
+            return
+        }
+        guard let currentID,
+              let idx = items.firstIndex(where: { $0.id == currentID }) else { return }
+        if idx >= max(0, items.count - 14) {
             Task { await loadMore() }
         }
     }
@@ -275,7 +288,9 @@ final class FeedModel: ObservableObject {
                 store.setSavedCursor(resp.after, for: cursorKey)
 
                 let playablePosts = resp.posts.filter {
-                    $0.hasPlayableMedia && !store.isBlockedByAlgorithm($0)
+                    $0.hasPlayableMedia
+                    && !store.isBlockedByAlgorithm($0)
+                    && AdultContentClassifier.isEligible($0, source: source, categories: store.categories, store: store)
                 }
 
                 if playablePosts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
@@ -311,10 +326,8 @@ final class FeedModel: ObservableObject {
                 }
 
                 switch source {
-                case .forYou:
+                case .forYou, .xForYou, .igReels, .category, .rule34:
                     batchUnseen = store.rankWithAlgorithm(batchUnseen)
-                case .category, .rule34:
-                    batchUnseen.shuffle()
                 default:
                     break
                 }
@@ -378,6 +391,7 @@ final class FeedModel: ObservableObject {
                     let freshFavs = boostedPosts.filter {
                         $0.hasPlayableMedia
                         && !store.isBlockedByAlgorithm($0)
+                        && AdultContentClassifier.isEligible($0, source: self.source, categories: store.categories, store: store)
                         && !store.isSeen($0)
                         && self.ids.insert($0.id).inserted
                         && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
@@ -406,6 +420,7 @@ final class FeedModel: ObservableObject {
                     self.xMixAfterCursor = xResp.after
                     let freshX = xResp.posts.filter {
                         !store.isBlockedByAlgorithm($0)
+                        && AdultContentClassifier.isEligible($0, source: .xForYou, categories: store.categories, store: store)
                         && !store.isSeen($0)
                         && self.ids.insert($0.id).inserted
                         && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
@@ -434,6 +449,7 @@ final class FeedModel: ObservableObject {
                     self.igMixAfterCursor = igResp.after
                     let freshIG = igResp.posts.filter {
                         !store.isBlockedByAlgorithm($0)
+                        && AdultContentClassifier.isEligible($0, source: .igReels, categories: store.categories, store: store)
                         && !store.isSeen($0)
                         && self.ids.insert($0.id).inserted
                         && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
@@ -460,12 +476,21 @@ final class FeedModel: ObservableObject {
             } else {
                 errorText = nil
             }
+
+            if !Task.isCancelled && items.count < 14 && canLoadMore && emptyPageStreak == 0 {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    await self?.loadMore()
+                }
+            }
         } catch {
-            // If offline and user has downloaded videos, let them know or fallback cleanly
-            if !store.data.downloaded.isEmpty && items.isEmpty {
-                errorText = "Offline — tap Likes/Vault tab to watch your \(store.data.downloaded.count) downloaded videos."
-            } else {
-                errorText = "Couldn't load posts. Tap to retry."
+            // Keep existing playable items visible on transient errors; only show an error card if feed is empty
+            if items.isEmpty {
+                if !store.data.downloaded.isEmpty {
+                    errorText = "Offline — tap Likes/Vault tab to watch your \(store.data.downloaded.count) downloaded videos."
+                } else {
+                    errorText = "Couldn't load posts. Tap to retry."
+                }
             }
         }
     }

@@ -244,7 +244,7 @@ struct GoonedBrowseOverlay: View {
                         .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
                     Spacer()
                     Button(action: onSetupR34Key) {
-                        Text(store.data.r34Credentials.isConnected ? "API KEY ACTIVE" : "API KEY (OPTIONAL)")
+                        Text(store.data.r34Credentials.hasCustomCredentials ? "CUSTOM API" : "DEFAULT API ACTIVE")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.65))
                     }
@@ -398,6 +398,7 @@ struct GoonedBrowseOverlay: View {
 
                 if let hero = featuredCategories.first(where: { $0.name == "Gooning" }) ?? store.categories.first {
                     Button {
+                        store.recordSearchSignal(hero.name)
                         onSelectFeed(.category(hero.name))
                     } label: {
                         HStack {
@@ -431,6 +432,7 @@ struct GoonedBrowseOverlay: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                     ForEach(gridTiles) { tile in
                         Button {
+                            store.recordSearchSignal(tile.name)
                             onSelectFeed(.category(tile.name))
                         } label: {
                             VStack(alignment: .leading, spacing: 10) {
@@ -467,6 +469,7 @@ struct GoonedBrowseOverlay: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
                 ForEach(azCategories) { cat in
                     Button {
+                        store.recordSearchSignal(cat.name)
                         onSelectFeed(.category(cat.name))
                     } label: {
                         Text(cat.displayName)
@@ -488,6 +491,7 @@ struct GoonedBrowseOverlay: View {
 
     private func r34Chip(label: String, tag: String) -> some View {
         Button {
+            store.recordSearchSignal(tag)
             onSelectFeed(.rule34(tag))
         } label: {
             Text(label)
@@ -546,6 +550,7 @@ struct GoonedBrowseOverlay: View {
     private func submitSearch() {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        store.recordSearchSignal(clean)
         switch searchScope {
         case .rule34:
             onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
@@ -602,6 +607,7 @@ struct GoonedBrowseOverlay: View {
             VStack(spacing: 8) {
                 if showR34 && !r34QueryString.isEmpty {
                     Button {
+                        store.recordSearchSignal(r34QueryString)
                         onSelectFeed(.rule34(r34QueryString))
                     } label: {
                         HStack(spacing: 12) {
@@ -1441,7 +1447,6 @@ struct GoonedSettingsModal: View {
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
     var onSetupR34Key: () -> Void
-    var onReplayIntro: (() -> Void)? = nil
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
     @ObservedObject private var offline = OfflineManager.shared
@@ -1678,13 +1683,13 @@ struct GoonedSettingsModal: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Rule34.xxx DAPI Key")
                                         .font(.system(size: 15, weight: .bold))
-                                    Text(store.data.r34Credentials.isConnected ? "Authenticated DAPI key active" : "Built-in Rule34 active · Add key for direct DAPI")
+                                    Text(store.data.r34Credentials.hasCustomCredentials ? "Custom DAPI key active (User #\(store.data.r34Credentials.effectiveUserId))" : "Default DAPI key active · Tap to customize")
                                         .font(.system(size: 12))
                                         .foregroundStyle(.white.opacity(0.68))
                                 }
                                 Spacer()
                                 Button(action: onSetupR34Key) {
-                                    Text(store.data.r34Credentials.isConnected ? "Edit Key" : "API Key")
+                                    Text(store.data.r34Credentials.hasCustomCredentials ? "Custom" : "API Key")
                                         .font(.caption.bold())
                                         .padding(.horizontal, 13)
                                         .padding(.vertical, 8)
@@ -1820,30 +1825,6 @@ struct GoonedSettingsModal: View {
                                 }
                                 pillOption(title: "Collapsed Down", active: store.data.settings.controlsCollapsed) {
                                     store.data.settings.controlsCollapsed = true
-                                }
-                            }
-
-                            if let onReplayIntro {
-                                Divider().overlay(Color.white.opacity(0.14))
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Welcome Motion Intro")
-                                            .font(.system(size: 15, weight: .bold))
-                                        Text("Replay the 5s 'Welcome to Gooned' intro animation.")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.white.opacity(0.68))
-                                    }
-                                    Spacer()
-                                    Button {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        onReplayIntro()
-                                    } label: {
-                                        Text("Replay")
-                                            .font(.caption.bold())
-                                            .padding(.horizontal, 13)
-                                            .padding(.vertical, 8)
-                                            .liquidGlassCapsule()
-                                    }
                                 }
                             }
                         }
@@ -2113,7 +2094,7 @@ struct AlgorithmEditorSheet: View {
                             }
 
                             if store.data.algorithm.boostedTags.isEmpty {
-                                Text("No pinned #tags yet. Add any tag above to prioritize it in For You.")
+                                Text("No pinned #tags yet. Add any tag above or tap a category below to prioritize it in For You.")
                                     .font(.system(size: 12.5))
                                     .foregroundStyle(.white.opacity(0.55))
                             } else {
@@ -2124,27 +2105,127 @@ struct AlgorithmEditorSheet: View {
                                     store.removeBoostedTag(raw)
                                 }
                             }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("RECOGNIZED PORN CATEGORIES (TAP TO PIN)")
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .tracking(1.1)
+                                    .foregroundStyle(.white.opacity(0.52))
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 7) {
+                                        ForEach(PornTagCatalog.quickPickerCategories, id: \.self) { category in
+                                            let isPinned = store.data.algorithm.boostedTags.contains {
+                                                PornTagCatalog.normalize($0) == category
+                                            }
+                                            Button {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                if isPinned {
+                                                    store.removeBoostedTag(category)
+                                                } else {
+                                                    store.addBoostedTags(category)
+                                                    store.adjustLearnedTag(category, delta: 2.0)
+                                                }
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    Image(systemName: isPinned ? "checkmark" : "plus")
+                                                        .font(.system(size: 10, weight: .bold))
+                                                    Text(PornTagCatalog.displayTitle(for: category))
+                                                        .font(.system(size: 12, weight: .semibold))
+                                                }
+                                                .padding(.horizontal, 11)
+                                                .padding(.vertical, 6)
+                                                .liquidGlassCapsule(tinted: !isPinned, active: isPinned)
+                                            }
+                                            .buttonStyle(ScalePressButtonStyle())
+                                        }
+                                    }
+                                }
+                            }
                         }
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
 
                         // 2. Learned #Tags & Creators / Subreddits
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("LEARNED TASTE SIGNALS")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .tracking(1.2)
-                                .foregroundStyle(.white.opacity(0.58))
+                            HStack {
+                                Text("LEARNED TASTE SIGNALS")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .tracking(1.2)
+                                    .foregroundStyle(.white.opacity(0.58))
+                                Spacer()
+                                if !store.topAlgorithmTags.isEmpty || !store.topAlgorithmSubredditEntries.isEmpty {
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                        store.resetAlgorithmProfile()
+                                    } label: {
+                                        Text("Reset Profile")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundStyle(Theme.accentBright)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 4)
+                                            .liquidGlassCapsule(tinted: true, active: false)
+                                    }
+                                }
+                            }
 
                             if !store.topAlgorithmTags.isEmpty {
-                                Text("Tap × to remove any learned #tag")
+                                Text("Adjust affinity with − / + or tap × to unlearn any recognized category or tag.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.white.opacity(0.6))
 
-                                editableTagGrid(
-                                    items: store.topAlgorithmTags.map { ("#\($0.tag) · \(Int($0.score.rounded()))", $0.tag) },
-                                    tintActive: false
-                                ) { tag in
-                                    store.removeLearnedTag(tag)
+                                VStack(spacing: 8) {
+                                    ForEach(store.topAlgorithmTags, id: \.tag) { entry in
+                                        HStack(spacing: 10) {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(PornTagCatalog.displayTitle(for: entry.tag))
+                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .foregroundStyle(.white)
+                                                Text("#\(entry.tag)")
+                                                    .font(.system(size: 11, design: .monospaced))
+                                                    .foregroundStyle(.white.opacity(0.52))
+                                            }
+                                            Spacer()
+                                            Text("+\(Int(entry.score.rounded()))")
+                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                                .foregroundStyle(Theme.accentBright)
+                                                .frame(minWidth: 32, alignment: .trailing)
+
+                                            Button {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                store.adjustLearnedTag(entry.tag, delta: -3.0)
+                                            } label: {
+                                                Image(systemName: "minus")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                    .frame(width: 28, height: 28)
+                                                    .liquidGlassCircle()
+                                            }
+
+                                            Button {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                store.adjustLearnedTag(entry.tag, delta: 3.0)
+                                            } label: {
+                                                Image(systemName: "plus")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                    .frame(width: 28, height: 28)
+                                                    .liquidGlassCircle()
+                                            }
+
+                                            Button {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                store.removeLearnedTag(entry.tag)
+                                            } label: {
+                                                Image(systemName: "xmark")
+                                                    .font(.system(size: 10.5, weight: .bold))
+                                                    .foregroundStyle(.white.opacity(0.72))
+                                                    .frame(width: 28, height: 28)
+                                                    .liquidGlassCircle()
+                                            }
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    }
                                 }
                             }
 
@@ -2163,7 +2244,7 @@ struct AlgorithmEditorSheet: View {
                             }
 
                             if store.topAlgorithmTags.isEmpty && store.topAlgorithmSubredditEntries.isEmpty {
-                                Text("Watch, like, or save videos and your on-device taste signals will appear here.")
+                                Text("Watch, loop, like, save, or search adult categories and your learned taste profile will build here.")
                                     .font(.system(size: 12.5))
                                     .foregroundStyle(.white.opacity(0.55))
                             }
