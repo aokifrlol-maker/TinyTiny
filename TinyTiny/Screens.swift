@@ -11,6 +11,7 @@ struct GoonedBrowseOverlay: View {
 
     enum SearchScope: String, CaseIterable {
         case all = "All"
+        case of = "OnlyFans"
         case reddit = "Reddit"
         case rule34 = "Rule34"
         case x = "𝕏"
@@ -22,6 +23,8 @@ struct GoonedBrowseOverlay: View {
     @State private var searchScope: SearchScope = .all
     @State private var searchResults = GoonedSearchResponsePlaceholder()
     @State private var r34Suggestions: [Rule34TagSuggestion] = []
+    @State private var ofCreators: [OFCreator] = []
+    @State private var featuredOFCreators: [OFCreator] = []
     @State private var isSearching = false
 
     struct GoonedSearchResponsePlaceholder {
@@ -63,7 +66,7 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
 
-                        TextField("Search Reddit, 𝕏, IG, or Rule34 tags...", text: $query)
+                        TextField("Search OF creators, Reddit, 𝕏, IG, R34...", text: $query)
                             .font(.system(size: 16))
                             .foregroundStyle(.white)
                             .autocorrectionDisabled()
@@ -152,11 +155,17 @@ struct GoonedBrowseOverlay: View {
                 }
             }
         }
+        .task {
+            if featuredOFCreators.isEmpty {
+                featuredOFCreators = await OnlyFansAPI.shared.topCreators(limit: 12)
+            }
+        }
         .task(id: query) {
             let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty else {
                 searchResults = GoonedSearchResponsePlaceholder()
                 r34Suggestions = []
+                ofCreators = []
                 return
             }
             isSearching = true
@@ -164,11 +173,13 @@ struct GoonedBrowseOverlay: View {
             guard !Task.isCancelled else { return }
             async let redditTask = try? GoonedAPI.shared.search(q)
             async let r34Task = Rule34API.shared.autocomplete(q)
-            let (redditRes, r34Res) = await (redditTask, r34Task)
+            async let ofTask = OnlyFansAPI.shared.searchCreators(q, limit: 25)
+            let (redditRes, r34Res, ofRes) = await (redditTask, r34Task, ofTask)
             if let redditRes {
                 searchResults = GoonedSearchResponsePlaceholder(subreddits: redditRes.subreddits, users: redditRes.users)
             }
             r34Suggestions = r34Res
+            ofCreators = ofRes
             isSearching = false
         }
     }
@@ -203,6 +214,13 @@ struct GoonedBrowseOverlay: View {
                         case "igsaved": onSelectFeed(.igSaved)
                         case "iguser": onSelectFeed(.igUser(recent.name))
                         case "rule34": onSelectFeed(.rule34(recent.name == "all" ? "" : recent.name))
+                        case "oftrending": onSelectFeed(.ofTrending)
+                        case "oflatest": onSelectFeed(.ofLatest)
+                        case "ofdms": onSelectFeed(.ofDMs)
+                        case "ofcreator":
+                            let parts = recent.name.split(separator: "|", maxSplits: 1).map(String.init)
+                            onSelectFeed(.ofCreator(id: parts.first ?? recent.name, handle: parts.count > 1 ? parts[1] : recent.name, displayName: nil))
+                        case "ofsearch": onSelectFeed(.ofSearch(recent.name))
                         default: onSelectFeed(.forYou)
                         }
                     } else {
@@ -261,6 +279,48 @@ struct GoonedBrowseOverlay: View {
                         r34Chip(label: "Futanari", tag: "futanari")
                         r34Chip(label: "Cyberpunk", tag: "cyberpunk")
                         r34Chip(label: "Pokemon", tag: "pokemon")
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+
+            // ONLYFANS HUB
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("ONLYFANS")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
+                    Spacer()
+                    Text("SEARCH CREATORS ABOVE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .padding(.horizontal, 18)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ofFeedChip(label: "🔥 Trending", source: .ofTrending)
+                        ofFeedChip(label: "⚡ Latest Videos", source: .ofLatest)
+                        ofFeedChip(label: "💬 Unlocked DMs", source: .ofDMs)
+                        ForEach(featuredOFCreators.prefix(10)) { creator in
+                            Button {
+                                onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
+                            } label: {
+                                HStack(spacing: 7) {
+                                    ofAvatar(url: creator.avatarURL, size: 22)
+                                    Text(creator.displayTitle)
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                }
+                                .padding(.leading, 7)
+                                .padding(.trailing, 12)
+                                .padding(.vertical, 7)
+                                .liquidGlassCapsule()
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+                        }
                     }
                     .padding(.horizontal, 16)
                 }
@@ -504,6 +564,44 @@ struct GoonedBrowseOverlay: View {
         .buttonStyle(ScalePressButtonStyle())
     }
 
+    private func ofFeedChip(label: String, source: FeedSource) -> some View {
+        Button {
+            onSelectFeed(source)
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .liquidGlassCapsule()
+        }
+        .buttonStyle(ScalePressButtonStyle())
+    }
+
+    private func ofAvatar(url: URL?, size: CGFloat) -> some View {
+        AsyncImage(url: url) { phase in
+            if let img = phase.image {
+                img.resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.0, green: 0.72, blue: 0.96), Color(red: 0.0, green: 0.52, blue: 0.84)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .overlay(
+                        Text("OF")
+                            .font(.system(size: max(9, size * 0.36), weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                    )
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+    }
+
     private func quickCard(title: String, subtitle: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
@@ -552,6 +650,12 @@ struct GoonedBrowseOverlay: View {
         guard !clean.isEmpty else { return }
         store.recordSearchSignal(clean)
         switch searchScope {
+        case .of:
+            if let bestCreator = ofCreators.first {
+                onSelectFeed(.ofCreator(id: bestCreator.id, handle: bestCreator.name, displayName: bestCreator.displayName))
+            } else {
+                onSelectFeed(.ofSearch(clean))
+            }
         case .rule34:
             onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
         case .x:
@@ -565,7 +669,14 @@ struct GoonedBrowseOverlay: View {
         case .reddit:
             onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "", options: .caseInsensitive).replacingOccurrences(of: " ", with: "")))
         case .all:
-            if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") || clean.contains("_") {
+            if clean.lowercased().hasPrefix("of:") {
+                let q = clean.replacingOccurrences(of: "of:", with: "", options: .caseInsensitive).trimmingCharacters(in: .whitespaces)
+                if let c = ofCreators.first {
+                    onSelectFeed(.ofCreator(id: c.id, handle: c.name, displayName: c.displayName))
+                } else {
+                    onSelectFeed(.ofSearch(q))
+                }
+            } else if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") || clean.contains("_") {
                 onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
             } else if clean.lowercased().hasPrefix("ig:") {
                 onSelectFeed(.igUser(clean.replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
@@ -599,11 +710,93 @@ struct GoonedBrowseOverlay: View {
         let parsedR34Tags = Rule34API.parseTags(query)
         let r34QueryString = parsedR34Tags.joined(separator: " ")
         let showReddit = (searchScope == .all || searchScope == .reddit)
+        let showOF = (searchScope == .all || searchScope == .of)
         let showR34 = (searchScope == .all || searchScope == .rule34)
         let showX = (searchScope == .all || searchScope == .x)
         let showIG = (searchScope == .all || searchScope == .ig)
 
         return VStack(alignment: .leading, spacing: 14) {
+            if showOF && !ofCreators.isEmpty {
+                Text("ONLYFANS CREATORS")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
+                    .padding(.horizontal, 4)
+
+                ForEach(ofCreators) { creator in
+                    let isFollowing = store.isFollowingOFCreator(id: creator.id, handle: creator.name)
+                    HStack(spacing: 10) {
+                        Button {
+                            onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
+                        } label: {
+                            HStack(spacing: 12) {
+                                ofAvatar(url: creator.avatarURL, size: 42)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(creator.displayTitle)
+                                        .font(.system(size: 15, weight: .bold))
+                                        .lineLimit(1)
+                                    Text("@\(creator.name) · \(shortCount(creator.videoCount)) videos")
+                                        .font(.caption)
+                                        .foregroundStyle(.white.opacity(0.68))
+                                        .lineLimit(1)
+                                    if let tags = creator.creatorTags, !tags.isEmpty {
+                                        Text(tags.prefix(3).map { "#\($0)" }.joined(separator: " "))
+                                            .font(.system(size: 10.5, weight: .medium))
+                                            .foregroundStyle(Color(red: 0.45, green: 0.86, blue: 1.0))
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            store.toggleFollowOFCreator(id: creator.id, name: creator.name, displayName: creator.displayName)
+                        } label: {
+                            Text(isFollowing ? "Following" : "Follow")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 6)
+                                .liquidGlassCapsule(active: isFollowing)
+                        }
+                        .buttonStyle(ScalePressButtonStyle())
+                    }
+                    .padding(12)
+                    .liquidGlassCard(cornerRadius: 16)
+                }
+            }
+
+            if showOF && clean.count >= 3 {
+                Button {
+                    onSelectFeed(.ofSearch(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        BrandLogoOnlyFans(active: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Search \"\(clean)\" in OnlyFans Videos")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Captions, tags & matching creators")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+            } else if searchScope == .of && clean.count < 3 && ofCreators.isEmpty && !isSearching {
+                Text("Type at least 3 characters to search all 56,000+ OnlyFans creators.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .padding(.horizontal, 6)
+            }
+
             VStack(spacing: 8) {
                 if showR34 && !r34QueryString.isEmpty {
                     Button {
@@ -1117,7 +1310,9 @@ struct GridThumb: View {
             }
             .overlay(alignment: .bottomLeading) {
                 HStack(spacing: 4) {
-                    if gif.isXPost {
+                    if gif.isOnlyFansPost {
+                        Text("OF").font(.system(size: 10, weight: .black))
+                    } else if gif.isXPost {
                         Text("𝕏").font(.system(size: 10, weight: .black))
                     } else if gif.isIGPost {
                         Image(systemName: "camera.fill").font(.system(size: 9, weight: .bold))
@@ -1152,7 +1347,8 @@ struct GoonedFollowsView: View {
         !store.data.followedSubreddits.isEmpty ||
         !store.data.followedUsers.isEmpty ||
         !store.data.followedXUsers.isEmpty ||
-        !store.data.followedIGUsers.isEmpty
+        !store.data.followedIGUsers.isEmpty ||
+        !store.data.followedOFCreators.isEmpty
     }
 
     var body: some View {
@@ -1346,6 +1542,51 @@ struct GoonedFollowsView: View {
                                             }
                                         }
                                         Button { store.toggleFollowXUser(handle) } label: {
+                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
+                                        }
+                                    }
+                                    .padding(12)
+                                    .liquidGlassCard(cornerRadius: 16)
+                                }
+                            }
+
+                            if !store.data.followedOFCreators.isEmpty {
+                                Text("ONLYFANS CREATORS")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
+                                    .padding(.horizontal, 4)
+
+                                ForEach(store.data.followedOFCreators) { creator in
+                                    HStack {
+                                        Button {
+                                            onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                AsyncImage(url: creator.avatarURL) { phase in
+                                                    if let img = phase.image {
+                                                        img.resizable().aspectRatio(contentMode: .fill)
+                                                    } else {
+                                                        Circle()
+                                                            .fill(Color(red: 0.0, green: 0.65, blue: 0.92).opacity(0.65))
+                                                            .overlay(Text("OF").font(.system(size: 11, weight: .black)))
+                                                    }
+                                                }
+                                                .frame(width: 36, height: 36)
+                                                .clipShape(Circle())
+
+                                                VStack(alignment: .leading, spacing: 1) {
+                                                    Text(creator.displayName?.isEmpty == false ? creator.displayName! : "@\(creator.name)")
+                                                        .font(.system(size: 15.5, weight: .bold))
+                                                    Text("@\(creator.name)")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.white.opacity(0.65))
+                                                }
+                                                Spacer()
+                                            }
+                                        }
+                                        Button {
+                                            store.toggleFollowOFCreator(id: creator.id, name: creator.name, displayName: creator.displayName)
+                                        } label: {
                                             Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
                                         }
                                     }

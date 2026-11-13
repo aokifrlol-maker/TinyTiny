@@ -17,6 +17,11 @@ enum FeedSource: Hashable {
     case igSaved
     case igUser(String)
     case rule34(String) // "" for general Rule34.xxx feed, or tag name
+    case ofTrending
+    case ofLatest
+    case ofDMs
+    case ofCreator(id: String, handle: String, displayName: String?)
+    case ofSearch(String)
     case list(title: String)
 
     var displayTitle: String {
@@ -38,6 +43,13 @@ enum FeedSource: Hashable {
         case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
         case .rule34(let tag):
             return tag.isEmpty ? "Rule34.xxx" : "R34: \(tag)"
+        case .ofTrending: return "OF Trending"
+        case .ofLatest: return "OF Latest"
+        case .ofDMs: return "OF DMs"
+        case .ofCreator(_, let handle, let displayName):
+            let clean = handle.replacingOccurrences(of: "@", with: "")
+            return (displayName?.isEmpty == false) ? "\(displayName!) (@\(clean))" : "OF @\(clean)"
+        case .ofSearch(let q): return "OF: \(q)"
         case .list(let t): return t
         }
     }
@@ -65,6 +77,15 @@ enum FeedSource: Hashable {
         return false
     }
 
+    var isOFFeed: Bool {
+        switch self {
+        case .ofTrending, .ofLatest, .ofDMs, .ofCreator, .ofSearch:
+            return true
+        default:
+            return false
+        }
+    }
+
     var isList: Bool {
         if case .list = self { return true }
         return false
@@ -88,6 +109,11 @@ enum FeedSource: Hashable {
         case .igSaved: return ("igsaved", "igsaved")
         case .igUser(let u): return ("iguser", u)
         case .rule34(let tag): return ("rule34", tag.isEmpty ? "all" : tag)
+        case .ofTrending: return ("oftrending", "oftrending")
+        case .ofLatest: return ("oflatest", "oflatest")
+        case .ofDMs: return ("ofdms", "ofdms")
+        case .ofCreator(let id, let handle, _): return ("ofcreator", "\(id)|\(handle)")
+        case .ofSearch(let q): return ("ofsearch", q)
         case .list(let t): return ("list", t)
         }
     }
@@ -364,7 +390,7 @@ final class FeedModel: ObservableObject {
                 }
 
                 switch source {
-                case .forYou, .xForYou, .igReels, .category, .rule34:
+                case .forYou, .xForYou, .igReels, .category, .rule34, .ofTrending, .ofDMs:
                     batchUnseen = store.rankWithAlgorithm(batchUnseen)
                 default:
                     break
@@ -586,6 +612,7 @@ final class FeedModel: ObservableObject {
             let users = store.data.followedUsers
             let xUsers = store.data.followedXUsers
             let igUsers = store.data.followedIGUsers
+            let ofCreators = store.data.followedOFCreators
 
             var poolKeys: [String] = []
             if !subs.isEmpty || !users.isEmpty { poolKeys.append("reddit") }
@@ -593,6 +620,7 @@ final class FeedModel: ObservableObject {
             if store.data.xSession.isConnected { poolKeys.append("x_following") }
             for xu in xUsers { poolKeys.append("x_user:\(xu)") }
             for iu in igUsers { poolKeys.append("ig_user:\(iu)") }
+            for ofc in ofCreators { poolKeys.append("of_creator:\(ofc.id)|\(ofc.name)") }
 
             guard !poolKeys.isEmpty else {
                 hasMore = false
@@ -613,9 +641,15 @@ final class FeedModel: ObservableObject {
             } else if poolKey.hasPrefix("x_user:") {
                 let handle = String(poolKey.dropFirst("x_user:".count))
                 resp = await XAPI.userMedia(handle, after: poolCursor)
-            } else {
+            } else if poolKey.hasPrefix("ig_user:") {
                 let handle = String(poolKey.dropFirst("ig_user:".count))
                 resp = await InstagramAPI.userReels(handle, after: poolCursor)
+            } else {
+                let raw = String(poolKey.dropFirst("of_creator:".count))
+                let parts = raw.split(separator: "|", maxSplits: 1).map(String.init)
+                let cid = parts.first ?? raw
+                let chandle = parts.count > 1 ? parts[1] : cid
+                resp = await OnlyFansAPI.shared.creatorFeed(id: cid, handle: chandle, sort: sort.rawValue, after: poolCursor)
             }
 
             if let next = resp.after, !next.isEmpty {
@@ -668,6 +702,22 @@ final class FeedModel: ObservableObject {
                 after: cursor,
                 credentials: store.data.r34Credentials
             )
+        case .ofTrending:
+            return await OnlyFansAPI.shared.trending(after: cursor)
+        case .ofLatest:
+            return await OnlyFansAPI.shared.latest(after: cursor)
+        case .ofDMs:
+            return await OnlyFansAPI.shared.dms(after: cursor)
+        case .ofCreator(let id, let handle, let displayName):
+            return await OnlyFansAPI.shared.creatorFeed(
+                id: id,
+                handle: handle,
+                displayName: displayName,
+                sort: sort.rawValue,
+                after: cursor
+            )
+        case .ofSearch(let query):
+            return await OnlyFansAPI.shared.searchPosts(query, after: cursor)
         case .list:
             return GoonedFeedResponse(posts: [], after: nil)
         }

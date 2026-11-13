@@ -3,6 +3,7 @@ import Foundation
 enum Config {
     static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
     static let goonedBase = "https://api.gooned.app"
+    static let onlyHavenBase = "https://cum.st/api/v1"
     static let origin = "https://gooned.app"
     static let referer = "https://gooned.app/"
 }
@@ -70,6 +71,23 @@ struct Gif: Codable, Identifiable, Hashable {
 
     var isRule34Post: Bool {
         id.hasPrefix("r34") || (subreddit?.lowercased().contains("rule34") == true) || (sourceUrl?.contains("rule34.xxx") == true)
+    }
+
+    var isOnlyFansPost: Bool {
+        id.hasPrefix("of_") || (sourceUrl?.contains("cum.st") == true) || (permalink?.contains("cum.st") == true)
+    }
+
+    /// Extracts OnlyFans creator external ID from `https://cum.st/creators/onlyfans/{creatorId}/...`
+    var onlyFansCreatorId: String? {
+        guard isOnlyFansPost else { return nil }
+        let candidate = permalink ?? sourceUrl ?? ""
+        guard let url = URL(string: candidate) else { return nil }
+        let parts = url.pathComponents
+        if let idx = parts.firstIndex(of: "onlyfans"), idx + 1 < parts.count {
+            let cid = parts[idx + 1]
+            if !cid.isEmpty && cid != "post" { return cid }
+        }
+        return nil
     }
 
     var isImage: Bool {

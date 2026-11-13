@@ -77,6 +77,7 @@ struct UserData: Codable {
     var followedUsers: [String] = []
     var followedXUsers: [String] = []
     var followedIGUsers: [String] = []
+    var followedOFCreators: [FollowedOFCreator] = []
     var recentFeeds: [RecentFeedEntry] = []
     var seenIDs: [String] = []
     var savedCursors: [String: String] = [:]
@@ -88,7 +89,7 @@ struct UserData: Codable {
     var algorithm = AlgorithmProfile()
 
     enum CodingKeys: String, CodingKey {
-        case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers
+        case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers, followedOFCreators
         case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, r34Credentials, algorithm
     }
 
@@ -102,6 +103,7 @@ struct UserData: Codable {
         followedUsers = (try? c.decode([String].self, forKey: .followedUsers)) ?? []
         followedXUsers = (try? c.decode([String].self, forKey: .followedXUsers)) ?? []
         followedIGUsers = (try? c.decode([String].self, forKey: .followedIGUsers)) ?? []
+        followedOFCreators = (try? c.decode([FollowedOFCreator].self, forKey: .followedOFCreators)) ?? []
         recentFeeds = (try? c.decode([RecentFeedEntry].self, forKey: .recentFeeds)) ?? []
         seenIDs = (try? c.decode([String].self, forKey: .seenIDs)) ?? []
         savedCursors = (try? c.decode([String: String].self, forKey: .savedCursors)) ?? [:]
@@ -313,6 +315,31 @@ final class UserStore: ObservableObject {
             data.followedIGUsers.remove(at: i)
         } else {
             data.followedIGUsers.insert(clean, at: 0)
+        }
+    }
+
+    func isFollowingOFCreator(id: String?, handle: String?) -> Bool {
+        if let id, !id.isEmpty, data.followedOFCreators.contains(where: { $0.id == id }) {
+            return true
+        }
+        if let handle, !handle.isEmpty {
+            let clean = handle.replacingOccurrences(of: "@", with: "")
+            return data.followedOFCreators.contains { $0.name.caseInsensitiveCompare(clean) == .orderedSame }
+        }
+        return false
+    }
+
+    func toggleFollowOFCreator(id: String, name: String, displayName: String? = nil) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "@", with: "")
+        let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        if let idx = data.followedOFCreators.firstIndex(where: { $0.id == cleanId || $0.name.caseInsensitiveCompare(cleanName) == .orderedSame }) {
+            data.followedOFCreators.remove(at: idx)
+        } else {
+            data.followedOFCreators.insert(
+                FollowedOFCreator(id: cleanId, name: cleanName.isEmpty ? cleanId : cleanName, displayName: displayName),
+                at: 0
+            )
         }
     }
 
@@ -988,6 +1015,9 @@ enum AdultContentClassifier {
         }
         if post.isIGPost {
             return !containsSFWBlockedTerm(combinedText)
+        }
+        if post.isOnlyFansPost {
+            return true
         }
 
         // Personal saved lists (Liked / Offline Vault) were explicitly chosen by user

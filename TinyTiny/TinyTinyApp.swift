@@ -71,6 +71,7 @@ enum HomeChannel: Hashable {
     case xForYou, xFollowing, xBookmarks
     case rule34
     case igReels, igFollowing, igSaved
+    case ofTrending, ofLatest, ofDMs
     case custom
 }
 
@@ -85,6 +86,9 @@ struct GoonedMainShell: View {
     @StateObject private var igReelsModel = FeedModel(source: .igReels)
     @StateObject private var igFollowingModel = FeedModel(source: .igFollowing)
     @StateObject private var igSavedModel = FeedModel(source: .igSaved)
+    @StateObject private var ofTrendingModel = FeedModel(source: .ofTrending)
+    @StateObject private var ofLatestModel = FeedModel(source: .ofLatest)
+    @StateObject private var ofDMsModel = FeedModel(source: .ofDMs)
     @StateObject private var customModel = FeedModel(source: .forYou)
 
     private struct CustomBackHistoryItem {
@@ -98,6 +102,7 @@ struct GoonedMainShell: View {
     @State private var activeChannel: HomeChannel = .forYou
     @State private var lastXChannel: HomeChannel = .xForYou
     @State private var lastIGChannel: HomeChannel = .igReels
+    @State private var lastOFChannel: HomeChannel = .ofTrending
     @State private var slotPostIDs: [HomeChannel: String] = [:]
     @State private var customBackStack: [CustomBackHistoryItem] = []
     @State private var activeTab: GoonedDockTab = .home
@@ -118,6 +123,10 @@ struct GoonedMainShell: View {
         activeChannel == .igReels || activeChannel == .igFollowing || activeChannel == .igSaved
     }
 
+    private var isOFChannel: Bool {
+        activeChannel == .ofTrending || activeChannel == .ofLatest || activeChannel == .ofDMs
+    }
+
     private var activeModel: FeedModel {
         switch activeChannel {
         case .following: return followingModel
@@ -129,6 +138,9 @@ struct GoonedMainShell: View {
         case .igReels: return igReelsModel
         case .igFollowing: return igFollowingModel
         case .igSaved: return igSavedModel
+        case .ofTrending: return ofTrendingModel
+        case .ofLatest: return ofLatestModel
+        case .ofDMs: return ofDMsModel
         case .custom: return customModel
         }
     }
@@ -170,6 +182,9 @@ struct GoonedMainShell: View {
                 },
                 onSelectRule34Tag: { tag in
                     selectFeed(.rule34(tag))
+                },
+                onSelectOFCreator: { creatorId, handle in
+                    selectFeed(.ofCreator(id: creatorId, handle: handle, displayName: nil))
                 },
                 onConnectX: {
                     pendingFeedAfterLogin = activeModel.source.isXFeed ? activeModel.source : .xForYou
@@ -346,9 +361,12 @@ struct GoonedMainShell: View {
             guard !didPrewarm else { return }
             didPrewarm = true
             try? await Task.sleep(nanoseconds: 350_000_000)
-            // Pre-warm Rule34 immediately, and pre-warm X & IG sub-sections sequentially so engines never collide
+            // Pre-warm Rule34 & OnlyFans (URLSession JSON, zero WebView contention)
             if r34Model.items.isEmpty {
                 Task { await r34Model.loadMore() }
+            }
+            if ofTrendingModel.items.isEmpty {
+                Task { await ofTrendingModel.loadMore() }
             }
             if store.data.xSession.isConnected {
                 Task { @MainActor in
@@ -499,6 +517,30 @@ struct GoonedMainShell: View {
                 slotPostIDs[.igSaved] = nil
                 Task { await igSavedModel.refresh(rotateCursor: true) }
             }
+        case .ofTrending:
+            customBackStack.removeAll()
+            activeChannel = .ofTrending
+            lastOFChannel = .ofTrending
+            if forceReload {
+                slotPostIDs[.ofTrending] = nil
+                Task { await ofTrendingModel.refresh(rotateCursor: true) }
+            }
+        case .ofLatest:
+            customBackStack.removeAll()
+            activeChannel = .ofLatest
+            lastOFChannel = .ofLatest
+            if forceReload {
+                slotPostIDs[.ofLatest] = nil
+                Task { await ofLatestModel.refresh(rotateCursor: true) }
+            }
+        case .ofDMs:
+            customBackStack.removeAll()
+            activeChannel = .ofDMs
+            lastOFChannel = .ofDMs
+            if forceReload {
+                slotPostIDs[.ofDMs] = nil
+                Task { await ofDMsModel.refresh(rotateCursor: true) }
+            }
         default:
             if activeChannel != .custom || customModel.source != src {
                 pushCustomBackHistory(returnTab: .home)
@@ -542,13 +584,14 @@ struct GoonedMainShell: View {
         case .xForYou, .xFollowing, .xBookmarks: return 2
         case .rule34: return 3
         case .igReels, .igFollowing, .igSaved: return 4
+        case .ofTrending, .ofLatest, .ofDMs: return 5
         }
     }
 
     private func handleHorizontalFeedSwipe(dx: CGFloat) {
-        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels]
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofTrending]
         let cur = homeChannelIndex
-        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG
+        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF
         // Swipe right (dx > 0) moves backward
         let nextIdx = dx < 0 ? cur + 1 : cur - 1
         guard channels.indices.contains(nextIdx) else { return }
@@ -656,6 +699,19 @@ struct GoonedMainShell: View {
                                 BrandLogoInstagram(active: isIGChannel, connected: store.data.igSession.isConnected)
                             }
                             .buttonStyle(ScalePressButtonStyle())
+
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if isOFChannel {
+                                    selectFeed(activeModel.source, forceReload: true)
+                                } else {
+                                    let target: FeedSource = lastOFChannel == .ofLatest ? .ofLatest : (lastOFChannel == .ofDMs ? .ofDMs : .ofTrending)
+                                    selectFeed(target)
+                                }
+                            } label: {
+                                BrandLogoOnlyFans(active: isOFChannel)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
                         }
                         .fixedSize()
                     }
@@ -714,6 +770,27 @@ struct GoonedMainShell: View {
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectIGFeedOrLogin(src)
+                        } label: {
+                            Text(label)
+                                .font(.system(size: 12, weight: active ? .bold : .medium))
+                                .foregroundStyle(active ? .white : .white.opacity(0.6))
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
+                .liquidGlassCapsule(tinted: tinted)
+            } else if isOFChannel {
+                HStack(spacing: 12) {
+                    ForEach([
+                        (FeedSource.ofTrending, "Trending", HomeChannel.ofTrending),
+                        (FeedSource.ofLatest, "Latest", HomeChannel.ofLatest),
+                        (FeedSource.ofDMs, "DMs", HomeChannel.ofDMs)
+                    ], id: \.1) { src, label, chan in
+                        let active = activeChannel == chan
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            selectFeed(src)
                         } label: {
                             Text(label)
                                 .font(.system(size: 12, weight: active ? .bold : .medium))
@@ -907,5 +984,31 @@ struct BrandLogoInstagram: View {
         }
         .opacity(active ? 1.0 : 0.90)
         .frame(width: 26, height: 26)
+    }
+}
+
+struct BrandLogoOnlyFans: View {
+    var active: Bool
+
+    var body: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: [Color(red: 0.0, green: 0.72, blue: 0.96), Color(red: 0.0, green: 0.52, blue: 0.84)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: 26, height: 26)
+            .overlay(
+                Circle().stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.8 : 0.7)
+            )
+            .overlay(
+                Text("OF")
+                    .font(.system(size: 10.5, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+            )
+            .opacity(active ? 1.0 : 0.90)
+            .frame(width: 26, height: 26)
     }
 }

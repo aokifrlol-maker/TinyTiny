@@ -66,6 +66,8 @@ enum MediaHeaders {
             h["Referer"] = "https://x.com/"
         } else if host.contains("cdninstagram.com") || host.contains("fbcdn.net") || host.contains("instagram.com") {
             h["Referer"] = "https://www.instagram.com/"
+        } else if host.contains("cum.st") {
+            h["Referer"] = "https://cum.st/"
         } else {
             h["Referer"] = Config.referer
         }
@@ -442,6 +444,7 @@ struct FeedView: View {
     var onSelectXUser: (String) -> Void
     var onSelectIGUser: (String) -> Void
     var onSelectRule34Tag: (String) -> Void
+    var onSelectOFCreator: (String, String) -> Void
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
 
@@ -470,6 +473,7 @@ struct FeedView: View {
                         onSelectXUser: onSelectXUser,
                         onSelectIGUser: onSelectIGUser,
                         onSelectRule34Tag: onSelectRule34Tag,
+                        onSelectOFCreator: onSelectOFCreator,
                         onClipFinished: {
                             store.recordLoopSignal(for: gif)
                             if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
@@ -725,6 +729,7 @@ struct GoonedReelCell: View {
     var onSelectXUser: (String) -> Void
     var onSelectIGUser: (String) -> Void
     var onSelectRule34Tag: (String) -> Void
+    var onSelectOFCreator: (String, String) -> Void
     var onClipFinished: () -> Void
 
     @EnvironmentObject var store: UserStore
@@ -755,6 +760,9 @@ struct GoonedReelCell: View {
     }
 
     private var isFollowed: Bool {
+        if gif.isOnlyFansPost {
+            return store.isFollowingOFCreator(id: gif.onlyFansCreatorId, handle: gif.author)
+        }
         if gif.isXPost, let u = gif.author {
             return store.isFollowingXUser(u)
         }
@@ -930,6 +938,10 @@ struct GoonedReelCell: View {
                 onSelectRule34Tag: { tag in
                     showMoreSheet = false
                     onSelectRule34Tag(tag)
+                },
+                onSelectOFCreator: { cid, handle in
+                    showMoreSheet = false
+                    onSelectOFCreator(cid, handle)
                 }
             )
             .presentationDetents([.medium, .large])
@@ -1043,7 +1055,9 @@ struct GoonedReelCell: View {
 
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    if gif.isXPost, let u = gif.author {
+                    if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
+                        store.toggleFollowOFCreator(id: cid, name: gif.author ?? cid)
+                    } else if gif.isXPost, let u = gif.author {
                         store.toggleFollowXUser(u)
                     } else if gif.isIGPost, let u = gif.author {
                         store.toggleFollowIGUser(u)
@@ -1069,7 +1083,9 @@ struct GoonedReelCell: View {
         VStack(spacing: 12) {
             // Source Badge Circle
             Button {
-                if gif.isXPost, let u = gif.author {
+                if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
+                    onSelectOFCreator(cid, gif.author ?? cid)
+                } else if gif.isXPost, let u = gif.author {
                     onSelectXUser(u)
                 } else if gif.isIGPost, let u = gif.author {
                     onSelectIGUser(u)
@@ -1081,7 +1097,23 @@ struct GoonedReelCell: View {
                     onSelectUser(u)
                 }
             } label: {
-                if gif.isXPost {
+                if gif.isOnlyFansPost {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 0.0, green: 0.72, blue: 0.96), Color(red: 0.0, green: 0.54, blue: 0.84)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1))
+                        Text("OF")
+                            .font(.system(size: 14, weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                    }
+                } else if gif.isXPost {
                     ZStack {
                         Circle()
                             .fill(LinearGradient(colors: [Color(white: 0.18), Color.black], startPoint: .top, endPoint: .bottom))
@@ -1248,11 +1280,14 @@ struct GoonedReelCell: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
                     if let author = gif.author {
-                        Text((gif.isXPost || gif.isIGPost) ? "@\(author)" : author)
+                        Text((gif.isXPost || gif.isIGPost || gif.isOnlyFansPost) ? "@\(author)" : author)
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
                     }
-                    if gif.isXPost {
+                    if gif.isOnlyFansPost {
+                        Text("·").foregroundStyle(.white.opacity(0.65))
+                        Text("OnlyFans").font(.system(size: 14, weight: .bold)).foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
+                    } else if gif.isXPost {
                         Text("·").foregroundStyle(.white.opacity(0.65))
                         Text("𝕏").font(.system(size: 14, weight: .black)).foregroundStyle(.white.opacity(0.9))
                     } else if gif.isIGPost {
@@ -1471,6 +1506,7 @@ struct PostMoreSheet: View {
     var onSelectXUser: (String) -> Void
     var onSelectIGUser: (String) -> Void
     var onSelectRule34Tag: (String) -> Void
+    var onSelectOFCreator: (String, String) -> Void
     @EnvironmentObject var store: UserStore
     @ObservedObject private var offline = OfflineManager.shared
     @Environment(\.dismiss) private var dismiss
@@ -1599,7 +1635,9 @@ struct PostMoreSheet: View {
                     if let u = gif.author {
                         HStack {
                             Button {
-                                if gif.isXPost {
+                                if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
+                                    onSelectOFCreator(cid, u)
+                                } else if gif.isXPost {
                                     onSelectXUser(u)
                                 } else if gif.isIGPost {
                                     onSelectIGUser(u)
@@ -1610,7 +1648,7 @@ struct PostMoreSheet: View {
                                 }
                             } label: {
                                 HStack(spacing: 8) {
-                                    Text(gif.isXPost ? "𝕏  @\(u)" : (gif.isIGPost ? "IG  @\(u)" : "u/\(u)"))
+                                    Text(gif.isOnlyFansPost ? "OF  @\(u)" : (gif.isXPost ? "𝕏  @\(u)" : (gif.isIGPost ? "IG  @\(u)" : "u/\(u)")))
                                         .font(.headline)
                                     Image(systemName: "chevron.right")
                                         .font(.caption.bold())
@@ -1618,7 +1656,9 @@ struct PostMoreSheet: View {
                             }
                             Spacer()
                             Button {
-                                if gif.isXPost {
+                                if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
+                                    store.toggleFollowOFCreator(id: cid, name: u)
+                                } else if gif.isXPost {
                                     store.toggleFollowXUser(u)
                                 } else if gif.isIGPost {
                                     store.toggleFollowIGUser(u)
@@ -1626,9 +1666,11 @@ struct PostMoreSheet: View {
                                     store.toggleFollowUser(u)
                                 }
                             } label: {
-                                let following = gif.isXPost
-                                    ? store.isFollowingXUser(u)
-                                    : (gif.isIGPost ? store.isFollowingIGUser(u) : store.isFollowingUser(u))
+                                let following = gif.isOnlyFansPost
+                                    ? store.isFollowingOFCreator(id: gif.onlyFansCreatorId, handle: u)
+                                    : (gif.isXPost
+                                        ? store.isFollowingXUser(u)
+                                        : (gif.isIGPost ? store.isFollowingIGUser(u) : store.isFollowingUser(u)))
                                 Text(following ? "Following" : "Follow")
                                     .font(.subheadline.bold())
                                     .padding(.horizontal, 16)
