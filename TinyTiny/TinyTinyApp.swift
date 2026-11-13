@@ -345,20 +345,24 @@ struct GoonedMainShell: View {
         .task {
             guard !didPrewarm else { return }
             didPrewarm = true
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            // Silently pre-warm Rule34, X, and Instagram sub-sections so switching is instant
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            // Pre-warm Rule34 immediately, and pre-warm X & IG sub-sections sequentially so engines never collide
             if r34Model.items.isEmpty {
                 Task { await r34Model.loadMore() }
             }
             if store.data.xSession.isConnected {
-                if xForYouModel.items.isEmpty { Task { await xForYouModel.loadMore() } }
-                if xFollowingModel.items.isEmpty { Task { await xFollowingModel.loadMore() } }
-                if xBookmarksModel.items.isEmpty { Task { await xBookmarksModel.loadMore() } }
+                Task { @MainActor in
+                    if xForYouModel.items.isEmpty { await xForYouModel.loadMore() }
+                    if xFollowingModel.items.isEmpty { await xFollowingModel.loadMore() }
+                    if xBookmarksModel.items.isEmpty { await xBookmarksModel.loadMore() }
+                }
             }
             if store.data.igSession.isConnected {
-                if igReelsModel.items.isEmpty { Task { await igReelsModel.loadMore() } }
-                if igFollowingModel.items.isEmpty { Task { await igFollowingModel.loadMore() } }
-                if igSavedModel.items.isEmpty { Task { await igSavedModel.loadMore() } }
+                Task { @MainActor in
+                    if igReelsModel.items.isEmpty { await igReelsModel.loadMore() }
+                    if igFollowingModel.items.isEmpty { await igFollowingModel.loadMore() }
+                    if igSavedModel.items.isEmpty { await igSavedModel.loadMore() }
+                }
             }
         }
         .sheet(isPresented: $showXLoginSheet) {

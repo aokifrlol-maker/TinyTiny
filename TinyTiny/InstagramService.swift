@@ -195,6 +195,27 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     private var pageCounter: Int = 0
     private var nextMaxIdByRoute: [String: String] = [:]
     private var pumpTask: Task<Void, Never>?
+    private var isEngineBusy: Bool = false
+    private var lockWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireLock() async {
+        if !isEngineBusy {
+            isEngineBusy = true
+            return
+        }
+        await withCheckedContinuation { cont in
+            lockWaiters.append(cont)
+        }
+    }
+
+    private func releaseLock() {
+        if !lockWaiters.isEmpty {
+            let next = lockWaiters.removeFirst()
+            next.resume()
+        } else {
+            isEngineBusy = false
+        }
+    }
 
     func currentMaxId(for routeKey: String) -> String? {
         nextMaxIdByRoute[routeKey]
@@ -399,16 +420,32 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         apiTriggerJS: String? = nil,
         isRefresh: Bool
     ) async -> GoonedFeedResponse {
-        let wv = await ensureWebView()
-
-        // Fast-path: return buffered posts for this route immediately in 0ms!
+        // Fast-path: return buffered posts for this route immediately in 0ms without waiting on lock
         if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
             routeBuffers[routeKey] = []
             activeRouteKey = routeKey
             pageCounter += 1
-            scheduleBackgroundPump(for: routeKey, wv: wv, apiTriggerJS: apiTriggerJS)
+            if let wv = webView {
+                scheduleBackgroundPump(for: routeKey, wv: wv, apiTriggerJS: apiTriggerJS)
+            }
             return GoonedFeedResponse(posts: existing, after: "igpage_\(pageCounter)")
         }
+
+        await acquireLock()
+        defer { releaseLock() }
+
+        if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
+            routeBuffers[routeKey] = []
+            activeRouteKey = routeKey
+            pageCounter += 1
+            if let wv = webView {
+                scheduleBackgroundPump(for: routeKey, wv: wv, apiTriggerJS: apiTriggerJS)
+            }
+            return GoonedFeedResponse(posts: existing, after: "igpage_\(pageCounter)")
+        }
+
+        let wv = await ensureWebView()
+        var didLoadNewURL = false
 
         if isRefresh || activeRouteKey != routeKey {
             pumpTask?.cancel()
@@ -420,10 +457,14 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             if let apiTriggerJS, wv.url?.host?.contains("instagram.com") == true {
                 _ = try? await wv.evaluateJavaScript(apiTriggerJS)
             } else {
-                wv.load(URLRequest(url: targetURL))
+                let alreadyLoadingSame = (wv.url?.absoluteString == targetURL.absoluteString && wv.isLoading)
+                if !alreadyLoadingSame {
+                    wv.load(URLRequest(url: targetURL))
+                }
+                didLoadNewURL = true
                 if let apiTriggerJS {
                     Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        try? await Task.sleep(nanoseconds: 900_000_000)
                         _ = try? await wv.evaluateJavaScript(apiTriggerJS)
                     }
                 }
@@ -440,14 +481,16 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             }
         }
 
+        let firstNudgeNs: UInt64 = didLoadNewURL ? 1_300_000_000 : 500_000_000
+        let remainingWaitNs: UInt64 = didLoadNewURL ? 2_700_000_000 : 1_000_000_000
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append((routeKey: routeKey, cont: cont))
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 450_000_000)
+                try? await Task.sleep(nanoseconds: firstNudgeNs)
                 if self.waiters.contains(where: { $0.routeKey == routeKey }) {
                     _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400); window.dispatchEvent(new Event('scroll'));")
                 }
-                try? await Task.sleep(nanoseconds: 750_000_000)
+                try? await Task.sleep(nanoseconds: remainingWaitNs)
                 let pending = self.waiters.filter { $0.routeKey == routeKey }
                 if !pending.isEmpty {
                     self.waiters.removeAll { $0.routeKey == routeKey }

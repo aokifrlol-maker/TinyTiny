@@ -315,7 +315,7 @@ final class FeedModel: ObservableObject {
             var totalAddedThisCall = 0
             var attempts = 0
             var fallbackSeen: [Gif] = []
-            let maxAttempts = (source.isXFeed || source.isIGFeed || source == .following) ? 4 : 3
+            let maxAttempts = (source.isXFeed || source.isIGFeed || source == .following) ? 2 : 3
 
             while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
@@ -551,6 +551,8 @@ final class FeedModel: ObservableObject {
                 errorText = "Connect your personal X account to load X videos."
             } else if items.isEmpty && source.isIGFeed && !store.data.igSession.isConnected {
                 errorText = "Connect your personal Instagram account to load Instagram Reels."
+            } else if items.isEmpty {
+                errorText = "Couldn't load \(source.displayTitle) yet. Tap Retry."
             } else {
                 errorText = nil
             }

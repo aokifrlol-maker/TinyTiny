@@ -684,7 +684,7 @@ struct FeedStateView: View {
                         .padding(.vertical, 11)
                         .liquidGlassCapsule(tinted: true, active: true)
                 }
-            } else if model.isSwitching || model.isLoading || model.canLoadMore {
+            } else if model.isSwitching || model.isLoading {
                 ProgressView()
                     .tint(Theme.accent)
                     .controlSize(.large)
