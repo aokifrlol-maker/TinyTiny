@@ -227,8 +227,8 @@ final class VideoPreloader {
     private var order: [String] = []
 
     func preload(gifs: [Gif], hd: Bool) {
-        MediaImageLoader.shared.prefetch(urls: gifs.prefix(3).map(\.posterURL))
-        for gif in gifs.prefix(3) {
+        MediaImageLoader.shared.prefetch(urls: gifs.prefix(5).map(\.posterURL))
+        for gif in gifs.prefix(5) {
             guard !gif.isImage, let url = gif.videoURL(hd: hd) else { continue }
             let key = url.absoluteString
             guard cachedAssets[key] == nil else { continue }
@@ -243,7 +243,7 @@ final class VideoPreloader {
             }
             cachedAssets[key] = asset
             order.append(key)
-            if order.count > 10, let oldest = order.first {
+            if order.count > 14, let oldest = order.first {
                 order.removeFirst()
                 cachedAssets.removeValue(forKey: oldest)
             }
@@ -332,7 +332,8 @@ final class PlayerModel: ObservableObject {
         let url = candidateURLs[index]
         let asset = VideoPreloader.shared.asset(for: url)
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 5
+        item.preferredForwardBufferDuration = 1.5
+        player.automaticallyWaitsToMinimizeStalling = url.absoluteString.lowercased().contains(".m3u8")
 
         looper?.disableLooping()
         player.removeAllItems()
@@ -565,7 +566,7 @@ struct FeedView: View {
         guard let curID = currentID,
               let idx = model.items.firstIndex(where: { $0.id == curID }),
               idx + 1 < model.items.count else { return }
-        let upcoming = Array(model.items[(idx + 1)...].prefix(3))
+        let upcoming = Array(model.items[(idx + 1)...].prefix(5))
         VideoPreloader.shared.preload(gifs: upcoming, hd: store.data.settings.hd)
     }
 

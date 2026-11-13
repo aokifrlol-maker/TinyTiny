@@ -189,9 +189,9 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
     private var webView: WKWebView?
     private var activeRouteKey: String = ""
-    private var bufferedPosts: [Gif] = []
+    private var routeBuffers: [String: [Gif]] = [:]
     private var seenIds = Set<String>()
-    private var waiters: [CheckedContinuation<[Gif], Never>] = []
+    private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
     private var pageCounter: Int = 0
     private var nextMaxIdByRoute: [String: String] = [:]
     private var pumpTask: Task<Void, Never>?
@@ -349,21 +349,24 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let fresh = reels.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
         guard !fresh.isEmpty else { return }
 
-        bufferedPosts.append(contentsOf: fresh)
-        flushWaitersIfNeeded()
-        if bufferedPosts.count < 16, let wv = webView {
+        var buf = routeBuffers[activeRouteKey] ?? []
+        buf.append(contentsOf: fresh)
+        routeBuffers[activeRouteKey] = buf
+        flushWaitersIfNeeded(for: activeRouteKey)
+        if buf.count < 18, let wv = webView {
             scheduleBackgroundPump(for: activeRouteKey, wv: wv, apiTriggerJS: nil)
         }
     }
 
-    private func flushWaitersIfNeeded() {
-        guard !waiters.isEmpty, !bufferedPosts.isEmpty else { return }
-        let batch = bufferedPosts
-        bufferedPosts.removeAll()
-        let currentWaiters = waiters
-        waiters.removeAll()
-        for w in currentWaiters {
-            w.resume(returning: batch)
+    private func flushWaitersIfNeeded(for routeKey: String) {
+        let buf = routeBuffers[routeKey] ?? []
+        guard !buf.isEmpty else { return }
+        let matching = waiters.filter { $0.routeKey == routeKey }
+        guard !matching.isEmpty else { return }
+        waiters.removeAll { $0.routeKey == routeKey }
+        routeBuffers[routeKey] = []
+        for w in matching {
+            w.cont.resume(returning: buf)
         }
     }
 
@@ -372,11 +375,11 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         pumpTask = Task { @MainActor [weak self] in
             defer { self?.pumpTask = nil }
             for _ in 0..<2 {
-                try? await Task.sleep(nanoseconds: 850_000_000)
+                try? await Task.sleep(nanoseconds: 550_000_000)
                 guard let self,
                       !Task.isCancelled,
                       self.activeRouteKey == routeKey,
-                      self.bufferedPosts.count < 16 else { return }
+                      (self.routeBuffers[routeKey]?.count ?? 0) < 18 else { return }
                 let scrollJS = """
                 window.scrollBy(0, 3200);
                 if (document.scrollingElement) { document.scrollingElement.scrollTop += 3200; }
@@ -398,19 +401,31 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     ) async -> GoonedFeedResponse {
         let wv = await ensureWebView()
 
+        // Fast-path: return buffered posts for this route immediately in 0ms!
+        if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
+            routeBuffers[routeKey] = []
+            activeRouteKey = routeKey
+            pageCounter += 1
+            scheduleBackgroundPump(for: routeKey, wv: wv, apiTriggerJS: apiTriggerJS)
+            return GoonedFeedResponse(posts: existing, after: "igpage_\(pageCounter)")
+        }
+
         if isRefresh || activeRouteKey != routeKey {
             pumpTask?.cancel()
             pumpTask = nil
             activeRouteKey = routeKey
-            bufferedPosts.removeAll()
-            // Keep seenIds across refreshes so previously delivered reels never repeat
             pageCounter = 0
-            wv.load(URLRequest(url: targetURL))
 
-            if let apiTriggerJS {
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 900_000_000)
-                    _ = try? await wv.evaluateJavaScript(apiTriggerJS)
+            // If WebView is already on instagram.com and we have a direct API trigger, fire it immediately without page reload!
+            if let apiTriggerJS, wv.url?.host?.contains("instagram.com") == true {
+                _ = try? await wv.evaluateJavaScript(apiTriggerJS)
+            } else {
+                wv.load(URLRequest(url: targetURL))
+                if let apiTriggerJS {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        _ = try? await wv.evaluateJavaScript(apiTriggerJS)
+                    }
                 }
             }
         } else {
@@ -425,29 +440,21 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             }
         }
 
-        if !bufferedPosts.isEmpty {
-            let posts = bufferedPosts
-            bufferedPosts.removeAll()
-            pageCounter += 1
-            scheduleBackgroundPump(for: routeKey, wv: wv, apiTriggerJS: apiTriggerJS)
-            return GoonedFeedResponse(posts: posts, after: "igpage_\(pageCounter)")
-        }
-
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
-            self.waiters.append(cont)
+            self.waiters.append((routeKey: routeKey, cont: cont))
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                if !self.waiters.isEmpty {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                if self.waiters.contains(where: { $0.routeKey == routeKey }) {
                     _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400); window.dispatchEvent(new Event('scroll'));")
                 }
-                try? await Task.sleep(nanoseconds: 1_100_000_000)
-                if !self.waiters.isEmpty {
-                    let pending = self.waiters
-                    self.waiters.removeAll()
-                    let fallback = self.bufferedPosts
-                    self.bufferedPosts.removeAll()
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                let pending = self.waiters.filter { $0.routeKey == routeKey }
+                if !pending.isEmpty {
+                    self.waiters.removeAll { $0.routeKey == routeKey }
+                    let fallback = self.routeBuffers[routeKey] ?? []
+                    self.routeBuffers[routeKey] = []
                     for p in pending {
-                        p.resume(returning: fallback)
+                        p.cont.resume(returning: fallback)
                     }
                 }
             }
@@ -465,7 +472,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         pumpTask?.cancel()
         pumpTask = nil
         activeRouteKey = ""
-        bufferedPosts.removeAll()
+        routeBuffers.removeAll()
         seenIds.removeAll()
         nextMaxIdByRoute.removeAll()
         let store = WKWebsiteDataStore.default()
@@ -546,6 +553,10 @@ enum InstagramAPI {
     static func saved(after: String?) async -> GoonedFeedResponse {
         let url = URL(string: "https://www.instagram.com/reels/")!
         let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_saved") ?? "") : ""
+        if after != nil && maxId.isEmpty {
+            // Once personal Saved pages are exhausted, continue seamlessly with Reels clips for infinite scroll
+            return await reels(after: after)
+        }
         let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
         let triggerSavedJS = """
         (async function() {

@@ -283,6 +283,35 @@ enum XTweetParser {
         guard let date = df.date(from: raw) else { return nil }
         return ISO8601DateFormatter().string(from: date)
     }
+
+    static func extractBottomCursor(from data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return nil
+        }
+        return findBottomCursor(in: root)
+    }
+
+    private static func findBottomCursor(in node: Any) -> String? {
+        if let dict = node as? [String: Any] {
+            if let cursorType = dict["cursorType"] as? String,
+               cursorType == "Bottom",
+               let val = dict["value"] as? String, !val.isEmpty {
+                return val
+            }
+            for (_, v) in dict {
+                if let found = findBottomCursor(in: v) {
+                    return found
+                }
+            }
+        } else if let arr = node as? [Any] {
+            for item in arr {
+                if let found = findBottomCursor(in: item) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
 }
 
 // MARK: - Hidden Authenticated WKWebView Engine + Interceptor (`XWebEngine`)
@@ -293,13 +322,15 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
     private var webView: WKWebView?
     private var activeRouteKey: String = ""
-    private var bufferedPosts: [Gif] = []
+    private var routeBuffers: [String: [Gif]] = [:]
+    private var routeCursors: [String: String] = [:]
+    private var routeTemplates: [String: String] = [:]
     private var seenIds = Set<String>()
-    private var waiters: [CheckedContinuation<[Gif], Never>] = []
+    private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
     private var pageCounter: Int = 0
     private var pumpTask: Task<Void, Never>?
     private var zeroAdultScrolls: Int = 0
-    private var didRedirectAdultSupplement: Bool = false
+    private var adultSupplementIndex: Int = 0
 
     // Dynamically captured headers & GraphQL queryIds from X's own live web client
     private(set) var bearerToken: String = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
@@ -445,7 +476,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
               let jsonText = body["body"] as? String,
               let data = jsonText.data(using: .utf8) else { return }
 
-        // Learn live GraphQL queryId if present in URL (`/i/api/graphql/<queryId>/<operationName>`)
+        // Learn live GraphQL queryId & request template if present in URL (`/i/api/graphql/<queryId>/<operationName>`)
         if let range = url.range(of: "/graphql/") {
             let tail = String(url[range.upperBound...])
             let parts = tail.split(separator: "/")
@@ -453,7 +484,14 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 let qid = String(parts[0])
                 let op = String(parts[1].split(separator: "?").first ?? parts[1])
                 queryIds[op] = qid
+                if !activeRouteKey.isEmpty, url.contains("variables=") {
+                    routeTemplates[activeRouteKey] = url
+                }
             }
+        }
+
+        if !activeRouteKey.isEmpty, let bottomCursor = XTweetParser.extractBottomCursor(from: data) {
+            routeCursors[activeRouteKey] = bottomCursor
         }
 
         // Check if this payload contains screen_name info
@@ -469,44 +507,106 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
             if !fresh.isEmpty {
                 zeroAdultScrolls = 0
-                bufferedPosts.append(contentsOf: fresh)
-                flushWaitersIfNeeded()
-                if bufferedPosts.count < 24, let wv = webView {
+                var buf = routeBuffers[activeRouteKey] ?? []
+                buf.append(contentsOf: fresh)
+                routeBuffers[activeRouteKey] = buf
+                flushWaitersIfNeeded(for: activeRouteKey)
+                if buf.count < 24, let wv = webView {
                     scheduleBackgroundPump(for: activeRouteKey, wv: wv)
                 }
                 return
             }
         }
 
-        // Track dry adult scrolls so x_foryou can pivot to NSFW search if timeline is SFW-heavy
+        // Track dry adult scrolls so any X feed rotates cleanly into NSFW video search instead of stalling
         zeroAdultScrolls += 1
-        if activeRouteKey == "x_foryou",
-           !didRedirectAdultSupplement,
-           zeroAdultScrolls >= 3,
-           bufferedPosts.isEmpty,
-           let wv = webView {
-            didRedirectAdultSupplement = true
-            let topTag = UserStore.shared.data.algorithm.tagWeights
-                .filter { $0.value > 0 }
-                .sorted { $0.value > $1.value }
-                .first?.key
-            let queryText = topTag.map { "nsfw \($0) filter:videos" } ?? "nsfw filter:videos"
-            if let encoded = queryText.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed),
-               let supplementURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=live") {
-                wv.load(URLRequest(url: supplementURL))
-            }
+        let curCount = routeBuffers[activeRouteKey]?.count ?? 0
+        if zeroAdultScrolls >= 2,
+           curCount == 0,
+           let wv = webView,
+           let supplementURL = nextAdultSupplementURL() {
+            wv.load(URLRequest(url: supplementURL))
         }
     }
 
-    private func flushWaitersIfNeeded() {
-        guard !waiters.isEmpty, !bufferedPosts.isEmpty else { return }
-        let batch = bufferedPosts
-        bufferedPosts.removeAll()
-        let currentWaiters = waiters
-        waiters.removeAll()
-        for w in currentWaiters {
-            w.resume(returning: batch)
+    private func nextAdultSupplementURL() -> URL? {
+        let topTags = UserStore.shared.data.algorithm.tagWeights
+            .filter { $0.value > 0 }
+            .sorted { $0.value > $1.value }
+            .prefix(4)
+            .map(\.key)
+        var queries = topTags.map { "nsfw \($0) filter:videos" }
+        queries.append(contentsOf: [
+            "nsfw filter:videos",
+            "porn filter:videos",
+            "hentai filter:videos",
+            "onlyfans filter:videos"
+        ])
+        let q = queries[adultSupplementIndex % queries.count]
+        adultSupplementIndex += 1
+        let tab = (adultSupplementIndex % 2 == 0) ? "top" : "live"
+        guard let encoded = q.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed) else {
+            return nil
         }
+        return URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")
+    }
+
+    private func flushWaitersIfNeeded(for routeKey: String) {
+        let buf = routeBuffers[routeKey] ?? []
+        guard !buf.isEmpty else { return }
+        let matching = waiters.filter { $0.routeKey == routeKey }
+        guard !matching.isEmpty else { return }
+        waiters.removeAll { $0.routeKey == routeKey }
+        routeBuffers[routeKey] = []
+        for w in matching {
+            w.cont.resume(returning: buf)
+        }
+    }
+
+    @discardableResult
+    private func fetchNextViaCapturedGraphQL(for routeKey: String, wv: WKWebView) async -> Bool {
+        guard let template = routeTemplates[routeKey],
+              let cursor = routeCursors[routeKey],
+              var comps = URLComponents(string: template),
+              let items = comps.queryItems,
+              let varIdx = items.firstIndex(where: { $0.name == "variables" }),
+              let varStr = items[varIdx].value,
+              let varData = varStr.data(using: .utf8),
+              var varObj = (try? JSONSerialization.jsonObject(with: varData)) as? [String: Any] else {
+            return false
+        }
+        varObj["cursor"] = cursor
+        guard let updatedData = try? JSONSerialization.data(withJSONObject: varObj),
+              let updatedStr = String(data: updatedData, encoding: .utf8) else {
+            return false
+        }
+        var newItems = items
+        newItems[varIdx] = URLQueryItem(name: "variables", value: updatedStr)
+        comps.queryItems = newItems
+        guard let nextURL = comps.url?.absoluteString else { return false }
+
+        let escapedURL = nextURL.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        let escapedBearer = bearerToken.replacingOccurrences(of: "'", with: "\\'")
+        let js = """
+        (async function() {
+            try {
+                const ct0Match = document.cookie.match(/(?:^|;\\s*)ct0=([^;]+)/);
+                const ct0 = ct0Match ? ct0Match[1] : '';
+                await fetch('\(escapedURL)', {
+                    credentials: 'include',
+                    headers: {
+                        'authorization': 'Bearer \(escapedBearer)',
+                        'x-csrf-token': ct0,
+                        'x-twitter-active-user': 'yes',
+                        'x-twitter-auth-type': 'OAuth2Session',
+                        'content-type': 'application/json'
+                    }
+                });
+            } catch (e) {}
+        })();
+        """
+        _ = try? await wv.evaluateJavaScript(js)
+        return true
     }
 
     private func scheduleBackgroundPump(for routeKey: String, wv: WKWebView) {
@@ -514,16 +614,19 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         pumpTask = Task { @MainActor [weak self] in
             defer { self?.pumpTask = nil }
             for _ in 0..<3 {
-                try? await Task.sleep(nanoseconds: 750_000_000)
+                try? await Task.sleep(nanoseconds: 550_000_000)
                 guard let self,
                       !Task.isCancelled,
                       self.activeRouteKey == routeKey,
-                      self.bufferedPosts.count < 24 else { return }
-                let scrollJS = """
-                window.scrollBy(0, 3600);
-                if (document.scrollingElement) { document.scrollingElement.scrollTop += 3600; }
-                """
-                _ = try? await wv.evaluateJavaScript(scrollJS)
+                      (self.routeBuffers[routeKey]?.count ?? 0) < 24 else { return }
+                let usedDirect = await self.fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
+                if !usedDirect {
+                    let scrollJS = """
+                    window.scrollBy(0, 3800);
+                    if (document.scrollingElement) { document.scrollingElement.scrollTop += 3800; }
+                    """
+                    _ = try? await wv.evaluateJavaScript(scrollJS)
+                }
             }
         }
     }
@@ -538,57 +641,59 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     ) async -> GoonedFeedResponse {
         let wv = await ensureWebView()
 
+        // Fast-path: return buffered posts for this route immediately in 0ms!
+        if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
+            routeBuffers[routeKey] = []
+            activeRouteKey = routeKey
+            pageCounter += 1
+            scheduleBackgroundPump(for: routeKey, wv: wv)
+            return GoonedFeedResponse(posts: existing, after: "xpage_\(pageCounter)")
+        }
+
         if isRefresh || activeRouteKey != routeKey {
             pumpTask?.cancel()
             pumpTask = nil
             activeRouteKey = routeKey
-            bufferedPosts.removeAll()
             zeroAdultScrolls = 0
-            didRedirectAdultSupplement = false
-            // Preserve seenIds across refreshes so previously delivered tweets never repeat
             pageCounter = 0
-            wv.load(URLRequest(url: targetURL))
 
-            if let postLoadJS {
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 900_000_000)
-                    _ = try? await wv.evaluateJavaScript(postLoadJS)
+            let usedDirect = !isRefresh && (await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv))
+            if !usedDirect {
+                wv.load(URLRequest(url: targetURL))
+                if let postLoadJS {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 750_000_000)
+                        _ = try? await wv.evaluateJavaScript(postLoadJS)
+                    }
                 }
             }
         } else {
-            // Scroll down inside the live X page to trigger X's next GraphQL page load
-            let scrollJS = """
-            window.scrollBy(0, 3800);
-            if (document.scrollingElement) { document.scrollingElement.scrollTop += 3800; }
-            """
-            _ = try? await wv.evaluateJavaScript(scrollJS)
+            let usedDirect = await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
+            if !usedDirect {
+                let scrollJS = """
+                window.scrollBy(0, 3800);
+                if (document.scrollingElement) { document.scrollingElement.scrollTop += 3800; }
+                """
+                _ = try? await wv.evaluateJavaScript(scrollJS)
+            }
         }
 
-        // If we already have buffered posts waiting, return them immediately and keep prefetching
-        if !bufferedPosts.isEmpty {
-            let posts = bufferedPosts
-            bufferedPosts.removeAll()
-            pageCounter += 1
-            scheduleBackgroundPump(for: routeKey, wv: wv)
-            return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
-        }
-
-        // Wait up to 1.8 seconds for X's GraphQL response to arrive (nudging early) so scrolling stays responsive
+        // Wait up to 1.2s for X's GraphQL response to arrive (nudging early at 450ms)
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
-            self.waiters.append(cont)
+            self.waiters.append((routeKey: routeKey, cont: cont))
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                if !self.waiters.isEmpty {
-                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2600);")
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                if self.waiters.contains(where: { $0.routeKey == routeKey }) {
+                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2800);")
                 }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if !self.waiters.isEmpty {
-                    let pending = self.waiters
-                    self.waiters.removeAll()
-                    let fallback = self.bufferedPosts
-                    self.bufferedPosts.removeAll()
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                let pending = self.waiters.filter { $0.routeKey == routeKey }
+                if !pending.isEmpty {
+                    self.waiters.removeAll { $0.routeKey == routeKey }
+                    let fallback = self.routeBuffers[routeKey] ?? []
+                    self.routeBuffers[routeKey] = []
                     for p in pending {
-                        p.resume(returning: fallback)
+                        p.cont.resume(returning: fallback)
                     }
                 }
             }
@@ -606,10 +711,12 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         pumpTask?.cancel()
         pumpTask = nil
         activeRouteKey = ""
-        bufferedPosts.removeAll()
+        routeBuffers.removeAll()
+        routeCursors.removeAll()
+        routeTemplates.removeAll()
         seenIds.removeAll()
         zeroAdultScrolls = 0
-        didRedirectAdultSupplement = false
+        adultSupplementIndex = 0
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
         for cookie in cookies where cookie.domain.contains("x.com") || cookie.domain.contains("twitter.com") {
@@ -912,15 +1019,24 @@ struct XLoginSheet: View {
 struct XLoginWebViewRepresentable: UIViewRepresentable {
     @Binding var webViewRef: WKWebView?
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
 
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.customUserAgent = Config.userAgent
         wv.isOpaque = false
         wv.backgroundColor = .black
+        wv.uiDelegate = context.coordinator
+        wv.navigationDelegate = context.coordinator
+        context.coordinator.parentWebView = wv
 
         let url = URL(string: "https://x.com/i/flow/login")!
         wv.load(URLRequest(url: url))
@@ -932,4 +1048,60 @@ struct XLoginWebViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
+        weak var parentWebView: WKWebView?
+        private var popupWebView: WKWebView?
+        private var closeButton: UIButton?
+
+        /// Supports Google & Apple OAuth popups (`window.open` / `target="_blank"`) while preserving `window.opener`.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                configuration.websiteDataStore = .default()
+                configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+                let popup = WKWebView(frame: webView.bounds, configuration: configuration)
+                popup.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                popup.customUserAgent = Config.userAgent
+                popup.uiDelegate = self
+                popup.navigationDelegate = self
+                popup.backgroundColor = .systemBackground
+                webView.addSubview(popup)
+
+                let closeBtn = UIButton(type: .system)
+                closeBtn.setImage(UIImage(systemName: "xmark.circle.fill"), for: .normal)
+                closeBtn.tintColor = .white
+                closeBtn.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+                closeBtn.layer.cornerRadius = 16
+                closeBtn.frame = CGRect(x: webView.bounds.width - 46, y: 12, width: 32, height: 32)
+                closeBtn.autoresizingMask = [.flexibleLeftMargin, .flexibleBottomMargin]
+                closeBtn.addTarget(self, action: #selector(dismissPopup), for: .touchUpInside)
+                webView.addSubview(closeBtn)
+
+                self.popupWebView?.removeFromSuperview()
+                self.closeButton?.removeFromSuperview()
+                self.popupWebView = popup
+                self.closeButton = closeBtn
+                return popup
+            }
+            return nil
+        }
+
+        func webViewDidClose(_ webView: WKWebView) {
+            if webView === popupWebView {
+                dismissPopup()
+            }
+        }
+
+        @objc private func dismissPopup() {
+            popupWebView?.removeFromSuperview()
+            popupWebView = nil
+            closeButton?.removeFromSuperview()
+            closeButton = nil
+        }
+    }
 }

@@ -67,16 +67,24 @@ enum GoonedDockTab: Int, CaseIterable {
 }
 
 enum HomeChannel: Hashable {
-    case following, forYou, x, rule34, ig, custom
+    case following, forYou
+    case xForYou, xFollowing, xBookmarks
+    case rule34
+    case igReels, igFollowing, igSaved
+    case custom
 }
 
 struct GoonedMainShell: View {
     @EnvironmentObject var store: UserStore
     @StateObject private var followingModel = FeedModel(source: .following)
     @StateObject private var forYouModel = FeedModel(source: .forYou)
-    @StateObject private var xModel = FeedModel(source: .xForYou)
+    @StateObject private var xForYouModel = FeedModel(source: .xForYou)
+    @StateObject private var xFollowingModel = FeedModel(source: .xFollowing)
+    @StateObject private var xBookmarksModel = FeedModel(source: .xBookmarks)
     @StateObject private var r34Model = FeedModel(source: .rule34(""))
-    @StateObject private var igModel = FeedModel(source: .igReels)
+    @StateObject private var igReelsModel = FeedModel(source: .igReels)
+    @StateObject private var igFollowingModel = FeedModel(source: .igFollowing)
+    @StateObject private var igSavedModel = FeedModel(source: .igSaved)
     @StateObject private var customModel = FeedModel(source: .forYou)
 
     private struct CustomBackHistoryItem {
@@ -88,6 +96,8 @@ struct GoonedMainShell: View {
     }
 
     @State private var activeChannel: HomeChannel = .forYou
+    @State private var lastXChannel: HomeChannel = .xForYou
+    @State private var lastIGChannel: HomeChannel = .igReels
     @State private var slotPostIDs: [HomeChannel: String] = [:]
     @State private var customBackStack: [CustomBackHistoryItem] = []
     @State private var activeTab: GoonedDockTab = .home
@@ -100,13 +110,25 @@ struct GoonedMainShell: View {
 
     private var tinted: Bool { store.data.settings.tintedGlass }
 
+    private var isXChannel: Bool {
+        activeChannel == .xForYou || activeChannel == .xFollowing || activeChannel == .xBookmarks
+    }
+
+    private var isIGChannel: Bool {
+        activeChannel == .igReels || activeChannel == .igFollowing || activeChannel == .igSaved
+    }
+
     private var activeModel: FeedModel {
         switch activeChannel {
         case .following: return followingModel
         case .forYou: return forYouModel
-        case .x: return xModel
+        case .xForYou: return xForYouModel
+        case .xFollowing: return xFollowingModel
+        case .xBookmarks: return xBookmarksModel
         case .rule34: return r34Model
-        case .ig: return igModel
+        case .igReels: return igReelsModel
+        case .igFollowing: return igFollowingModel
+        case .igSaved: return igSavedModel
         case .custom: return customModel
         }
     }
@@ -323,16 +345,20 @@ struct GoonedMainShell: View {
         .task {
             guard !didPrewarm else { return }
             didPrewarm = true
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            // Silently pre-warm Rule34, X, and Instagram so swiping left is instant!
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            // Silently pre-warm Rule34, X, and Instagram sub-sections so switching is instant
             if r34Model.items.isEmpty {
                 Task { await r34Model.loadMore() }
             }
-            if store.data.xSession.isConnected && xModel.items.isEmpty {
-                Task { await xModel.loadMore() }
+            if store.data.xSession.isConnected {
+                if xForYouModel.items.isEmpty { Task { await xForYouModel.loadMore() } }
+                if xFollowingModel.items.isEmpty { Task { await xFollowingModel.loadMore() } }
+                if xBookmarksModel.items.isEmpty { Task { await xBookmarksModel.loadMore() } }
             }
-            if store.data.igSession.isConnected && igModel.items.isEmpty {
-                Task { await igModel.loadMore() }
+            if store.data.igSession.isConnected {
+                if igReelsModel.items.isEmpty { Task { await igReelsModel.loadMore() } }
+                if igFollowingModel.items.isEmpty { Task { await igFollowingModel.loadMore() } }
+                if igSavedModel.items.isEmpty { Task { await igSavedModel.loadMore() } }
             }
         }
         .sheet(isPresented: $showXLoginSheet) {
@@ -410,12 +436,29 @@ struct GoonedMainShell: View {
                 slotPostIDs[.forYou] = nil
                 Task { await forYouModel.refresh(rotateCursor: true) }
             }
-        case .xForYou, .xFollowing, .xBookmarks:
+        case .xForYou:
             customBackStack.removeAll()
-            activeChannel = .x
-            if xModel.source != src || forceReload {
-                slotPostIDs[.x] = nil
-                xModel.switchSource(src)
+            activeChannel = .xForYou
+            lastXChannel = .xForYou
+            if forceReload {
+                slotPostIDs[.xForYou] = nil
+                Task { await xForYouModel.refresh(rotateCursor: true) }
+            }
+        case .xFollowing:
+            customBackStack.removeAll()
+            activeChannel = .xFollowing
+            lastXChannel = .xFollowing
+            if forceReload {
+                slotPostIDs[.xFollowing] = nil
+                Task { await xFollowingModel.refresh(rotateCursor: true) }
+            }
+        case .xBookmarks:
+            customBackStack.removeAll()
+            activeChannel = .xBookmarks
+            lastXChannel = .xBookmarks
+            if forceReload {
+                slotPostIDs[.xBookmarks] = nil
+                Task { await xBookmarksModel.refresh(rotateCursor: true) }
             }
         case .rule34(let tag) where tag.isEmpty:
             customBackStack.removeAll()
@@ -424,12 +467,29 @@ struct GoonedMainShell: View {
                 slotPostIDs[.rule34] = nil
                 Task { await r34Model.refresh(rotateCursor: true) }
             }
-        case .igReels, .igFollowing, .igSaved:
+        case .igReels:
             customBackStack.removeAll()
-            activeChannel = .ig
-            if igModel.source != src || forceReload {
-                slotPostIDs[.ig] = nil
-                igModel.switchSource(src)
+            activeChannel = .igReels
+            lastIGChannel = .igReels
+            if forceReload {
+                slotPostIDs[.igReels] = nil
+                Task { await igReelsModel.refresh(rotateCursor: true) }
+            }
+        case .igFollowing:
+            customBackStack.removeAll()
+            activeChannel = .igFollowing
+            lastIGChannel = .igFollowing
+            if forceReload {
+                slotPostIDs[.igFollowing] = nil
+                Task { await igFollowingModel.refresh(rotateCursor: true) }
+            }
+        case .igSaved:
+            customBackStack.removeAll()
+            activeChannel = .igSaved
+            lastIGChannel = .igSaved
+            if forceReload {
+                slotPostIDs[.igSaved] = nil
+                Task { await igSavedModel.refresh(rotateCursor: true) }
             }
         default:
             if activeChannel != .custom || customModel.source != src {
@@ -471,9 +531,9 @@ struct GoonedMainShell: View {
         switch activeChannel {
         case .following: return 0
         case .forYou, .custom: return 1
-        case .x: return 2
+        case .xForYou, .xFollowing, .xBookmarks: return 2
         case .rule34: return 3
-        case .ig: return 4
+        case .igReels, .igFollowing, .igSaved: return 4
         }
     }
 
@@ -553,13 +613,14 @@ struct GoonedMainShell: View {
                         HStack(spacing: 6) {
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if activeChannel == .x {
-                                    selectFeed(xModel.source, forceReload: true)
+                                if isXChannel {
+                                    selectFeed(activeModel.source, forceReload: true)
                                 } else {
-                                    selectXFeedOrLogin(xModel.source)
+                                    let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : .xForYou)
+                                    selectXFeedOrLogin(target)
                                 }
                             } label: {
-                                BrandLogoX(active: activeChannel == .x, connected: store.data.xSession.isConnected)
+                                BrandLogoX(active: isXChannel, connected: store.data.xSession.isConnected)
                             }
                             .buttonStyle(ScalePressButtonStyle())
 
@@ -577,13 +638,14 @@ struct GoonedMainShell: View {
 
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if activeChannel == .ig {
-                                    selectFeed(igModel.source, forceReload: true)
+                                if isIGChannel {
+                                    selectFeed(activeModel.source, forceReload: true)
                                 } else {
-                                    selectIGFeedOrLogin(igModel.source)
+                                    let target: FeedSource = lastIGChannel == .igFollowing ? .igFollowing : (lastIGChannel == .igSaved ? .igSaved : .igReels)
+                                    selectIGFeedOrLogin(target)
                                 }
                             } label: {
-                                BrandLogoInstagram(active: activeChannel == .ig, connected: store.data.igSession.isConnected)
+                                BrandLogoInstagram(active: isIGChannel, connected: store.data.igSession.isConnected)
                             }
                             .buttonStyle(ScalePressButtonStyle())
                         }
@@ -611,15 +673,15 @@ struct GoonedMainShell: View {
             .padding(.horizontal, 14)
             .padding(.top, 8)
 
-            // Secondary sub-feed switcher when inside X or IG
-            if activeChannel == .x {
+            // Secondary sub-feed switcher when inside X or IG (0ms instant switch across persistent models)
+            if isXChannel {
                 HStack(spacing: 12) {
                     ForEach([
-                        (FeedSource.xForYou, "For You"),
-                        (FeedSource.xFollowing, "Following"),
-                        (FeedSource.xBookmarks, "Bookmarks")
-                    ], id: \.1) { src, label in
-                        let active = xModel.source == src
+                        (FeedSource.xForYou, "For You", HomeChannel.xForYou),
+                        (FeedSource.xFollowing, "Following", HomeChannel.xFollowing),
+                        (FeedSource.xBookmarks, "Bookmarks", HomeChannel.xBookmarks)
+                    ], id: \.1) { src, label, chan in
+                        let active = activeChannel == chan
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectXFeedOrLogin(src)
@@ -633,14 +695,14 @@ struct GoonedMainShell: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
                 .liquidGlassCapsule(tinted: tinted)
-            } else if activeChannel == .ig {
+            } else if isIGChannel {
                 HStack(spacing: 12) {
                     ForEach([
-                        (FeedSource.igReels, "Reels"),
-                        (FeedSource.igFollowing, "Following"),
-                        (FeedSource.igSaved, "Saved")
-                    ], id: \.1) { src, label in
-                        let active = igModel.source == src
+                        (FeedSource.igReels, "Reels", HomeChannel.igReels),
+                        (FeedSource.igFollowing, "Following", HomeChannel.igFollowing),
+                        (FeedSource.igSaved, "Saved", HomeChannel.igSaved)
+                    ], id: \.1) { src, label, chan in
+                        let active = activeChannel == chan
                         Button {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectIGFeedOrLogin(src)

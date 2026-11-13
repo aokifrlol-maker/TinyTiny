@@ -137,9 +137,17 @@ final class FeedModel: ObservableObject {
 
     init(source: FeedSource = .forYou, items: [Gif] = []) {
         self.source = source
-        self.items = items
-        self.ids = Set(items.map(\.id))
-        self.mediaKeys = Set(items.map(\.canonicalDedupeKey))
+        if !items.isEmpty {
+            self.items = items
+        } else if !source.isList {
+            let key = "\(source.swipeKey.kind):\(source.swipeKey.name.lowercased()):\(FeedSort.hot.rawValue)"
+            let cached = Self.loadDiskCache(for: key).filter { !UserStore.shared.isSeen($0) }
+            self.items = cached
+        } else {
+            self.items = []
+        }
+        self.ids = Set(self.items.map(\.id))
+        self.mediaKeys = Set(self.items.map(\.canonicalDedupeKey))
         if case .list = source { hasMore = false }
     }
 
@@ -149,11 +157,41 @@ final class FeedModel: ObservableObject {
     }
 
     private var isInfiniteSource: Bool {
-        switch source {
-        case .forYou, .following, .category, .rule34, .xForYou, .xFollowing, .igReels, .igFollowing:
-            return true
-        default:
-            return false
+        if case .list = source { return false }
+        return true
+    }
+
+    private static var cacheDirectory: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("FeedCache", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    private static func cacheFileURL(for key: String) -> URL {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let safe = String(key.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }.prefix(80))
+        return cacheDirectory.appendingPathComponent("\(safe).json")
+    }
+
+    private static func loadDiskCache(for key: String) -> [Gif] {
+        let url = cacheFileURL(for: key)
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([Gif].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private static func saveDiskCache(_ posts: [Gif], for key: String) {
+        let slice = Array(posts.prefix(18))
+        let url = cacheFileURL(for: key)
+        Task.detached(priority: .utility) {
+            if let data = try? JSONEncoder().encode(slice) {
+                try? data.write(to: url, options: [.atomic])
+            }
         }
     }
 
@@ -338,6 +376,7 @@ final class FeedModel: ObservableObject {
                     items.append(contentsOf: batchUnseen)
                     totalAddedThisCall += batchUnseen.count
                     isSwitching = false
+                    Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
                 } else {
                     emptyPageStreak += 1
                     if !isInfiniteSource && emptyPageStreak >= 3 {
@@ -349,6 +388,45 @@ final class FeedModel: ObservableObject {
                         } else if case .rule34 = source {
                             let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
                             afterCursor = "\(nextP)"
+                        } else if source.isXFeed && store.data.xSession.isConnected && emptyPageStreak >= 2 {
+                            let fallbackTag = store.data.algorithm.tagWeights
+                                .filter { $0.value > 0 }
+                                .sorted { $0.value > $1.value }
+                                .randomElement()?.key
+                            let q = fallbackTag.map { "nsfw \($0)" } ?? "nsfw"
+                            let xFallback = await XAPI.search(q, sort: sort.rawValue, after: nil)
+                            let extra = xFallback.posts.filter {
+                                $0.hasPlayableMedia
+                                && !store.isBlockedByAlgorithm($0)
+                                && AdultContentClassifier.isEligible($0, source: source, categories: store.categories, store: store)
+                                && !store.isSeen($0)
+                                && ids.insert($0.id).inserted
+                                && mediaKeys.insert($0.canonicalDedupeKey).inserted
+                            }
+                            if !extra.isEmpty {
+                                emptyPageStreak = 0
+                                items.append(contentsOf: extra)
+                                totalAddedThisCall += extra.count
+                                isSwitching = false
+                                Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
+                            }
+                        } else if source.isIGFeed && store.data.igSession.isConnected && emptyPageStreak >= 2 {
+                            let igFallback = await InstagramAPI.reels(after: afterCursor)
+                            let extra = igFallback.posts.filter {
+                                $0.hasPlayableMedia
+                                && !store.isBlockedByAlgorithm($0)
+                                && AdultContentClassifier.isEligible($0, source: source, categories: store.categories, store: store)
+                                && !store.isSeen($0)
+                                && ids.insert($0.id).inserted
+                                && mediaKeys.insert($0.canonicalDedupeKey).inserted
+                            }
+                            if !extra.isEmpty {
+                                emptyPageStreak = 0
+                                items.append(contentsOf: extra)
+                                totalAddedThisCall += extra.count
+                                isSwitching = false
+                                Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
+                            }
                         } else if resp.after == nil || resp.after?.isEmpty == true {
                             afterCursor = nil
                         }
@@ -477,9 +555,9 @@ final class FeedModel: ObservableObject {
                 errorText = nil
             }
 
-            if !Task.isCancelled && items.count < 14 && canLoadMore && emptyPageStreak == 0 {
+            if !Task.isCancelled && items.count < 16 && canLoadMore && emptyPageStreak == 0 {
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    try? await Task.sleep(nanoseconds: 250_000_000)
                     await self?.loadMore()
                 }
             }

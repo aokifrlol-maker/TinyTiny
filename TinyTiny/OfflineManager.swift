@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import WebKit
 
 /// Manages offline video/image downloading into the app's private, passcode-protected Documents/OfflineVault directory.
 /// Stores only relative filenames so offline media survives iOS container UUID changes across app updates/re-signs.
@@ -8,11 +9,13 @@ final class OfflineManager: ObservableObject {
     static let shared = OfflineManager()
 
     @Published var activeDownloads: [String: Double] = [:] // gif.id -> progress (0.0 ... 1.0)
+    @Published var lastDownloadError: String? = nil
 
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 300
+        cfg.httpShouldSetCookies = true
         return URLSession(configuration: cfg)
     }()
 
@@ -43,7 +46,7 @@ final class OfflineManager: ObservableObject {
     nonisolated static func localMediaURL(forId id: String) -> URL? {
         let stem = safeFileStem(for: id)
         let dir = vaultDirectory
-        for ext in ["mp4", "mov", "gif", "jpg", "png"] {
+        for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
             let candidate = dir.appendingPathComponent("\(stem).\(ext)")
             if FileManager.default.fileExists(atPath: candidate.path) {
                 return candidate
@@ -87,66 +90,118 @@ final class OfflineManager: ObservableObject {
 
     func download(_ gif: Gif) async {
         guard activeDownloads[gif.id] == nil else { return }
-        let remoteURL: URL? = gif.isImage ? gif.imageURL : gif.videoURL(hd: UserStore.shared.data.settings.hd)
-        guard let remoteURL else { return }
+        lastDownloadError = nil
 
-        activeDownloads[gif.id] = 0.05
+        let hd = UserStore.shared.data.settings.hd
+        let rawCandidates: [URL] = gif.isImage
+            ? gif.imageFallbackURLs.filter { !$0.isFileURL }
+            : gif.allVideoURLs(hd: hd).filter { !$0.isFileURL }
+
+        // Always prefer direct downloadable MP4/MOV/M4V/image URLs before any .m3u8 playlist
+        let directCandidates = rawCandidates.filter { !$0.absoluteString.lowercased().contains(".m3u8") }
+        let candidates = directCandidates.isEmpty ? rawCandidates : directCandidates
+        guard !candidates.isEmpty else {
+            lastDownloadError = "No downloadable media URL available."
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            return
+        }
+
+        activeDownloads[gif.id] = 0.08
         defer { activeDownloads.removeValue(forKey: gif.id) }
 
-        var req = URLRequest(url: remoteURL)
-        req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-        if let host = remoteURL.host?.lowercased() {
-            if host.contains("twimg.com") || host.contains("x.com") {
-                req.setValue("https://x.com/", forHTTPHeaderField: "Referer")
-            } else if host.contains("cdninstagram.com") || host.contains("instagram.com") {
-                req.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-            } else if host.contains("rule34.xxx") {
-                req.setValue("https://rule34.xxx/", forHTTPHeaderField: "Referer")
-            } else {
-                req.setValue(Config.referer, forHTTPHeaderField: "Referer")
-            }
-        }
+        let stem = Self.safeFileStem(for: gif.id)
+        let webCookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
 
-        do {
-            activeDownloads[gif.id] = 0.25
-            let (tempURL, resp) = try await session.download(for: req)
-            if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                return
-            }
-            activeDownloads[gif.id] = 0.80
-
-            let stem = Self.safeFileStem(for: gif.id)
-            let pathExt = remoteURL.pathExtension.lowercased()
-            let ext: String
-            if gif.isImage {
-                ext = (pathExt == "png" || pathExt == "gif") ? pathExt : "jpg"
-            } else {
-                ext = (pathExt == "mov" || pathExt == "gif") ? pathExt : "mp4"
+        for (idx, remoteURL) in candidates.enumerated() {
+            if remoteURL.absoluteString.lowercased().contains(".m3u8") {
+                continue
             }
 
-            let destURL = Self.vaultDirectory.appendingPathComponent("\(stem).\(ext)")
-            try? FileManager.default.removeItem(at: destURL)
-            try FileManager.default.moveItem(at: tempURL, to: destURL)
+            for includeReferer in [true, false] {
+                var req = URLRequest(url: remoteURL)
+                req.timeoutInterval = 30
+                for (k, v) in MediaHeaders.headers(for: remoteURL, includeReferer: includeReferer) {
+                    req.setValue(v, forHTTPHeaderField: k)
+                }
+                req.setValue("*/*", forHTTPHeaderField: "Accept")
 
-            // Download or generate offline thumbnail so Offline grid works in Airplane Mode
-            let thumbDest = Self.vaultDirectory.appendingPathComponent("\(stem)_thumb.jpg")
-            if let thumbRemote = gif.thumbURL {
-                var thumbReq = URLRequest(url: thumbRemote)
-                thumbReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-                if let (thumbData, _) = try? await session.data(for: thumbReq), !thumbData.isEmpty {
-                    try? thumbData.write(to: thumbDest, options: [.atomic])
+                if let host = remoteURL.host?.lowercased() {
+                    let matching = webCookies.filter { c in
+                        let cd = c.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+                        return !cd.isEmpty && (host == cd || host.hasSuffix("." + cd))
+                    }
+                    if !matching.isEmpty {
+                        let cookieHeader = HTTPCookie.requestHeaderFields(with: matching)
+                        for (k, v) in cookieHeader {
+                            req.setValue(v, forHTTPHeaderField: k)
+                        }
+                    }
+                }
+
+                do {
+                    activeDownloads[gif.id] = min(0.65, 0.18 + Double(idx) * 0.12)
+                    let (tempURL, resp) = try await session.download(for: req)
+                    if let http = resp as? HTTPURLResponse {
+                        guard (200..<300).contains(http.statusCode) else {
+                            try? FileManager.default.removeItem(at: tempURL)
+                            continue
+                        }
+                        let mime = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+                        if mime.contains("text/html") || mime.contains("application/json") || mime.contains("mpegurl") {
+                            try? FileManager.default.removeItem(at: tempURL)
+                            continue
+                        }
+                    }
+
+                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+                    guard fileSize > 2048 else {
+                        try? FileManager.default.removeItem(at: tempURL)
+                        continue
+                    }
+
+                    activeDownloads[gif.id] = 0.82
+                    let pathExt = remoteURL.pathExtension.lowercased()
+                    let ext: String
+                    if gif.isImage {
+                        ext = (pathExt == "png" || pathExt == "gif" || pathExt == "webp") ? pathExt : "jpg"
+                    } else {
+                        ext = (pathExt == "mov" || pathExt == "gif" || pathExt == "m4v") ? pathExt : "mp4"
+                    }
+
+                    let destURL = Self.vaultDirectory.appendingPathComponent("\(stem).\(ext)")
+                    try? FileManager.default.removeItem(at: destURL)
+                    try FileManager.default.moveItem(at: tempURL, to: destURL)
+
+                    // Download or generate offline thumbnail so Offline grid works in Airplane Mode
+                    let thumbDest = Self.vaultDirectory.appendingPathComponent("\(stem)_thumb.jpg")
+                    if let thumbRemote = gif.thumbURL, !thumbRemote.isFileURL {
+                        var thumbReq = URLRequest(url: thumbRemote)
+                        for (k, v) in MediaHeaders.headers(for: thumbRemote, includeReferer: true) {
+                            thumbReq.setValue(v, forHTTPHeaderField: k)
+                        }
+                        if let (thumbData, tResp) = try? await session.data(for: thumbReq),
+                           (tResp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
+                           !thumbData.isEmpty {
+                            try? thumbData.write(to: thumbDest, options: [.atomic])
+                        }
+                    }
+                    if !FileManager.default.fileExists(atPath: thumbDest.path), !gif.isImage {
+                        await generateVideoThumbnail(from: destURL, to: thumbDest)
+                    }
+
+                    activeDownloads[gif.id] = 1.0
+                    UserStore.shared.recordDownload(gif)
+                    UserStore.shared.saveNow()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    return
+                } catch {
+                    continue
                 }
             }
-            if !FileManager.default.fileExists(atPath: thumbDest.path), !gif.isImage {
-                await generateVideoThumbnail(from: destURL, to: thumbDest)
-            }
-
-            activeDownloads[gif.id] = 1.0
-            UserStore.shared.recordDownload(gif)
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-        } catch {
-            // Download failed cleanly; state is cleared by defer
         }
+
+        lastDownloadError = "Download failed for this media."
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
 
     private func generateVideoThumbnail(from videoURL: URL, to destURL: URL) async {
@@ -166,7 +221,7 @@ final class OfflineManager: ObservableObject {
     func removeDownload(_ gif: Gif) {
         let stem = Self.safeFileStem(for: gif.id)
         let dir = Self.vaultDirectory
-        for ext in ["mp4", "mov", "gif", "jpg", "png"] {
+        for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem).\(ext)"))
         }
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem)_thumb.jpg"))
