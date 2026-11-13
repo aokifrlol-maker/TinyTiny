@@ -314,554 +314,587 @@ enum XTweetParser {
     }
 }
 
-// MARK: - Hidden Authenticated WKWebView Engine + Interceptor (`XWebEngine`)
+// MARK: - Direct Native URLSession GraphQL Engine (`XWebEngine`)
 
-@MainActor
-final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate {
+actor XWebEngine {
     static let shared = XWebEngine()
 
-    private var webView: WKWebView?
-    private var activeRouteKey: String = ""
-    private var routeBuffers: [String: [Gif]] = [:]
-    private var routeCursors: [String: String] = [:]
-    private var routeTemplates: [String: String] = [:]
-    private var seenIds = Set<String>()
-    private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
-    private var pageCounter: Int = 0
-    private var pumpTask: Task<Void, Never>?
-    private var zeroAdultScrolls: Int = 0
-    private var adultSupplementIndex: Int = 0
-    private var isEngineBusy: Bool = false
-    private var lockWaiters: [CheckedContinuation<Void, Never>] = []
+    private let bearerToken = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+    private let userAgent = Config.userAgent
 
-    private func acquireLock() async {
-        if !isEngineBusy {
-            isEngineBusy = true
-            return
-        }
-        await withCheckedContinuation { cont in
-            lockWaiters.append(cont)
-        }
+    private let session: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.timeoutIntervalForRequest = 15
+        cfg.timeoutIntervalForResource = 25
+        return URLSession(configuration: cfg)
+    }()
+
+    private var queryIds: [String: String] = [
+        "HomeTimeline": "c-f3M7uN4p_V9N-t8G4K0Q",
+        "HomeLatestTimeline": "iB1t42oG8wN0v-v2k2sE_w",
+        "Bookmarks": "qLDK3tP5B7c3k2Q4p8-t2w",
+        "SearchTimeline": "nK1dw4oV3k4w5T6y7U8i9Q",
+        "Likes": "k2J3h4G5f6D7s8A9p0O1iQ",
+        "UserByScreenName": "xc8f1g7BYqr6VTzTbvNlGw",
+        "UserMedia": "2tLOJWwguXQddVb1l-p4Yw"
+    ]
+    private var queryIdsLoadedFromBundle = false
+    private var lastQueryIdFetch: Date?
+    private var userIdCache: [String: String] = [:]
+    private var supplementCursorIndex = 0
+
+    private let defaultFeatures: [String: Any] = [
+        "rweb_tipjar_consumption_enabled": true,
+        "responsive_web_graphql_exclude_directive_enabled": true,
+        "verified_phone_label_enabled": false,
+        "creator_subscriptions_tweet_preview_api_enabled": true,
+        "responsive_web_graphql_timeline_navigation_enabled": true,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+        "communities_web_enable_tweet_community_results_fetch": true,
+        "c9s_tweet_anatomy_moderator_badge_enabled": true,
+        "articles_preview_enabled": true,
+        "responsive_web_edit_tweet_api_enabled": true,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
+        "view_counts_everywhere_api_enabled": true,
+        "longform_notetweets_consumption_enabled": true,
+        "responsive_web_twitter_article_tweet_consumption_enabled": true,
+        "tweet_awards_web_tipping_enabled": false,
+        "creator_subscriptions_quote_tweet_preview_api_enabled": false,
+        "freedom_of_speech_not_reach_fetch_enabled": true,
+        "standardized_nudges_misinfo": true,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
+        "rweb_video_timestamps_enabled": true,
+        "longform_notetweets_rich_text_read_enabled": true,
+        "longform_notetweets_inline_media_enabled": true,
+        "responsive_web_enhance_cards_enabled": false
+    ]
+
+    func resetSession() {
+        userIdCache.removeAll()
+        queryIdsLoadedFromBundle = false
+        lastQueryIdFetch = nil
+        supplementCursorIndex = 0
     }
 
-    private func releaseLock() {
-        if !lockWaiters.isEmpty {
-            let next = lockWaiters.removeFirst()
-            next.resume()
-        } else {
-            isEngineBusy = false
-        }
-    }
+    func resolveCt0IfNeeded(authToken: String) async -> String {
+        let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return "" }
+        guard let url = URL(string: "https://x.com/home") else { return "" }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("auth_token=\(token)", forHTTPHeaderField: "Cookie")
 
-    // Dynamically captured headers & GraphQL queryIds from X's own live web client
-    private(set) var bearerToken: String = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-    private(set) var queryIds: [String: String] = [:]
-
-    override private init() {
-        super.init()
-    }
-
-    /// Synchronizes cookies from `UserStore` into `WKWebsiteDataStore.default()` and creates the background `WKWebView` if needed.
-    func ensureWebView() async -> WKWebView {
-        if let existing = webView {
-            await injectStoredCookies(into: existing.configuration.websiteDataStore.httpCookieStore)
-            return existing
-        }
-
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
-        config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = [.all]
-
-        let hookJS = """
-        (function() {
-            if (window.__goonedXHooked) return;
-            window.__goonedXHooked = true;
-
-            function shouldCapture(url) {
-                if (!url) return false;
-                return url.indexOf('/graphql/') !== -1 ||
-                       url.indexOf('/i/api/') !== -1 ||
-                       url.indexOf('/1.1/') !== -1 ||
-                       url.indexOf('settings.json') !== -1;
-            }
-
-            // Capture window.fetch
-            const origFetch = window.fetch;
-            window.fetch = async function(...args) {
-                const req = args[0];
-                const url = (typeof req === 'string') ? req : (req && req.url ? req.url : '');
-                const resp = await origFetch.apply(this, args);
-                try {
-                    if (shouldCapture(url)) {
-                        const clone = resp.clone();
-                        clone.text().then(function(body) {
-                            if (body && body.length > 10 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, body: body });
-                            }
-                        }).catch(function(){});
+        do {
+            let (_, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse {
+                var headers: [String: String] = [:]
+                for (k, v) in http.allHeaderFields {
+                    if let ks = k as? String, let vs = v as? String {
+                        headers[ks] = vs
                     }
-                } catch (e) {}
-                return resp;
-            };
-
-            // Capture XMLHttpRequest
-            const origOpen = XMLHttpRequest.prototype.open;
-            const origSend = XMLHttpRequest.prototype.send;
-            XMLHttpRequest.prototype.open = function(method, url) {
-                this.__goonedUrl = url;
-                return origOpen.apply(this, arguments);
-            };
-            XMLHttpRequest.prototype.send = function() {
-                const xhr = this;
-                xhr.addEventListener('load', function() {
-                    try {
-                        const url = xhr.__goonedUrl || '';
-                        if (shouldCapture(url) && xhr.responseText && xhr.responseText.length > 10) {
-                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, body: xhr.responseText });
-                            }
-                        }
-                    } catch (e) {}
-                });
-                return origSend.apply(this, arguments);
-            };
-
-            // Periodically check for logged-in @screen_name in initial state
-            setInterval(function() {
-                try {
-                    const html = document.documentElement ? document.documentElement.innerHTML : '';
-                    const m = html.match(/"screen_name":"([A-Za-z0-9_]{1,20})"/);
-                    if (m && m[1] && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                        window.webkit.messageHandlers.xBridge.postMessage({ type: 'screenName', screenName: m[1] });
+                }
+                let cookies = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+                if let ct0Cookie = cookies.first(where: { $0.name == "ct0" }), !ct0Cookie.value.isEmpty {
+                    return ct0Cookie.value
+                }
+                for (k, v) in headers where k.lowercased() == "set-cookie" {
+                    if let range = v.range(of: #"ct0=([^;]+)"#, options: .regularExpression) {
+                        let pair = String(v[range])
+                        return String(pair.dropFirst(4))
                     }
-                } catch (e) {}
-            }, 2500);
-        })();
-        """
-
-        let userScript = WKUserScript(source: hookJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-        config.userContentController.addUserScript(userScript)
-        config.userContentController.add(self, name: "xBridge")
-
-        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
-        wv.customUserAgent = Config.userAgent
-        wv.navigationDelegate = self
-        await injectStoredCookies(into: config.websiteDataStore.httpCookieStore)
-        self.webView = wv
-        return wv
-    }
-
-    private func injectStoredCookies(into cookieStore: WKHTTPCookieStore) async {
-        let session = UserStore.shared.data.xSession
-        guard session.isConnected else { return }
-
-        let domains = [".x.com", ".twitter.com"]
-        for domain in domains {
-            if let authCookie = HTTPCookie(properties: [
-                .domain: domain,
-                .path: "/",
-                .name: "auth_token",
-                .value: session.authToken,
-                .secure: "TRUE",
-                .expires: Date(timeIntervalSinceNow: 31_536_000)
-            ]) {
-                await cookieStore.setCookie(authCookie)
-            }
-            if let ct0Cookie = HTTPCookie(properties: [
-                .domain: domain,
-                .path: "/",
-                .name: "ct0",
-                .value: session.ct0,
-                .secure: "TRUE",
-                .expires: Date(timeIntervalSinceNow: 31_536_000)
-            ]) {
-                await cookieStore.setCookie(ct0Cookie)
-            }
-        }
-    }
-
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
-              let type = body["type"] as? String else { return }
-
-        if type == "screenName", let sn = body["screenName"] as? String, !sn.isEmpty {
-            if UserStore.shared.data.xSession.screenName.isEmpty {
-                UserStore.shared.data.xSession.screenName = sn
-            }
-            return
-        }
-
-        guard type == "payload",
-              let url = body["url"] as? String,
-              let jsonText = body["body"] as? String,
-              let data = jsonText.data(using: .utf8) else { return }
-
-        // Learn live GraphQL queryId & request template if present in URL (`/i/api/graphql/<queryId>/<operationName>`)
-        if let range = url.range(of: "/graphql/") {
-            let tail = String(url[range.upperBound...])
-            let parts = tail.split(separator: "/")
-            if parts.count >= 2 {
-                let qid = String(parts[0])
-                let op = String(parts[1].split(separator: "?").first ?? parts[1])
-                queryIds[op] = qid
-                if !activeRouteKey.isEmpty, url.contains("variables=") {
-                    routeTemplates[activeRouteKey] = url
                 }
             }
-        }
+        } catch {}
+        return ""
+    }
 
-        if !activeRouteKey.isEmpty, let bottomCursor = XTweetParser.extractBottomCursor(from: data) {
-            routeCursors[activeRouteKey] = bottomCursor
-        }
-
-        // Check if this payload contains screen_name info
-        if UserStore.shared.data.xSession.screenName.isEmpty,
-           let sn = XTweetParser.parseScreenName(from: data) {
-            UserStore.shared.data.xSession.screenName = sn
-        }
-
-        // Parse eligible adult video tweets from intercepted GraphQL / REST payload
-        let tweets = XTweetParser.parseTweets(from: data, routeKey: activeRouteKey)
-        if !tweets.isEmpty {
-            let store = UserStore.shared
-            let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
-            if !fresh.isEmpty {
-                zeroAdultScrolls = 0
-                var buf = routeBuffers[activeRouteKey] ?? []
-                buf.append(contentsOf: fresh)
-                routeBuffers[activeRouteKey] = buf
-                flushWaitersIfNeeded(for: activeRouteKey)
-                if buf.count < 24, let wv = webView {
-                    scheduleBackgroundPump(for: activeRouteKey, wv: wv)
-                }
+    private func ensureQueryIds(authToken: String, ct0: String, forceRefresh: Bool = false) async {
+        if !forceRefresh {
+            if queryIdsLoadedFromBundle, let last = lastQueryIdFetch, Date().timeIntervalSince(last) < 1800 {
                 return
             }
         }
 
-        // Track dry adult scrolls so any X feed rotates cleanly into NSFW video search instead of stalling
-        zeroAdultScrolls += 1
-        let curCount = routeBuffers[activeRouteKey]?.count ?? 0
-        if zeroAdultScrolls >= 2,
-           curCount == 0,
-           let wv = webView,
-           let supplementURL = nextAdultSupplementURL() {
-            wv.load(URLRequest(url: supplementURL))
+        guard let homeURL = URL(string: "https://x.com/home") else { return }
+        var req = URLRequest(url: homeURL)
+        req.httpMethod = "GET"
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if !authToken.isEmpty {
+            let cookie = ct0.isEmpty ? "auth_token=\(authToken)" : "auth_token=\(authToken); ct0=\(ct0)"
+            req.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+
+        do {
+            let (data, _) = try await session.data(for: req)
+            guard let html = String(data: data, encoding: .utf8) else { return }
+
+            let scriptPattern = #"https://abs\.twimg\.com/responsive-web/client-web[^"'\s]+\.js"#
+            guard let scriptRegex = try? NSRegularExpression(pattern: scriptPattern) else { return }
+            let nsHtml = html as NSString
+            let matches = scriptRegex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
+
+            var candidateURLs: [String] = []
+            var seen = Set<String>()
+            for m in matches {
+                let u = nsHtml.substring(with: m.range)
+                if seen.insert(u).inserted {
+                    candidateURLs.append(u)
+                }
+            }
+
+            let prioritized = candidateURLs.sorted { a, b in
+                let scoreA = (a.contains("/main.") ? 3 : 0) + (a.contains("/api.") ? 2 : 0) + (a.contains("/shared~") ? 1 : 0)
+                let scoreB = (b.contains("/main.") ? 3 : 0) + (b.contains("/api.") ? 2 : 0) + (b.contains("/shared~") ? 1 : 0)
+                return scoreA > scoreB
+            }
+            let targets = Array(prioritized.prefix(10))
+            let wantedOps = Set(queryIds.keys)
+
+            let discovered = await withTaskGroup(of: [String: String].self) { group in
+                for urlStr in targets {
+                    group.addTask { [session, userAgent] in
+                        guard let u = URL(string: urlStr) else { return [:] }
+                        var r = URLRequest(url: u)
+                        r.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                        guard let (jsData, _) = try? await session.data(for: r),
+                              let js = String(data: jsData, encoding: .utf8) else { return [:] }
+                        var found: [String: String] = [:]
+                        let pattern = #"queryId\s*:\s*["']([A-Za-z0-9_-]+)["']\s*,\s*operationName\s*:\s*["']([A-Za-z0-9_]+)["']"#
+                        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [:] }
+                        let nsJs = js as NSString
+                        for m in regex.matches(in: js, range: NSRange(location: 0, length: nsJs.length)) where m.numberOfRanges >= 3 {
+                            let qid = nsJs.substring(with: m.range(at: 1))
+                            let op = nsJs.substring(with: m.range(at: 2))
+                            if wantedOps.contains(op) {
+                                found[op] = qid
+                            }
+                        }
+                        return found
+                    }
+                }
+
+                var merged: [String: String] = [:]
+                for await chunk in group {
+                    for (k, v) in chunk {
+                        merged[k] = v
+                    }
+                }
+                return merged
+            }
+
+            if !discovered.isEmpty {
+                for (k, v) in discovered {
+                    queryIds[k] = v
+                }
+                queryIdsLoadedFromBundle = true
+            }
+            lastQueryIdFetch = Date()
+        } catch {
+            lastQueryIdFetch = Date()
         }
     }
 
-    private func nextAdultSupplementURL() -> URL? {
-        let topTags = UserStore.shared.data.algorithm.tagWeights
-            .filter { $0.value > 0 }
-            .sorted { $0.value > $1.value }
-            .prefix(4)
-            .map(\.key)
-        var queries = topTags.map { "nsfw \($0) filter:videos" }
+    private func jsonString(_ dict: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        return str
+    }
+
+    private func graphQLRequest(
+        operation: String,
+        variables: [String: Any],
+        fieldToggles: [String: Any]? = nil,
+        authToken: String,
+        ct0: String,
+        routeKey: String
+    ) async -> (data: Data?, posts: [Gif], cursor: String?, statusCode: Int) {
+        let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return (nil, [], nil, 401) }
+
+        var effectiveCt0 = ct0.trimmingCharacters(in: .whitespacesAndNewlines)
+        if effectiveCt0.isEmpty {
+            effectiveCt0 = await resolveCt0IfNeeded(authToken: token)
+        }
+        guard !effectiveCt0.isEmpty else { return (nil, [], nil, 401) }
+
+        await ensureQueryIds(authToken: token, ct0: effectiveCt0, forceRefresh: false)
+
+        for attempt in 0..<2 {
+            guard let qid = queryIds[operation] else { return (nil, [], nil, 404) }
+            var comps = URLComponents()
+            comps.scheme = "https"
+            comps.host = "x.com"
+            comps.path = "/i/api/graphql/\(qid)/\(operation)"
+
+            var queryItems: [URLQueryItem] = []
+            if let varsStr = jsonString(variables) {
+                queryItems.append(URLQueryItem(name: "variables", value: varsStr))
+            }
+            if let featStr = jsonString(defaultFeatures) {
+                queryItems.append(URLQueryItem(name: "features", value: featStr))
+            }
+            if let ft = fieldToggles, let ftStr = jsonString(ft) {
+                queryItems.append(URLQueryItem(name: "fieldToggles", value: ftStr))
+            }
+            comps.queryItems = queryItems
+
+            guard let url = comps.url else { return (nil, [], nil, 400) }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+            req.setValue(effectiveCt0, forHTTPHeaderField: "x-csrf-token")
+            req.setValue("yes", forHTTPHeaderField: "x-twitter-active-user")
+            req.setValue("OAuth2Session", forHTTPHeaderField: "x-twitter-auth-type")
+            req.setValue("en", forHTTPHeaderField: "x-twitter-client-language")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://x.com/home", forHTTPHeaderField: "Referer")
+            req.setValue("https://x.com", forHTTPHeaderField: "Origin")
+            req.setValue("auth_token=\(token); ct0=\(effectiveCt0)", forHTTPHeaderField: "Cookie")
+
+            do {
+                let (data, resp) = try await session.data(for: req)
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if (status == 400 || status == 404 || status == 422), attempt == 0 {
+                    await ensureQueryIds(authToken: token, ct0: effectiveCt0, forceRefresh: true)
+                    continue
+                }
+                let posts = XTweetParser.parseTweets(from: data, routeKey: routeKey)
+                let cursor = XTweetParser.extractBottomCursor(from: data)
+                return (data, posts, cursor, status)
+            } catch {
+                return (nil, [], nil, 0)
+            }
+        }
+        return (nil, [], nil, 0)
+    }
+
+    private func resolveUserId(screenName: String, authToken: String, ct0: String) async -> String {
+        let clean = screenName.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        guard !clean.isEmpty else { return "" }
+        if let cached = userIdCache[clean.lowercased()], !cached.isEmpty {
+            return cached
+        }
+        let result = await graphQLRequest(
+            operation: "UserByScreenName",
+            variables: ["screen_name": clean, "withSafetyModeUserFields": true],
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: "user_lookup"
+        )
+        if let data = result.data,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let dataObj = json["data"] as? [String: Any],
+           let user = dataObj["user"] as? [String: Any],
+           let res = user["result"] as? [String: Any],
+           let restId = res["rest_id"] as? String, !restId.isEmpty {
+            userIdCache[clean.lowercased()] = restId
+            return restId
+        }
+        return ""
+    }
+
+    private func resolveCurrentScreenName(authToken: String, ct0: String) async -> String {
+        let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        var effectiveCt0 = ct0.trimmingCharacters(in: .whitespacesAndNewlines)
+        if effectiveCt0.isEmpty {
+            effectiveCt0 = await resolveCt0IfNeeded(authToken: token)
+        }
+        guard !token.isEmpty, !effectiveCt0.isEmpty,
+              let url = URL(string: "https://x.com/i/api/1.1/account/settings.json") else { return "" }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        req.setValue(effectiveCt0, forHTTPHeaderField: "x-csrf-token")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("auth_token=\(token); ct0=\(effectiveCt0)", forHTTPHeaderField: "Cookie")
+        if let (data, _) = try? await session.data(for: req),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let sn = json["screen_name"] as? String {
+            return sn
+        }
+        return ""
+    }
+
+    func fetchHomeTimeline(latest: Bool, after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
+        let op = latest ? "HomeLatestTimeline" : "HomeTimeline"
+        let routeKey = latest ? "following" : "foryou"
+        var vars: [String: Any] = [
+            "count": 40,
+            "includePromotedContent": false,
+            "latestControlAvailable": true,
+            "withCommunity": true
+        ]
+        if let c = cursor, !c.isEmpty {
+            vars["cursor"] = c
+        }
+
+        let primary = await graphQLRequest(
+            operation: op,
+            variables: vars,
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: routeKey
+        )
+
+        var merged = primary.posts
+        var outCursor = primary.cursor
+
+        if merged.count < 3 {
+            let sup = await fetchAdultSupplement(topTags: topTags, after: cursor, authToken: authToken, ct0: ct0)
+            var seenIds = Set(merged.map(\.id))
+            for p in sup.posts where seenIds.insert(p.id).inserted {
+                merged.append(p)
+            }
+            if outCursor == nil {
+                outCursor = sup.after
+            }
+        }
+        return GoonedFeedResponse(posts: merged, after: outCursor)
+    }
+
+    func fetchBookmarks(after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
+        var vars: [String: Any] = [
+            "count": 40,
+            "includePromotedContent": false
+        ]
+        if let c = cursor, !c.isEmpty {
+            vars["cursor"] = c
+        }
+        let res = await graphQLRequest(
+            operation: "Bookmarks",
+            variables: vars,
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: "bookmarks"
+        )
+        if res.posts.isEmpty {
+            return await fetchAdultSupplement(topTags: topTags, after: cursor, authToken: authToken, ct0: ct0)
+        }
+        return GoonedFeedResponse(posts: res.posts, after: res.cursor)
+    }
+
+    func fetchLikes(userId: String, screenName: String, after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
+        var uid = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if uid.isEmpty {
+            var sn = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if sn.isEmpty {
+                sn = await resolveCurrentScreenName(authToken: authToken, ct0: ct0)
+            }
+            if !sn.isEmpty {
+                uid = await resolveUserId(screenName: sn, authToken: authToken, ct0: ct0)
+            }
+        }
+        guard !uid.isEmpty else {
+            return await fetchAdultSupplement(topTags: topTags, after: cursor, authToken: authToken, ct0: ct0)
+        }
+
+        var vars: [String: Any] = [
+            "userId": uid,
+            "count": 40,
+            "includePromotedContent": false,
+            "withClientEventToken": false,
+            "withBirdwatchNotes": false,
+            "withVoice": true,
+            "withV2Timeline": true
+        ]
+        if let c = cursor, !c.isEmpty {
+            vars["cursor"] = c
+        }
+
+        let res = await graphQLRequest(
+            operation: "Likes",
+            variables: vars,
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: "likes"
+        )
+        if res.posts.isEmpty {
+            return await fetchAdultSupplement(topTags: topTags, after: cursor, authToken: authToken, ct0: ct0)
+        }
+        return GoonedFeedResponse(posts: res.posts, after: res.cursor)
+    }
+
+    func fetchSearch(query: String, sort: String, after cursor: String?, authToken: String, ct0: String) async -> GoonedFeedResponse {
+        let product = (sort == "Latest") ? "Latest" : "Top"
+        var vars: [String: Any] = [
+            "rawQuery": query,
+            "count": 40,
+            "querySource": "typed_query",
+            "product": product
+        ]
+        if let c = cursor, !c.isEmpty {
+            vars["cursor"] = c
+        }
+        let res = await graphQLRequest(
+            operation: "SearchTimeline",
+            variables: vars,
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: "search_\(query)"
+        )
+        return GoonedFeedResponse(posts: res.posts, after: res.cursor)
+    }
+
+    func fetchUserMedia(username: String, after cursor: String?, authToken: String, ct0: String) async -> GoonedFeedResponse {
+        let uid = await resolveUserId(screenName: username, authToken: authToken, ct0: ct0)
+        guard !uid.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
+        var vars: [String: Any] = [
+            "userId": uid,
+            "count": 40,
+            "includePromotedContent": false,
+            "withClientEventToken": false,
+            "withBirdwatchNotes": false,
+            "withVoice": true,
+            "withV2Timeline": true
+        ]
+        if let c = cursor, !c.isEmpty {
+            vars["cursor"] = c
+        }
+        let res = await graphQLRequest(
+            operation: "UserMedia",
+            variables: vars,
+            authToken: authToken,
+            ct0: ct0,
+            routeKey: "user_\(username)"
+        )
+        return GoonedFeedResponse(posts: res.posts, after: res.cursor)
+    }
+
+    func fetchAdultSupplement(topTags: [String], after cursor: String?, authToken: String, ct0: String) async -> GoonedFeedResponse {
+        var queries: [String] = []
+        if let top = topTags.first, !top.isEmpty {
+            queries.append("nsfw \(top) filter:videos")
+        }
         queries.append(contentsOf: [
             "nsfw filter:videos",
             "porn filter:videos",
             "hentai filter:videos",
-            "onlyfans filter:videos"
+            "nsfw gif filter:native_video"
         ])
-        let q = queries[adultSupplementIndex % queries.count]
-        adultSupplementIndex += 1
-        let tab = (adultSupplementIndex % 2 == 0) ? "top" : "live"
-        guard let encoded = q.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed) else {
-            return nil
-        }
-        return URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")
-    }
-
-    private func flushWaitersIfNeeded(for routeKey: String) {
-        let buf = routeBuffers[routeKey] ?? []
-        guard !buf.isEmpty else { return }
-        let matching = waiters.filter { $0.routeKey == routeKey }
-        guard !matching.isEmpty else { return }
-        waiters.removeAll { $0.routeKey == routeKey }
-        routeBuffers[routeKey] = []
-        for w in matching {
-            w.cont.resume(returning: buf)
-        }
-    }
-
-    @discardableResult
-    private func fetchNextViaCapturedGraphQL(for routeKey: String, wv: WKWebView) async -> Bool {
-        guard let template = routeTemplates[routeKey],
-              let cursor = routeCursors[routeKey],
-              var comps = URLComponents(string: template),
-              let items = comps.queryItems,
-              let varIdx = items.firstIndex(where: { $0.name == "variables" }),
-              let varStr = items[varIdx].value,
-              let varData = varStr.data(using: .utf8),
-              var varObj = (try? JSONSerialization.jsonObject(with: varData)) as? [String: Any] else {
-            return false
-        }
-        varObj["cursor"] = cursor
-        guard let updatedData = try? JSONSerialization.data(withJSONObject: varObj),
-              let updatedStr = String(data: updatedData, encoding: .utf8) else {
-            return false
-        }
-        var newItems = items
-        newItems[varIdx] = URLQueryItem(name: "variables", value: updatedStr)
-        comps.queryItems = newItems
-        guard let nextURL = comps.url?.absoluteString else { return false }
-
-        let escapedURL = nextURL.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        let escapedBearer = bearerToken.replacingOccurrences(of: "'", with: "\\'")
-        let js = """
-        (async function() {
-            try {
-                const ct0Match = document.cookie.match(/(?:^|;\\s*)ct0=([^;]+)/);
-                const ct0 = ct0Match ? ct0Match[1] : '';
-                await fetch('\(escapedURL)', {
-                    credentials: 'include',
-                    headers: {
-                        'authorization': 'Bearer \(escapedBearer)',
-                        'x-csrf-token': ct0,
-                        'x-twitter-active-user': 'yes',
-                        'x-twitter-auth-type': 'OAuth2Session',
-                        'content-type': 'application/json'
-                    }
-                });
-            } catch (e) {}
-        })();
-        """
-        _ = try? await wv.evaluateJavaScript(js)
-        return true
-    }
-
-    private func scheduleBackgroundPump(for routeKey: String, wv: WKWebView) {
-        guard pumpTask == nil || pumpTask?.isCancelled == true else { return }
-        pumpTask = Task { @MainActor [weak self] in
-            defer { self?.pumpTask = nil }
-            for _ in 0..<3 {
-                try? await Task.sleep(nanoseconds: 550_000_000)
-                guard let self,
-                      !Task.isCancelled,
-                      self.activeRouteKey == routeKey,
-                      (self.routeBuffers[routeKey]?.count ?? 0) < 24 else { return }
-                let usedDirect = await self.fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
-                if !usedDirect {
-                    let scrollJS = """
-                    window.scrollBy(0, 3800);
-                    if (document.scrollingElement) { document.scrollingElement.scrollTop += 3800; }
-                    """
-                    _ = try? await wv.evaluateJavaScript(scrollJS)
-                }
-            }
-        }
-    }
-
-    // MARK: - High-Level Feed Fetcher
-
-    func fetchFeed(
-        routeKey: String,
-        targetURL: URL,
-        postLoadJS: String? = nil,
-        isRefresh: Bool
-    ) async -> GoonedFeedResponse {
-        // Fast-path: return buffered posts for this route immediately in 0ms without waiting on lock
-        if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
-            routeBuffers[routeKey] = []
-            activeRouteKey = routeKey
-            pageCounter += 1
-            if let wv = webView {
-                scheduleBackgroundPump(for: routeKey, wv: wv)
-            }
-            return GoonedFeedResponse(posts: existing, after: "xpage_\(pageCounter)")
-        }
-
-        await acquireLock()
-        defer { releaseLock() }
-
-        // Re-check buffer after acquiring lock in case an earlier call filled it
-        if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
-            routeBuffers[routeKey] = []
-            activeRouteKey = routeKey
-            pageCounter += 1
-            if let wv = webView {
-                scheduleBackgroundPump(for: routeKey, wv: wv)
-            }
-            return GoonedFeedResponse(posts: existing, after: "xpage_\(pageCounter)")
-        }
-
-        let wv = await ensureWebView()
-        var didLoadNewURL = false
-
-        if isRefresh || activeRouteKey != routeKey {
-            pumpTask?.cancel()
-            pumpTask = nil
-            activeRouteKey = routeKey
-            zeroAdultScrolls = 0
-            pageCounter = 0
-
-            var usedDirect = false
-            if !isRefresh {
-                usedDirect = await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
-            }
-            if !usedDirect {
-                let alreadyLoadingSame = (wv.url?.absoluteString == targetURL.absoluteString && wv.isLoading)
-                if !alreadyLoadingSame {
-                    wv.load(URLRequest(url: targetURL))
-                }
-                didLoadNewURL = true
-                if let postLoadJS {
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 900_000_000)
-                        _ = try? await wv.evaluateJavaScript(postLoadJS)
-                    }
-                }
-            }
-        } else {
-            let usedDirect = await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
-            if !usedDirect {
-                let scrollJS = """
-                window.scrollBy(0, 3800);
-                if (document.scrollingElement) { document.scrollingElement.scrollTop += 3800; }
-                """
-                _ = try? await wv.evaluateJavaScript(scrollJS)
-            }
-        }
-
-        // Wait for X's GraphQL response (resolves immediately on arrival; generous ceiling on cold SPA boot)
-        let firstNudgeNs: UInt64 = didLoadNewURL ? 1_400_000_000 : 500_000_000
-        let remainingWaitNs: UInt64 = didLoadNewURL ? 3_100_000_000 : 1_100_000_000
-        let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
-            self.waiters.append((routeKey: routeKey, cont: cont))
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: firstNudgeNs)
-                if self.waiters.contains(where: { $0.routeKey == routeKey }) {
-                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2800);")
-                }
-                try? await Task.sleep(nanoseconds: remainingWaitNs)
-                let pending = self.waiters.filter { $0.routeKey == routeKey }
-                if !pending.isEmpty {
-                    self.waiters.removeAll { $0.routeKey == routeKey }
-                    let fallback = self.routeBuffers[routeKey] ?? []
-                    self.routeBuffers[routeKey] = []
-                    for p in pending {
-                        p.cont.resume(returning: fallback)
-                    }
-                }
-            }
-        }
-
-        scheduleBackgroundPump(for: routeKey, wv: wv)
-        pageCounter += 1
-        return GoonedFeedResponse(
-            posts: posts,
-            after: "xpage_\(pageCounter)"
-        )
-    }
-
-    func resetSession() async {
-        pumpTask?.cancel()
-        pumpTask = nil
-        activeRouteKey = ""
-        routeBuffers.removeAll()
-        routeCursors.removeAll()
-        routeTemplates.removeAll()
-        seenIds.removeAll()
-        zeroAdultScrolls = 0
-        adultSupplementIndex = 0
-        let store = WKWebsiteDataStore.default()
-        let cookies = await store.httpCookieStore.allCookies()
-        for cookie in cookies where cookie.domain.contains("x.com") || cookie.domain.contains("twitter.com") {
-            await store.httpCookieStore.deleteCookie(cookie)
-        }
-        webView?.load(URLRequest(url: URL(string: "about:blank")!))
+        let idx = supplementCursorIndex % queries.count
+        supplementCursorIndex += 1
+        let q = queries[idx]
+        return await fetchSearch(query: q, sort: "Latest", after: cursor, authToken: authToken, ct0: ct0)
     }
 }
 
 // MARK: - High-Level X API Facade (`XAPI`)
 
+@MainActor
 enum XAPI {
-    /// Personal X "For You" video timeline
-    @MainActor
-    static func forYou(after: String?) async -> GoonedFeedResponse {
-        let url = URL(string: "https://x.com/home")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_foryou",
-            targetURL: url,
-            isRefresh: after == nil
-        )
+    private static func currentCreds() -> (authToken: String, ct0: String, userId: String, screenName: String, topTags: [String]) {
+        let s = UserStore.shared.data.xSession
+        let topTags = UserStore.shared.data.algorithm.tagWeights
+            .sorted { $0.value > $1.value }
+            .prefix(3)
+            .map(\.key)
+        return (s.authToken, s.ct0, s.userId, s.screenName, topTags)
     }
 
-    /// Personal X "Following" video timeline
-    @MainActor
-    static func following(after: String?) async -> GoonedFeedResponse {
-        let url = URL(string: "https://x.com/home")!
-        let clickFollowingJS = """
-        (function() {
-            const tabs = document.querySelectorAll('[role="tab"]');
-            for (const t of tabs) {
-                if (t.innerText && t.innerText.indexOf('Following') !== -1) {
-                    t.click();
-                    break;
-                }
-            }
-        })();
-        """
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_following",
-            targetURL: url,
-            postLoadJS: clickFollowingJS,
-            isRefresh: after == nil
-        )
+    private static func filterUnseen(_ posts: [Gif]) -> [Gif] {
+        var seen = Set<String>()
+        return posts.filter { post in
+            guard !UserStore.shared.isSeen(post) else { return false }
+            return seen.insert(post.id).inserted
+        }
     }
 
-    /// Personal X Bookmarks video feed
-    @MainActor
-    static func bookmarks(after: String?) async -> GoonedFeedResponse {
-        let url = URL(string: "https://x.com/i/bookmarks")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_bookmarks",
-            targetURL: url,
-            isRefresh: after == nil
+    static func forYou(after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchHomeTimeline(
+            latest: false,
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0,
+            topTags: c.topTags
         )
+        var filtered = filterUnseen(res.posts)
+        var nextCursor = res.after
+        if filtered.count < 3 {
+            let sup = await XWebEngine.shared.fetchAdultSupplement(
+                topTags: c.topTags,
+                after: nil,
+                authToken: c.authToken,
+                ct0: c.ct0
+            )
+            filtered = filterUnseen(filtered + sup.posts)
+            if nextCursor == nil { nextCursor = sup.after }
+        }
+        return GoonedFeedResponse(posts: filtered, after: nextCursor)
     }
 
-    /// Personal X Likes video feed
-    @MainActor
-    static func likes(after: String?) async -> GoonedFeedResponse {
-        let handle = UserStore.shared.data.xSession.screenName
-        let urlString = handle.isEmpty ? "https://x.com/home" : "https://x.com/\(handle)/likes"
-        let url = URL(string: urlString) ?? URL(string: "https://x.com/home")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_likes_\(handle)",
-            targetURL: url,
-            isRefresh: after == nil
+    static func following(after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchHomeTimeline(
+            latest: true,
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0,
+            topTags: c.topTags
         )
+        var filtered = filterUnseen(res.posts)
+        var nextCursor = res.after
+        if filtered.count < 3 {
+            let sup = await XWebEngine.shared.fetchAdultSupplement(
+                topTags: c.topTags,
+                after: nil,
+                authToken: c.authToken,
+                ct0: c.ct0
+            )
+            filtered = filterUnseen(filtered + sup.posts)
+            if nextCursor == nil { nextCursor = sup.after }
+        }
+        return GoonedFeedResponse(posts: filtered, after: nextCursor)
     }
 
-    /// Search X videos by keyword/hashtag/topic (supports 18+ NSFW when logged in)
-    @MainActor
-    static func search(_ query: String, sort: String, after: String?) async -> GoonedFeedResponse {
-        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fullQuery = clean.lowercased().contains("filter:") ? clean : "\(clean) filter:videos"
-        let encoded = fullQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? clean
-        let tabMode = (sort == "new") ? "live" : "video"
-        let url = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tabMode)")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_search_\(clean.lowercased())_\(tabMode)",
-            targetURL: url,
-            isRefresh: after == nil
+    static func bookmarks(after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchBookmarks(
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0,
+            topTags: c.topTags
         )
+        return GoonedFeedResponse(posts: filterUnseen(res.posts), after: res.after)
     }
 
-    /// Any X creator's (`@handle`) media timeline
-    @MainActor
-    static func userMedia(_ handle: String, after: String?) async -> GoonedFeedResponse {
-        let clean = handle
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "@", with: "")
-            .replacingOccurrences(of: "u/", with: "")
-        let url = URL(string: "https://x.com/\(clean)/media") ?? URL(string: "https://x.com/home")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_user_\(clean.lowercased())",
-            targetURL: url,
-            isRefresh: after == nil
+    static func likes(after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchLikes(
+            userId: c.userId,
+            screenName: c.screenName,
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0,
+            topTags: c.topTags
         )
+        return GoonedFeedResponse(posts: filterUnseen(res.posts), after: res.after)
+    }
+
+    static func search(_ query: String, sort: String = "Top", after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchSearch(
+            query: query,
+            sort: sort,
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0
+        )
+        return GoonedFeedResponse(posts: filterUnseen(res.posts), after: res.after)
+    }
+
+    static func userMedia(_ username: String, after: String? = nil) async -> GoonedFeedResponse {
+        let c = currentCreds()
+        let res = await XWebEngine.shared.fetchUserMedia(
+            username: username,
+            after: after,
+            authToken: c.authToken,
+            ct0: c.ct0
+        )
+        return GoonedFeedResponse(posts: filterUnseen(res.posts), after: res.after)
     }
 }
 
@@ -953,7 +986,7 @@ struct XLoginSheet: View {
                                 .padding(10)
                                 .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
 
-                            TextField("ct0 cookie", text: $manualCt0)
+                            TextField("ct0 cookie (auto-fetched if blank)", text: $manualCt0)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .font(.system(size: 14, design: .monospaced))
@@ -969,14 +1002,24 @@ struct XLoginSheet: View {
 
                             Button {
                                 let auth = manualAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                                let ct0 = manualCt0.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !auth.isEmpty, !ct0.isEmpty else { return }
-                                store.data.xSession.authToken = auth
-                                store.data.xSession.ct0 = ct0
-                                store.data.xSession.screenName = manualHandle.replacingOccurrences(of: "@", with: "")
-                                UINotificationFeedbackGenerator().notificationOccurred(.success)
-                                onConnected?()
-                                dismiss()
+                                let rawCt0 = manualCt0.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !auth.isEmpty else { return }
+                                Task {
+                                    statusText = "Verifying session..."
+                                    let resolvedCt0 = rawCt0.isEmpty
+                                        ? await XWebEngine.shared.resolveCt0IfNeeded(authToken: auth)
+                                        : rawCt0
+                                    guard !resolvedCt0.isEmpty else {
+                                        statusText = "Could not resolve ct0 — paste both cookies"
+                                        return
+                                    }
+                                    store.data.xSession.authToken = auth
+                                    store.data.xSession.ct0 = resolvedCt0
+                                    store.data.xSession.screenName = manualHandle.replacingOccurrences(of: "@", with: "")
+                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    onConnected?()
+                                    dismiss()
+                                }
                             } label: {
                                 Text("Save Session Cookies")
                                     .font(.system(size: 14, weight: .bold))
