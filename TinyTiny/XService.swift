@@ -657,7 +657,10 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             zeroAdultScrolls = 0
             pageCounter = 0
 
-            let usedDirect = !isRefresh && (await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv))
+            var usedDirect = false
+            if !isRefresh {
+                usedDirect = await fetchNextViaCapturedGraphQL(for: routeKey, wv: wv)
+            }
             if !usedDirect {
                 wv.load(URLRequest(url: targetURL))
                 if let postLoadJS {
