@@ -486,12 +486,12 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
            bufferedPosts.isEmpty,
            let wv = webView {
             didRedirectAdultSupplement = true
-            let topTag = UserStore.shared.data.algorithm.learnedTags
+            let topTag = UserStore.shared.data.algorithm.tagWeights
                 .filter { $0.value > 0 }
                 .sorted { $0.value > $1.value }
                 .first?.key
-            let query = topTag.map { "nsfw \($0) filter:videos" } ?? "nsfw filter:videos"
-            if let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+            let queryText = topTag.map { "nsfw \($0) filter:videos" } ?? "nsfw filter:videos"
+            if let encoded = queryText.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed),
                let supplementURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=live") {
                 wv.load(URLRequest(url: supplementURL))
             }

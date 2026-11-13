@@ -2116,7 +2116,7 @@ struct AlgorithmEditorSheet: View {
                                     HStack(spacing: 7) {
                                         ForEach(PornTagCatalog.quickPickerCategories, id: \.self) { category in
                                             let isPinned = store.data.algorithm.boostedTags.contains {
-                                                PornTagCatalog.normalize($0) == category
+                                                (PornTagCatalog.normalize($0, categories: store.categories) ?? $0.lowercased()) == category
                                             }
                                             Button {
                                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
