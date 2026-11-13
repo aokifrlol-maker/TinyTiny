@@ -331,48 +331,23 @@ actor XWebEngine {
         return URLSession(configuration: cfg)
     }()
 
+    // Live x-web Relay persisted query IDs (auto-refreshed from x.com/home bundles on 400/404/422)
     private var queryIds: [String: String] = [
-        "HomeTimeline": "c-f3M7uN4p_V9N-t8G4K0Q",
-        "HomeLatestTimeline": "iB1t42oG8wN0v-v2k2sE_w",
-        "Bookmarks": "qLDK3tP5B7c3k2Q4p8-t2w",
-        "SearchTimeline": "nK1dw4oV3k4w5T6y7U8i9Q",
-        "Likes": "k2J3h4G5f6D7s8A9p0O1iQ",
-        "UserByScreenName": "xc8f1g7BYqr6VTzTbvNlGw",
-        "UserMedia": "2tLOJWwguXQddVb1l-p4Yw"
+        "HomeTimeline": "QyTWLuWc5B83huorkB6mqw",
+        "HomeLatestTimelineQuery": "HbJxZtMbjueV7WzK0knHKQ",
+        "SearchByRawQuery": "US58CpbxEKe7RJzrZ-TMHQ",
+        "UserVideoTimeline": "MPA1X8jpBRqI9rmEeWKZkw",
+        "likesQuery": "GA-Msc0mQg-YAWXTgMuaVQ",
+        "viewerQuery": "VNDJhBbDKWIzHmR7xvScxA",
+        "Bookmarks": "qLDK3tP5B7c3k2Q4p8-t2w"
     ]
     private var queryIdsLoadedFromBundle = false
     private var lastQueryIdFetch: Date?
-    private var userIdCache: [String: String] = [:]
+    private var cachedViewerId: String = ""
     private var supplementCursorIndex = 0
 
-    private let defaultFeatures: [String: Any] = [
-        "rweb_tipjar_consumption_enabled": true,
-        "responsive_web_graphql_exclude_directive_enabled": true,
-        "verified_phone_label_enabled": false,
-        "creator_subscriptions_tweet_preview_api_enabled": true,
-        "responsive_web_graphql_timeline_navigation_enabled": true,
-        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
-        "communities_web_enable_tweet_community_results_fetch": true,
-        "c9s_tweet_anatomy_moderator_badge_enabled": true,
-        "articles_preview_enabled": true,
-        "responsive_web_edit_tweet_api_enabled": true,
-        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
-        "view_counts_everywhere_api_enabled": true,
-        "longform_notetweets_consumption_enabled": true,
-        "responsive_web_twitter_article_tweet_consumption_enabled": true,
-        "tweet_awards_web_tipping_enabled": false,
-        "creator_subscriptions_quote_tweet_preview_api_enabled": false,
-        "freedom_of_speech_not_reach_fetch_enabled": true,
-        "standardized_nudges_misinfo": true,
-        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
-        "rweb_video_timestamps_enabled": true,
-        "longform_notetweets_rich_text_read_enabled": true,
-        "longform_notetweets_inline_media_enabled": true,
-        "responsive_web_enhance_cards_enabled": false
-    ]
-
     func resetSession() {
-        userIdCache.removeAll()
+        cachedViewerId = ""
         queryIdsLoadedFromBundle = false
         lastQueryIdFetch = nil
         supplementCursorIndex = 0
@@ -411,6 +386,35 @@ actor XWebEngine {
         return ""
     }
 
+    private func scanJSForQueryIds(_ js: String, wantedOps: Set<String>) -> [String: String] {
+        var found: [String: String] = [:]
+        // 1. x-web Relay format: params:{id:`<id>`,...,name:`<op>`}
+        let relayPattern = #"params:\{id:[`"']([A-Za-z0-9_-]+)[`"'],[\s\S]{0,160}?name:[`"']([A-Za-z0-9_]+)[`"']"#
+        if let regex = try? NSRegularExpression(pattern: relayPattern) {
+            let nsJs = js as NSString
+            for m in regex.matches(in: js, range: NSRange(location: 0, length: nsJs.length)) where m.numberOfRanges >= 3 {
+                let qid = nsJs.substring(with: m.range(at: 1))
+                let op = nsJs.substring(with: m.range(at: 2))
+                if wantedOps.contains(op) {
+                    found[op] = qid
+                }
+            }
+        }
+        // 2. Legacy responsive-web format: queryId:"<id>",operationName:"<op>"
+        let legacyPattern = #"queryId\s*:\s*["']([A-Za-z0-9_-]+)["']\s*,\s*operationName\s*:\s*["']([A-Za-z0-9_]+)["']"#
+        if let regex = try? NSRegularExpression(pattern: legacyPattern) {
+            let nsJs = js as NSString
+            for m in regex.matches(in: js, range: NSRange(location: 0, length: nsJs.length)) where m.numberOfRanges >= 3 {
+                let qid = nsJs.substring(with: m.range(at: 1))
+                let op = nsJs.substring(with: m.range(at: 2))
+                if wantedOps.contains(op) {
+                    found[op] = qid
+                }
+            }
+        }
+        return found
+    }
+
     private func ensureQueryIds(authToken: String, ct0: String, forceRefresh: Bool = false) async {
         if !forceRefresh {
             if queryIdsLoadedFromBundle, let last = lastQueryIdFetch, Date().timeIntervalSince(last) < 1800 {
@@ -431,48 +435,52 @@ actor XWebEngine {
             let (data, _) = try await session.data(for: req)
             guard let html = String(data: data, encoding: .utf8) else { return }
 
-            let scriptPattern = #"https://abs\.twimg\.com/responsive-web/client-web[^"'\s]+\.js"#
+            let scriptPattern = #"https://abs\.twimg\.com/(?:x-web/x-web|responsive-web/client-web)[^"'\s<>]+\.js"#
             guard let scriptRegex = try? NSRegularExpression(pattern: scriptPattern) else { return }
             let nsHtml = html as NSString
             let matches = scriptRegex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
 
-            var candidateURLs: [String] = []
+            var entryURLs: [String] = []
             var seen = Set<String>()
             for m in matches {
                 let u = nsHtml.substring(with: m.range)
                 if seen.insert(u).inserted {
-                    candidateURLs.append(u)
+                    entryURLs.append(u)
                 }
             }
 
-            let prioritized = candidateURLs.sorted { a, b in
-                let scoreA = (a.contains("/main.") ? 3 : 0) + (a.contains("/api.") ? 2 : 0) + (a.contains("/shared~") ? 1 : 0)
-                let scoreB = (b.contains("/main.") ? 3 : 0) + (b.contains("/api.") ? 2 : 0) + (b.contains("/shared~") ? 1 : 0)
-                return scoreA > scoreB
+            var targetURLs = entryURLs
+            // For x-web entry-client-*.js, discover imported assets/*.js chunks
+            for entry in entryURLs where entry.contains("/x-web/x-web/") {
+                guard let u = URL(string: entry) else { continue }
+                var r = URLRequest(url: u)
+                r.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                if let (jsData, _) = try? await session.data(for: r),
+                   let js = String(data: jsData, encoding: .utf8),
+                   let assetRegex = try? NSRegularExpression(pattern: #"assets/[A-Za-z0-9_-]+\.js"#) {
+                    let nsJs = js as NSString
+                    for m in assetRegex.matches(in: js, range: NSRange(location: 0, length: nsJs.length)) {
+                        let rel = nsJs.substring(with: m.range)
+                        let full = "https://abs.twimg.com/x-web/x-web/" + rel
+                        if seen.insert(full).inserted {
+                            targetURLs.append(full)
+                        }
+                    }
+                }
             }
-            let targets = Array(prioritized.prefix(10))
+
             let wantedOps = Set(queryIds.keys)
+            let targets = Array(targetURLs.prefix(16))
 
             let discovered = await withTaskGroup(of: [String: String].self) { group in
                 for urlStr in targets {
-                    group.addTask { [session, userAgent] in
+                    group.addTask { [session, userAgent, wantedOps] in
                         guard let u = URL(string: urlStr) else { return [:] }
                         var r = URLRequest(url: u)
                         r.setValue(userAgent, forHTTPHeaderField: "User-Agent")
                         guard let (jsData, _) = try? await session.data(for: r),
                               let js = String(data: jsData, encoding: .utf8) else { return [:] }
-                        var found: [String: String] = [:]
-                        let pattern = #"queryId\s*:\s*["']([A-Za-z0-9_-]+)["']\s*,\s*operationName\s*:\s*["']([A-Za-z0-9_]+)["']"#
-                        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [:] }
-                        let nsJs = js as NSString
-                        for m in regex.matches(in: js, range: NSRange(location: 0, length: nsJs.length)) where m.numberOfRanges >= 3 {
-                            let qid = nsJs.substring(with: m.range(at: 1))
-                            let op = nsJs.substring(with: m.range(at: 2))
-                            if wantedOps.contains(op) {
-                                found[op] = qid
-                            }
-                        }
-                        return found
+                        return await self.scanJSForQueryIds(js, wantedOps: wantedOps)
                     }
                 }
 
@@ -506,7 +514,6 @@ actor XWebEngine {
     private func graphQLRequest(
         operation: String,
         variables: [String: Any],
-        fieldToggles: [String: Any]? = nil,
         authToken: String,
         ct0: String,
         routeKey: String
@@ -520,8 +527,6 @@ actor XWebEngine {
         }
         guard !effectiveCt0.isEmpty else { return (nil, [], nil, 401) }
 
-        await ensureQueryIds(authToken: token, ct0: effectiveCt0, forceRefresh: false)
-
         for attempt in 0..<2 {
             guard let qid = queryIds[operation] else { return (nil, [], nil, 404) }
             var comps = URLComponents()
@@ -529,17 +534,9 @@ actor XWebEngine {
             comps.host = "x.com"
             comps.path = "/i/api/graphql/\(qid)/\(operation)"
 
-            var queryItems: [URLQueryItem] = []
             if let varsStr = jsonString(variables) {
-                queryItems.append(URLQueryItem(name: "variables", value: varsStr))
+                comps.queryItems = [URLQueryItem(name: "variables", value: varsStr)]
             }
-            if let featStr = jsonString(defaultFeatures) {
-                queryItems.append(URLQueryItem(name: "features", value: featStr))
-            }
-            if let ft = fieldToggles, let ftStr = jsonString(ft) {
-                queryItems.append(URLQueryItem(name: "fieldToggles", value: ftStr))
-            }
-            comps.queryItems = queryItems
 
             guard let url = comps.url else { return (nil, [], nil, 400) }
             var req = URLRequest(url: url)
@@ -572,61 +569,35 @@ actor XWebEngine {
         return (nil, [], nil, 0)
     }
 
-    private func resolveUserId(screenName: String, authToken: String, ct0: String) async -> String {
-        let clean = screenName.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
-        guard !clean.isEmpty else { return "" }
-        if let cached = userIdCache[clean.lowercased()], !cached.isEmpty {
-            return cached
-        }
-        let result = await graphQLRequest(
-            operation: "UserByScreenName",
-            variables: ["screen_name": clean, "withSafetyModeUserFields": true],
+    private func resolveViewerUserId(authToken: String, ct0: String) async -> String {
+        if !cachedViewerId.isEmpty { return cachedViewerId }
+        let res = await graphQLRequest(
+            operation: "viewerQuery",
+            variables: [:],
             authToken: authToken,
             ct0: ct0,
-            routeKey: "user_lookup"
+            routeKey: "viewer"
         )
-        if let data = result.data,
+        if let data = res.data,
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let dataObj = json["data"] as? [String: Any],
-           let user = dataObj["user"] as? [String: Any],
-           let res = user["result"] as? [String: Any],
-           let restId = res["rest_id"] as? String, !restId.isEmpty {
-            userIdCache[clean.lowercased()] = restId
+           let viewer = dataObj["viewer"] as? [String: Any],
+           let userResults = viewer["user_results"] as? [String: Any],
+           let result = userResults["result"] as? [String: Any],
+           let restId = result["rest_id"] as? String, !restId.isEmpty {
+            cachedViewerId = restId
             return restId
         }
         return ""
     }
 
-    private func resolveCurrentScreenName(authToken: String, ct0: String) async -> String {
-        let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        var effectiveCt0 = ct0.trimmingCharacters(in: .whitespacesAndNewlines)
-        if effectiveCt0.isEmpty {
-            effectiveCt0 = await resolveCt0IfNeeded(authToken: token)
-        }
-        guard !token.isEmpty, !effectiveCt0.isEmpty,
-              let url = URL(string: "https://x.com/i/api/1.1/account/settings.json") else { return "" }
-        var req = URLRequest(url: url)
-        req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(effectiveCt0, forHTTPHeaderField: "x-csrf-token")
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("auth_token=\(token); ct0=\(effectiveCt0)", forHTTPHeaderField: "Cookie")
-        if let (data, _) = try? await session.data(for: req),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let sn = json["screen_name"] as? String {
-            return sn
-        }
-        return ""
-    }
-
     func fetchHomeTimeline(latest: Bool, after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
-        let op = latest ? "HomeLatestTimeline" : "HomeTimeline"
+        let op = latest ? "HomeLatestTimelineQuery" : "HomeTimeline"
         let routeKey = latest ? "following" : "foryou"
-        var vars: [String: Any] = [
-            "count": 40,
-            "includePromotedContent": false,
-            "latestControlAvailable": true,
-            "withCommunity": true
-        ]
+        var vars: [String: Any] = ["count": 40]
+        if latest {
+            vars["enableRanking"] = false
+        }
         if let c = cursor, !c.isEmpty {
             vars["cursor"] = c
         }
@@ -656,10 +627,7 @@ actor XWebEngine {
     }
 
     func fetchBookmarks(after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
-        var vars: [String: Any] = [
-            "count": 40,
-            "includePromotedContent": false
-        ]
+        var vars: [String: Any] = ["count": 40]
         if let c = cursor, !c.isEmpty {
             vars["cursor"] = c
         }
@@ -679,13 +647,7 @@ actor XWebEngine {
     func fetchLikes(userId: String, screenName: String, after cursor: String?, authToken: String, ct0: String, topTags: [String]) async -> GoonedFeedResponse {
         var uid = userId.trimmingCharacters(in: .whitespacesAndNewlines)
         if uid.isEmpty {
-            var sn = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
-            if sn.isEmpty {
-                sn = await resolveCurrentScreenName(authToken: authToken, ct0: ct0)
-            }
-            if !sn.isEmpty {
-                uid = await resolveUserId(screenName: sn, authToken: authToken, ct0: ct0)
-            }
+            uid = await resolveViewerUserId(authToken: authToken, ct0: ct0)
         }
         guard !uid.isEmpty else {
             return await fetchAdultSupplement(topTags: topTags, after: cursor, authToken: authToken, ct0: ct0)
@@ -693,19 +655,14 @@ actor XWebEngine {
 
         var vars: [String: Any] = [
             "userId": uid,
-            "count": 40,
-            "includePromotedContent": false,
-            "withClientEventToken": false,
-            "withBirdwatchNotes": false,
-            "withVoice": true,
-            "withV2Timeline": true
+            "count": 40
         ]
         if let c = cursor, !c.isEmpty {
             vars["cursor"] = c
         }
 
         let res = await graphQLRequest(
-            operation: "Likes",
+            operation: "likesQuery",
             variables: vars,
             authToken: authToken,
             ct0: ct0,
@@ -729,7 +686,7 @@ actor XWebEngine {
             vars["cursor"] = c
         }
         let res = await graphQLRequest(
-            operation: "SearchTimeline",
+            operation: "SearchByRawQuery",
             variables: vars,
             authToken: authToken,
             ct0: ct0,
@@ -739,26 +696,21 @@ actor XWebEngine {
     }
 
     func fetchUserMedia(username: String, after cursor: String?, authToken: String, ct0: String) async -> GoonedFeedResponse {
-        let uid = await resolveUserId(screenName: username, authToken: authToken, ct0: ct0)
-        guard !uid.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
+        let clean = username.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        guard !clean.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
         var vars: [String: Any] = [
-            "userId": uid,
-            "count": 40,
-            "includePromotedContent": false,
-            "withClientEventToken": false,
-            "withBirdwatchNotes": false,
-            "withVoice": true,
-            "withV2Timeline": true
+            "screenName": clean,
+            "count": 40
         ]
         if let c = cursor, !c.isEmpty {
             vars["cursor"] = c
         }
         let res = await graphQLRequest(
-            operation: "UserMedia",
+            operation: "UserVideoTimeline",
             variables: vars,
             authToken: authToken,
             ct0: ct0,
-            routeKey: "user_\(username)"
+            routeKey: "user_\(clean)"
         )
         return GoonedFeedResponse(posts: res.posts, after: res.cursor)
     }
