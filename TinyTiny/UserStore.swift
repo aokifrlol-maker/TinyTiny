@@ -952,15 +952,18 @@ enum AdultContentClassifier {
         let combined = "\(caption) \(author)"
         if containsSFWBlockedTerm(combined) { return false }
         // Exclude blatantly non-adult everyday content across all IG feeds
-        let sfwIGNoise = ["recipe", "cooking", "baby", "toddler", "kindergarten", "homework", "stock market", "real estate", "mortgage", "nfl", "nba", "premier league", "unboxing", "tech review", "sermon", "bible study"]
+        let sfwIGNoise = [
+            "recipe", "cooking", "baby", "toddler", "kindergarten", "homework",
+            "stock market", "real estate", "mortgage", "nfl", "nba", "premier league",
+            "unboxing", "tech review", "sermon", "bible study", "tutorial", "coding",
+            "excel", "tax", "insurance", "dentist", "homework", "minecraft", "fortnite",
+            "politics", "election", "news", "weather forecast"
+        ]
         let lower = combined.lowercased()
         if sfwIGNoise.contains(where: { lower.contains($0) }) { return false }
 
-        if routeKey == "ig_reels" {
-            // Public Reels discovery must carry explicit adult/creator/glamour markers
-            return hasExplicitAdultIndicators(combined)
-        }
-        // Personal Following, Saved, and explicit @user feeds are allowed once SFW-clean
+        // Keep SFW-clean IG reels across Reels, Following, Saved, and @user feeds
+        // instead of dropping captionless/emoji-captioned Reels and starving the feed.
         return true
     }
 

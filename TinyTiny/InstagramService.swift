@@ -194,9 +194,55 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
     private var pageCounter: Int = 0
     private var nextMaxIdByRoute: [String: String] = [:]
+    private var dryPayloadCountByRoute: [String: Int] = [:]
     private var pumpTask: Task<Void, Never>?
     private var isEngineBusy: Bool = false
     private var lockWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isWarmedUp: Bool = false
+
+    private let scrollAdvanceJS = """
+    (function() {
+        try {
+            const evtInit = { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40, bubbles: true, cancelable: true };
+            document.dispatchEvent(new KeyboardEvent('keydown', evtInit));
+            if (document.activeElement) {
+                document.activeElement.dispatchEvent(new KeyboardEvent('keydown', evtInit));
+            }
+            window.dispatchEvent(new WheelEvent('wheel', { deltaY: 960, bubbles: true, cancelable: true }));
+            const main = document.querySelector('main') || document.body;
+            if (main) {
+                main.dispatchEvent(new WheelEvent('wheel', { deltaY: 960, bubbles: true, cancelable: true }));
+            }
+            const els = document.querySelectorAll('div, section, main');
+            for (const el of els) {
+                if (el.scrollHeight > el.clientHeight + 80) {
+                    const style = window.getComputedStyle(el);
+                    if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.scrollSnapType) {
+                        el.scrollTop += Math.max(900, el.clientHeight);
+                        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    }
+                }
+            }
+            if (document.scrollingElement) {
+                document.scrollingElement.scrollTop += 2600;
+            }
+            window.scrollBy(0, 2600);
+            window.dispatchEvent(new Event('scroll'));
+        } catch (e) {}
+    })();
+    """
+
+    private func attachToKeyWindowIfNeeded(_ wv: WKWebView) {
+        if wv.superview != nil { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap { $0.windows }.first(where: { $0.isKeyWindow }) ?? scenes.flatMap { $0.windows }.first
+        guard let window else { return }
+        wv.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        wv.alpha = 0.011 // Visible to WebKit IntersectionObserver/React without affecting UI
+        wv.isUserInteractionEnabled = false
+        wv.isHidden = false
+        window.insertSubview(wv, at: 0)
+    }
 
     private func acquireLock() async {
         if !isEngineBusy {
@@ -222,13 +268,33 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     }
 
     private func extractMaxId(from data: Data) -> String? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        if let paging = root["paging_info"] as? [String: Any],
-           let maxId = paging["max_id"] as? String, !maxId.isEmpty {
-            return maxId
-        }
-        if let nextMax = root["next_max_id"] as? String, !nextMax.isEmpty {
-            return nextMax
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) else { return nil }
+        return findNextCursor(in: root, depth: 0)
+    }
+
+    private func findNextCursor(in obj: Any, depth: Int) -> String? {
+        if depth > 14 { return nil }
+        if let dict = obj as? [String: Any] {
+            if let paging = dict["paging_info"] as? [String: Any],
+               let maxId = paging["max_id"] as? String, !maxId.isEmpty {
+                let moreAvailable = (paging["more_available"] as? Bool) ?? true
+                if moreAvailable { return maxId }
+            }
+            if let nextMax = dict["next_max_id"] as? String, !nextMax.isEmpty {
+                return nextMax
+            }
+            if let pageInfo = dict["page_info"] as? [String: Any],
+               let endCursor = pageInfo["end_cursor"] as? String, !endCursor.isEmpty {
+                let hasNext = (pageInfo["has_next_page"] as? Bool) ?? true
+                if hasNext { return endCursor }
+            }
+            for (_, v) in dict {
+                if let found = findNextCursor(in: v, depth: depth + 1) { return found }
+            }
+        } else if let arr = obj as? [Any] {
+            for item in arr.prefix(25) {
+                if let found = findNextCursor(in: item, depth: depth + 1) { return found }
+            }
         }
         return nil
     }
@@ -237,8 +303,23 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         super.init()
     }
 
+    func warmUp() async {
+        guard UserStore.shared.data.igSession.isConnected else { return }
+        if isWarmedUp, let wv = webView {
+            attachToKeyWindowIfNeeded(wv)
+            return
+        }
+        let wv = await ensureWebView()
+        if wv.url == nil || wv.url?.absoluteString == "about:blank" {
+            activeRouteKey = "ig_reels"
+            wv.load(URLRequest(url: URL(string: "https://www.instagram.com/reels/")!))
+        }
+        isWarmedUp = true
+    }
+
     func ensureWebView() async -> WKWebView {
         if let existing = webView {
+            attachToKeyWindowIfNeeded(existing)
             await injectStoredCookies(into: existing.configuration.websiteDataStore.httpCookieStore)
             return existing
         }
@@ -252,6 +333,15 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         (function() {
             if (window.__goonedIGHooked) return;
             window.__goonedIGHooked = true;
+
+            try {
+                // Keep hidden IG videos silent and non-decoding so the engine stays fast and audio-free
+                const origPlay = HTMLMediaElement.prototype.play;
+                HTMLMediaElement.prototype.play = function() {
+                    try { this.muted = true; this.pause(); } catch (e) {}
+                    return Promise.resolve();
+                };
+            } catch (e) {}
 
             function postPayload(url, body) {
                 if (!body || body.length < 20) return;
@@ -303,11 +393,15 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                         const text = s.textContent || '';
                         postPayload('ssr_script', text);
                     }
+                    document.querySelectorAll('video, audio').forEach(function(m) {
+                        m.muted = true;
+                        if (!m.paused) m.pause();
+                    });
                 } catch (e) {}
             }
 
             document.addEventListener('DOMContentLoaded', scanSSRScripts);
-            setInterval(scanSSRScripts, 1800);
+            setInterval(scanSSRScripts, 1400);
         })();
         """
 
@@ -318,6 +412,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
         wv.customUserAgent = Config.userAgent
         wv.navigationDelegate = self
+        attachToKeyWindowIfNeeded(wv)
         await injectStoredCookies(into: config.websiteDataStore.httpCookieStore)
         self.webView = wv
         return wv
@@ -370,6 +465,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let fresh = reels.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
         guard !fresh.isEmpty else { return }
 
+        dryPayloadCountByRoute[activeRouteKey] = 0
         var buf = routeBuffers[activeRouteKey] ?? []
         buf.append(contentsOf: fresh)
         routeBuffers[activeRouteKey] = buf
@@ -401,12 +497,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                       !Task.isCancelled,
                       self.activeRouteKey == routeKey,
                       (self.routeBuffers[routeKey]?.count ?? 0) < 18 else { return }
-                let scrollJS = """
-                window.scrollBy(0, 3200);
-                if (document.scrollingElement) { document.scrollingElement.scrollTop += 3200; }
-                window.dispatchEvent(new Event('scroll'));
-                """
-                _ = try? await wv.evaluateJavaScript(scrollJS)
+                _ = try? await wv.evaluateJavaScript(self.scrollAdvanceJS)
                 if let apiTriggerJS {
                     _ = try? await wv.evaluateJavaScript(apiTriggerJS)
                 }
@@ -420,6 +511,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         apiTriggerJS: String? = nil,
         isRefresh: Bool
     ) async -> GoonedFeedResponse {
+        attachToKeyWindowIfNeededIfReady()
         // Fast-path: return buffered posts for this route immediately in 0ms without waiting on lock
         if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
             routeBuffers[routeKey] = []
@@ -446,19 +538,28 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
         let wv = await ensureWebView()
         var didLoadNewURL = false
+        let dryStreak = dryPayloadCountByRoute[routeKey] ?? 0
+        let forceNavigate = (isRefresh || activeRouteKey != routeKey || dryStreak >= 2)
 
-        if isRefresh || activeRouteKey != routeKey {
+        if forceNavigate {
             pumpTask?.cancel()
             pumpTask = nil
             activeRouteKey = routeKey
-            pageCounter = 0
+            if isRefresh {
+                pageCounter = 0
+                nextMaxIdByRoute[routeKey] = nil
+            }
+            dryPayloadCountByRoute[routeKey] = 0
 
-            // If WebView is already on instagram.com and we have a direct API trigger, fire it immediately without page reload!
-            if let apiTriggerJS, wv.url?.host?.contains("instagram.com") == true {
+            // If already on the target path and just doing an API-triggered refresh (not a dry-streak recovery), fire JS immediately
+            let onTargetHost = wv.url?.host?.contains("instagram.com") == true
+            let onTargetPath = wv.url?.path == targetURL.path
+            if let apiTriggerJS, onTargetHost && (onTargetPath || routeKey != "ig_reels") && dryStreak < 2 {
                 _ = try? await wv.evaluateJavaScript(apiTriggerJS)
+                _ = try? await wv.evaluateJavaScript(scrollAdvanceJS)
             } else {
                 let alreadyLoadingSame = (wv.url?.absoluteString == targetURL.absoluteString && wv.isLoading)
-                if !alreadyLoadingSame {
+                if !alreadyLoadingSame || dryStreak >= 2 {
                     wv.load(URLRequest(url: targetURL))
                 }
                 didLoadNewURL = true
@@ -470,25 +571,20 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                 }
             }
         } else {
-            let scrollJS = """
-            window.scrollBy(0, 3200);
-            if (document.scrollingElement) { document.scrollingElement.scrollTop += 3200; }
-            window.dispatchEvent(new Event('scroll'));
-            """
-            _ = try? await wv.evaluateJavaScript(scrollJS)
+            _ = try? await wv.evaluateJavaScript(scrollAdvanceJS)
             if let apiTriggerJS {
                 _ = try? await wv.evaluateJavaScript(apiTriggerJS)
             }
         }
 
-        let firstNudgeNs: UInt64 = didLoadNewURL ? 1_300_000_000 : 500_000_000
-        let remainingWaitNs: UInt64 = didLoadNewURL ? 2_700_000_000 : 1_000_000_000
+        let firstNudgeNs: UInt64 = didLoadNewURL ? 1_200_000_000 : 450_000_000
+        let remainingWaitNs: UInt64 = didLoadNewURL ? 2_600_000_000 : 1_100_000_000
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append((routeKey: routeKey, cont: cont))
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: firstNudgeNs)
                 if self.waiters.contains(where: { $0.routeKey == routeKey }) {
-                    _ = try? await wv.evaluateJavaScript("window.scrollBy(0, 2400); window.dispatchEvent(new Event('scroll'));")
+                    _ = try? await wv.evaluateJavaScript(self.scrollAdvanceJS)
                 }
                 try? await Task.sleep(nanoseconds: remainingWaitNs)
                 let pending = self.waiters.filter { $0.routeKey == routeKey }
@@ -496,6 +592,9 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                     self.waiters.removeAll { $0.routeKey == routeKey }
                     let fallback = self.routeBuffers[routeKey] ?? []
                     self.routeBuffers[routeKey] = []
+                    if fallback.isEmpty {
+                        self.dryPayloadCountByRoute[routeKey, default: 0] += 1
+                    }
                     for p in pending {
                         p.cont.resume(returning: fallback)
                     }
@@ -511,13 +610,21 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         )
     }
 
+    private func attachToKeyWindowIfNeededIfReady() {
+        if let wv = webView {
+            attachToKeyWindowIfNeeded(wv)
+        }
+    }
+
     func resetSession() async {
         pumpTask?.cancel()
         pumpTask = nil
+        isWarmedUp = false
         activeRouteKey = ""
         routeBuffers.removeAll()
         seenIds.removeAll()
         nextMaxIdByRoute.removeAll()
+        dryPayloadCountByRoute.removeAll()
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
         for c in cookies where c.domain.contains("instagram.com") {
@@ -536,27 +643,34 @@ enum InstagramAPI {
         let url = URL(string: "https://www.instagram.com/reels/")!
         let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_reels") ?? "") : ""
         let escapedMax = maxId.replacingOccurrences(of: "'", with: "")
-        let bodyExpr = escapedMax.isEmpty
-            ? "'container_module=clips_viewer_clips_tab'"
-            : "'container_module=clips_viewer_clips_tab&max_id=\(escapedMax)'"
-        let triggerClipsJS = """
-        (async function() {
-            try {
-                const csrfMatch = document.cookie.match(/csrftoken=([^;]+)/);
-                const csrf = csrfMatch ? csrfMatch[1] : '';
-                await fetch('https://www.instagram.com/api/v1/clips/home/', {
-                    method: 'POST',
-                    headers: {
-                        'X-IG-App-ID': '936619743392459',
-                        'X-CSRFToken': csrf,
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    body: \(bodyExpr)
-                });
-            } catch (e) {}
-        })();
-        """
+        // Only call /api/v1/clips/home/ on initial load or when we actually have a max_id cursor.
+        // Calling it without max_id during pagination re-fetches page 1 duplicates and stalls scroll.
+        let triggerClipsJS: String?
+        if after == nil || !escapedMax.isEmpty {
+            let bodyExpr = escapedMax.isEmpty
+                ? "'container_module=clips_viewer_clips_tab'"
+                : "'container_module=clips_viewer_clips_tab&max_id=\(escapedMax)'"
+            triggerClipsJS = """
+            (async function() {
+                try {
+                    const csrfMatch = document.cookie.match(/csrftoken=([^;]+)/);
+                    const csrf = csrfMatch ? csrfMatch[1] : '';
+                    await fetch('https://www.instagram.com/api/v1/clips/home/', {
+                        method: 'POST',
+                        headers: {
+                            'X-IG-App-ID': '936619743392459',
+                            'X-CSRFToken': csrf,
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        },
+                        body: \(bodyExpr)
+                    });
+                } catch (e) {}
+            })();
+            """
+        } else {
+            triggerClipsJS = nil
+        }
         return await InstagramWebEngine.shared.fetchFeed(
             routeKey: "ig_reels",
             targetURL: url,
@@ -765,6 +879,7 @@ struct InstagramLoginSheet: View {
                                 store.data.igSession.sessionId = sid
                                 store.data.igSession.csrfToken = manualCsrf.trimmingCharacters(in: .whitespacesAndNewlines)
                                 store.data.igSession.username = manualUsername.replacingOccurrences(of: "@", with: "")
+                                Task { await InstagramWebEngine.shared.warmUp() }
                                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                                 onConnected?()
                                 dismiss()
@@ -829,6 +944,7 @@ struct InstagramLoginSheet: View {
         store.data.igSession.sessionId = sessionId
         store.data.igSession.csrfToken = csrf
         store.data.igSession.userId = dsUserId
+        Task { await InstagramWebEngine.shared.warmUp() }
         return true
     }
 }

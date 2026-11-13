@@ -352,16 +352,20 @@ struct GoonedMainShell: View {
             }
             if store.data.xSession.isConnected {
                 Task { @MainActor in
-                    if xForYouModel.items.isEmpty { await xForYouModel.loadMore() }
-                    if xFollowingModel.items.isEmpty { await xFollowingModel.loadMore() }
-                    if xBookmarksModel.items.isEmpty { await xBookmarksModel.loadMore() }
+                    if xForYouModel.items.isEmpty {
+                        await xForYouModel.loadMore()
+                    } else {
+                        await XWebEngine.shared.warmUp()
+                    }
                 }
             }
             if store.data.igSession.isConnected {
                 Task { @MainActor in
-                    if igReelsModel.items.isEmpty { await igReelsModel.loadMore() }
-                    if igFollowingModel.items.isEmpty { await igFollowingModel.loadMore() }
-                    if igSavedModel.items.isEmpty { await igSavedModel.loadMore() }
+                    if igReelsModel.items.isEmpty {
+                        await igReelsModel.loadMore()
+                    } else {
+                        await InstagramWebEngine.shared.warmUp()
+                    }
                 }
             }
         }

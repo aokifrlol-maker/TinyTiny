@@ -258,20 +258,20 @@ final class FeedModel: ObservableObject {
     }
 
     func onItemAppear(_ g: Gif) {
-        if items.suffix(15).contains(where: { $0.id == g.id }) {
+        if items.suffix(20).contains(where: { $0.id == g.id }) {
             Task { await loadMore() }
         }
     }
 
     func prefetchIfNeeded(currentID: String?) {
         guard !isLoading, canLoadMore else { return }
-        if items.count < 18 {
+        if items.count < 24 {
             Task { await loadMore() }
             return
         }
         guard let currentID,
               let idx = items.firstIndex(where: { $0.id == currentID }) else { return }
-        if idx >= max(0, items.count - 14) {
+        if idx >= max(0, items.count - 18) {
             Task { await loadMore() }
         }
     }
@@ -315,7 +315,7 @@ final class FeedModel: ObservableObject {
             var totalAddedThisCall = 0
             var attempts = 0
             var fallbackSeen: [Gif] = []
-            let maxAttempts = (source.isXFeed || source.isIGFeed || source == .following) ? 2 : 3
+            let maxAttempts = (source.isXFeed || source.isIGFeed) ? 4 : (source == .following ? 2 : 3)
 
             while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
@@ -411,7 +411,9 @@ final class FeedModel: ObservableObject {
                                 Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
                             }
                         } else if source.isIGFeed && store.data.igSession.isConnected && emptyPageStreak >= 2 {
-                            let igFallback = await InstagramAPI.reels(after: afterCursor)
+                            let igFallback = (source == .igReels)
+                                ? await InstagramAPI.following(after: afterCursor)
+                                : await InstagramAPI.reels(after: afterCursor)
                             let extra = igFallback.posts.filter {
                                 $0.hasPlayableMedia
                                 && !store.isBlockedByAlgorithm($0)

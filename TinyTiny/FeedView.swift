@@ -498,23 +498,6 @@ struct FeedView: View {
         .scrollPosition(id: $currentID)
         .background(Color.black)
         .ignoresSafeArea()
-        .overlay(alignment: .bottom) {
-            if model.isLoading && !model.items.isEmpty && currentID == model.items.last?.id {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .tint(.white)
-                        .scaleEffect(0.8)
-                    Text("Loading more...")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.9))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .liquidGlassCapsule(tinted: true, active: false)
-                .padding(.bottom, 106)
-                .allowsHitTesting(false)
-            }
-        }
         .onAppear {
             onScreen = true
             scheduleAutoScrollTimer()
