@@ -542,20 +542,20 @@ final class UserStore: ObservableObject {
         return Array(combined.prefix(6))
     }
 
-    var topAlgorithmTags: [(String, Double)] {
+    var topAlgorithmTags: [(tag: String, score: Double)] {
         data.algorithm.tagWeights
             .filter { $0.value > 0.8 }
             .sorted { $0.value > $1.value }
             .prefix(16)
-            .map { ($0.key, $0.value) }
+            .map { (tag: $0.key, score: $0.value) }
     }
 
-    var topAlgorithmSubredditEntries: [(String, Double)] {
+    var topAlgorithmSubredditEntries: [(name: String, score: Double)] {
         data.algorithm.subredditWeights
             .filter { $0.value > 0.8 }
             .sorted { $0.value > $1.value }
             .prefix(12)
-            .map { ($0.key, $0.value) }
+            .map { (name: $0.key, score: $0.value) }
     }
 
     var topTasteSummary: String {

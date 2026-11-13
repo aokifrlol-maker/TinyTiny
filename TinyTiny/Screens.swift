@@ -2280,7 +2280,7 @@ struct AlgorithmEditorSheet: View {
                     }
                     .padding(.horizontal, 11)
                     .padding(.vertical, 6)
-                    .liquidGlassCapsule(active: tintActive, tinted: !tintActive)
+                    .liquidGlassCapsule(tinted: !tintActive, active: tintActive)
                 }
             }
         }

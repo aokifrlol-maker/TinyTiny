@@ -362,12 +362,18 @@ final class FeedModel: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, case .forYou = self.source else { return }
                     var boostedPosts: [Gif] = []
-                    if let sub = favSub,
+                    if let tag = boostedTag {
+                        let r34Resp = await Rule34API.shared.fetchFeed(
+                            tag: tag,
+                            sort: self.sort.rawValue,
+                            after: nil,
+                            credentials: store.data.r34Credentials
+                        )
+                        boostedPosts.append(contentsOf: r34Resp.posts.prefix(4))
+                    }
+                    if boostedPosts.isEmpty, let sub = favSub,
                        let subResp = try? await api.subreddit(sub, sort: self.sort.rawValue, after: nil, limit: 8) {
                         boostedPosts.append(contentsOf: subResp.posts)
-                    } else if let tag = boostedTag,
-                              let searchResp = try? await api.search(tag, after: nil) {
-                        boostedPosts.append(contentsOf: searchResp.gifs)
                     }
                     let freshFavs = boostedPosts.filter {
                         $0.hasPlayableMedia
