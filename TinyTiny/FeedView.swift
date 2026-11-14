@@ -1818,38 +1818,43 @@ struct GoonedReelCell: View {
 
     private func gestureZones(size: CGSize) -> some View {
         let step = gif.isLongVideoPost ? 10 : 5
-        return HStack(spacing: 0) {
-            zone(width: size.width * 0.30) { triggerSkip(-step) }
-            zone(width: size.width * 0.40) { triggerDoubleTapLike() }
-            zone(width: size.width * 0.30) { triggerSkip(step) }
-        }
-        .frame(width: size.width, height: size.height)
-        .onLongPressGesture(minimumDuration: 0.22, maximumDistance: 120, pressing: { pressing in
-            if !pressing && isHolding {
+        return ReelGestureOverlay(
+            onSingleTap: {
+                if speedLocked2x {
+                    withAnimation(.easeOut(duration: 0.15)) { speedLocked2x = false }
+                    player.setFastForward(false)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    return
+                }
+                if !isHolding { userPaused.toggle() }
+            },
+            onDoubleTapLeft: { triggerSkip(-step) },
+            onDoubleTapCenter: { triggerDoubleTapLike() },
+            onDoubleTapRight: { triggerSkip(step) },
+            onHoldStart: {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                withAnimation(.easeInOut(duration: 0.14)) { isHolding = true }
+                if !gif.isImage {
+                    userPaused = false
+                    player.setFastForward(true)
+                }
+            },
+            onPullDown2xLock: {
+                if !gif.isImage && !speedLocked2x {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        speedLocked2x = true
+                    }
+                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                }
+            },
+            onHoldEnd: {
                 withAnimation(.easeOut(duration: 0.14)) { isHolding = false }
                 if !speedLocked2x {
                     player.setFastForward(false)
                 }
             }
-        }, perform: {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            withAnimation(.easeInOut(duration: 0.14)) { isHolding = true }
-            if !gif.isImage {
-                userPaused = false
-                player.setFastForward(true)
-            }
-        })
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 14, coordinateSpace: .local)
-                .onChanged { val in
-                    if isHolding && !gif.isImage && !speedLocked2x && val.translation.height > 28 {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                            speedLocked2x = true
-                        }
-                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                    }
-                }
         )
+        .frame(width: size.width, height: size.height)
     }
 
     private func toggleLongOrientation(currentlyLandscape: Bool) {
@@ -1865,22 +1870,6 @@ struct GoonedReelCell: View {
             }
             OrientationDelegate.setOrientation(.allButUpsideDown, rotateTo: .landscapeRight)
         }
-    }
-
-    private func zone(width: CGFloat, onDoubleTap: @escaping () -> Void) -> some View {
-        Color.clear
-            .frame(width: width)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2, perform: onDoubleTap)
-            .onTapGesture(count: 1) {
-                if speedLocked2x {
-                    withAnimation(.easeOut(duration: 0.15)) { speedLocked2x = false }
-                    player.setFastForward(false)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    return
-                }
-                if !isHolding { userPaused.toggle() }
-            }
     }
 
     private func triggerSkip(_ seconds: Int) {
@@ -2244,6 +2233,121 @@ struct PostMoreSheet: View {
                 .padding(20)
                 .foregroundStyle(.white)
             }
+        }
+    }
+}
+
+// MARK: - UIKit Gesture Overlay (Zero ScrollView Conflict)
+
+private struct ReelGestureOverlay: UIViewRepresentable {
+    let onSingleTap: () -> Void
+    let onDoubleTapLeft: () -> Void
+    let onDoubleTapCenter: () -> Void
+    let onDoubleTapRight: () -> Void
+    let onHoldStart: () -> Void
+    let onPullDown2xLock: () -> Void
+    let onHoldEnd: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isMultipleTouchEnabled = false
+
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.cancelsTouchesInView = false
+        doubleTap.delegate = context.coordinator
+
+        let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleSingleTap(_:)))
+        singleTap.numberOfTapsRequired = 1
+        singleTap.cancelsTouchesInView = false
+        singleTap.require(toFail: doubleTap)
+        singleTap.delegate = context.coordinator
+
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.22
+        longPress.allowableMovement = 10
+        longPress.cancelsTouchesInView = false
+        longPress.delaysTouchesBegan = false
+        longPress.delegate = context.coordinator
+
+        context.coordinator.longPress = longPress
+
+        view.addGestureRecognizer(doubleTap)
+        view.addGestureRecognizer(singleTap)
+        view.addGestureRecognizer(longPress)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ReelGestureOverlay
+        weak var longPress: UILongPressGestureRecognizer?
+        private var holdStartY: CGFloat = 0
+        private var isCurrentlyHolding = false
+        private var didLockDuringHold = false
+
+        init(_ parent: ReelGestureOverlay) {
+            self.parent = parent
+        }
+
+        @objc func handleSingleTap(_ gesture: UITapGestureRecognizer) {
+            guard gesture.state == .ended else { return }
+            parent.onSingleTap()
+        }
+
+        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard gesture.state == .ended, let view = gesture.view else { return }
+            let x = gesture.location(in: view).x
+            let w = max(view.bounds.width, 1)
+            if x < w * 0.30 {
+                parent.onDoubleTapLeft()
+            } else if x > w * 0.70 {
+                parent.onDoubleTapRight()
+            } else {
+                parent.onDoubleTapCenter()
+            }
+        }
+
+        @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard let view = gesture.view else { return }
+            switch gesture.state {
+            case .began:
+                holdStartY = gesture.location(in: view).y
+                isCurrentlyHolding = true
+                didLockDuringHold = false
+                parent.onHoldStart()
+            case .changed:
+                if isCurrentlyHolding && !didLockDuringHold {
+                    let dy = gesture.location(in: view).y - holdStartY
+                    if dy > 28 {
+                        didLockDuringHold = true
+                        parent.onPullDown2xLock()
+                    }
+                }
+            case .ended, .cancelled, .failed:
+                if isCurrentlyHolding {
+                    isCurrentlyHolding = false
+                    didLockDuringHold = false
+                    parent.onHoldEnd()
+                }
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            if gestureRecognizer === longPress && (gestureRecognizer.state == .began || gestureRecognizer.state == .changed) {
+                return false
+            }
+            return true
         }
     }
 }

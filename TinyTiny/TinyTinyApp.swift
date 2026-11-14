@@ -283,19 +283,17 @@ struct GoonedMainShell: View {
                 }
             )
             .id(activeChannel)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { val in
-                        guard activeTab == .home,
-                              !showSettingsModal,
-                              !showXLoginSheet,
-                              !showIGLoginSheet,
-                              !showR34KeySheet else { return }
-                        let dx = val.translation.width
-                        let dy = val.translation.height
-                        guard abs(dx) > 55, abs(dx) > abs(dy) * 1.5 else { return }
-                        handleHorizontalFeedSwipe(dx: dx)
-                    }
+            .background(
+                HorizontalSwipeBridge(
+                    isEnabled: activeTab == .home
+                        && !showSettingsModal
+                        && !showXLoginSheet
+                        && !showIGLoginSheet
+                        && !showR34KeySheet,
+                    onSwipeLeft: { handleHorizontalFeedSwipe(dx: -100) },
+                    onSwipeRight: { handleHorizontalFeedSwipe(dx: 100) }
+                )
+                .allowsHitTesting(false)
             )
             .opacity(activeTab == .home ? 1 : 0)
             .allowsHitTesting(activeTab == .home)
@@ -1269,5 +1267,97 @@ struct BrandLogoOnlyFans: View {
             )
             .opacity(active ? 1.0 : 0.90)
             .frame(width: 26, height: 26)
+    }
+}
+
+// MARK: - Horizontal Swipe Bridge (Zero Vertical ScrollView Conflict)
+
+private struct HorizontalSwipeBridge: UIViewRepresentable {
+    let isEnabled: Bool
+    let onSwipeLeft: () -> Void
+    let onSwipeRight: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> BridgeView {
+        let view = BridgeView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.onAttached = { [weak coordinator = context.coordinator] host in
+            coordinator?.attach(to: host)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: BridgeView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.updateEnabled(isEnabled)
+        if let host = uiView.superview {
+            context.coordinator.attach(to: host)
+        }
+    }
+
+    final class BridgeView: UIView {
+        var onAttached: ((UIView) -> Void)?
+        override func didMoveToSuperview() {
+            super.didMoveToSuperview()
+            if let superview { onAttached?(superview) }
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: HorizontalSwipeBridge
+        private weak var attachedHost: UIView?
+        private var leftSwipe: UISwipeGestureRecognizer?
+        private var rightSwipe: UISwipeGestureRecognizer?
+
+        init(_ parent: HorizontalSwipeBridge) {
+            self.parent = parent
+        }
+
+        func attach(to host: UIView) {
+            guard attachedHost !== host else { return }
+            if let leftSwipe { attachedHost?.removeGestureRecognizer(leftSwipe) }
+            if let rightSwipe { attachedHost?.removeGestureRecognizer(rightSwipe) }
+
+            let left = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
+            left.direction = .left
+            left.cancelsTouchesInView = false
+            left.delaysTouchesBegan = false
+            left.delegate = self
+
+            let right = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
+            right.direction = .right
+            right.cancelsTouchesInView = false
+            right.delaysTouchesBegan = false
+            right.delegate = self
+
+            host.addGestureRecognizer(left)
+            host.addGestureRecognizer(right)
+            attachedHost = host
+            leftSwipe = left
+            rightSwipe = right
+            updateEnabled(parent.isEnabled)
+        }
+
+        func updateEnabled(_ enabled: Bool) {
+            leftSwipe?.isEnabled = enabled
+            rightSwipe?.isEnabled = enabled
+        }
+
+        @objc func handleSwipe(_ gesture: UISwipeGestureRecognizer) {
+            guard gesture.state == .ended else { return }
+            if gesture.direction == .left {
+                parent.onSwipeLeft()
+            } else if gesture.direction == .right {
+                parent.onSwipeRight()
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
     }
 }
