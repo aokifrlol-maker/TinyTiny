@@ -36,9 +36,6 @@ final class LicenseManager: ObservableObject {
     @Published var status: LicenseStatus {
         didSet { saveKeychainCodable(status, account: Self.statusKeychainAccount) }
     }
-    @Published var serverURL: String {
-        didSet { UserDefaults.standard.set(serverURL, forKey: Self.serverURLDefaultsKey) }
-    }
     @Published var isChecking: Bool = false
     @Published var errorMessage: String?
 
@@ -64,13 +61,10 @@ final class LicenseManager: ObservableObject {
             Self.saveRawKeychain(fresh, account: Self.deviceIdKeychainAccount)
             self.deviceId = fresh
         }
-
-        let storedURL = UserDefaults.standard.string(forKey: Self.serverURLDefaultsKey) ?? ""
-        self.serverURL = storedURL.isEmpty ? Self.defaultServerURL : storedURL
     }
 
     var normalizedBaseURL: String {
-        serverURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        Self.defaultServerURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     var isValidAccess: Bool {
@@ -369,7 +363,6 @@ struct LicenseGateView: View {
     var onActivated: () -> Void
 
     @State private var keyInput = ""
-    @State private var showServerConfig = false
 
     var body: some View {
         ZStack {
@@ -458,24 +451,6 @@ struct LicenseGateView: View {
                 .padding(.horizontal, 20)
 
                 Spacer()
-
-                Button {
-                    withAnimation { showServerConfig.toggle() }
-                } label: {
-                    Text(showServerConfig ? "Hide Server Endpoint" : "Server Settings")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.45))
-                }
-
-                if showServerConfig {
-                    TextField("Worker URL (https://...workers.dev)", text: $license.serverURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 12, design: .monospaced))
-                        .padding(10)
-                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
-                        .padding(.horizontal, 28)
-                }
             }
             .foregroundStyle(.white)
             .padding(.bottom, 24)
