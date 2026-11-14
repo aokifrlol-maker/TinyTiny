@@ -252,6 +252,7 @@ struct GoonedBrowseOverlay: View {
                         case "igsaved": onSelectFeed(.igSaved)
                         case "iguser": onSelectFeed(.igUser(recent.name))
                         case "rule34": onSelectFeed(.rule34(recent.name == "all" ? "" : recent.name))
+                        case "offoryou": onSelectFeed(.ofForYou)
                         case "oftrending": onSelectFeed(.ofTrending)
                         case "oflatest": onSelectFeed(.ofLatest)
                         case "ofdms": onSelectFeed(.ofDMs)
@@ -338,6 +339,7 @@ struct GoonedBrowseOverlay: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
+                        ofFeedChip(label: "✨ For You", source: .ofForYou)
                         ofFeedChip(label: "🔥 Trending", source: .ofTrending)
                         ofFeedChip(label: "⚡ Latest Videos", source: .ofLatest)
                         ofFeedChip(label: "💬 Unlocked DMs", source: .ofDMs)
@@ -1178,6 +1180,9 @@ struct GoonedLikesView: View {
     @State private var mode: String = "liked" // "liked" or "offline"
     @State private var filter: String = "all" // "all", "videos", "images"
     @State private var shareTarget: Gif? = nil
+    @State private var isSelecting: Bool = false
+    @State private var selectedIDs: Set<String> = []
+    @State private var showCollectionShare: Bool = false
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
     private var sourceItems: [Gif] {
@@ -1195,6 +1200,10 @@ struct GoonedLikesView: View {
         }
     }
 
+    private var selectedPosts: [Gif] {
+        filteredItems.filter { selectedIDs.contains($0.id) }
+    }
+
     var body: some View {
         ZStack {
             Theme.crimsonBg.ignoresSafeArea()
@@ -1204,7 +1213,11 @@ struct GoonedLikesView: View {
                 HStack(spacing: 8) {
                     HStack(spacing: 4) {
                         Button {
-                            withAnimation { mode = "liked" }
+                            withAnimation {
+                                mode = "liked"
+                                isSelecting = false
+                                selectedIDs.removeAll()
+                            }
                         } label: {
                             HStack(spacing: 5) {
                                 Image(systemName: "heart.fill")
@@ -1219,7 +1232,11 @@ struct GoonedLikesView: View {
                         }
 
                         Button {
-                            withAnimation { mode = "offline" }
+                            withAnimation {
+                                mode = "offline"
+                                isSelecting = false
+                                selectedIDs.removeAll()
+                            }
                         } label: {
                             HStack(spacing: 5) {
                                 Image(systemName: "arrow.down.circle.fill")
@@ -1235,6 +1252,24 @@ struct GoonedLikesView: View {
                     }
 
                     Spacer()
+
+                    if !filteredItems.isEmpty {
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                isSelecting.toggle()
+                                if !isSelecting { selectedIDs.removeAll() }
+                            }
+                        } label: {
+                            Text(isSelecting ? "Done" : "Select")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .liquidGlassCapsule(active: isSelecting)
+                        }
+                        .buttonStyle(ScalePressButtonStyle())
+                    }
 
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
@@ -1268,7 +1303,23 @@ struct GoonedLikesView: View {
 
                         Spacer()
 
-                        if mode == "offline", let firstOffline = filteredItems.first {
+                        if isSelecting {
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if selectedIDs.count == filteredItems.count {
+                                    selectedIDs.removeAll()
+                                } else {
+                                    selectedIDs = Set(filteredItems.map(\.id))
+                                }
+                            } label: {
+                                Text(selectedIDs.count == filteredItems.count ? "Clear All" : "Select All")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 6)
+                                    .liquidGlassCapsule(tinted: true)
+                            }
+                        } else if mode == "offline", let firstOffline = filteredItems.first {
                             Button {
                                 onPlayOfflinePost(firstOffline)
                             } label: {
@@ -1331,14 +1382,34 @@ struct GoonedLikesView: View {
                     ScrollView(.vertical, showsIndicators: false) {
                         LazyVGrid(columns: columns, spacing: 2) {
                             ForEach(filteredItems) { post in
+                                let isChosen = selectedIDs.contains(post.id)
                                 Button {
-                                    if mode == "offline" {
+                                    if isSelecting {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        if isChosen {
+                                            selectedIDs.remove(post.id)
+                                        } else {
+                                            selectedIDs.insert(post.id)
+                                        }
+                                    } else if mode == "offline" {
                                         onPlayOfflinePost(post)
                                     } else {
                                         onPlayLikedPost(post)
                                     }
                                 } label: {
-                                    GridThumb(gif: post, isOfflineBadge: offline.isDownloaded(post))
+                                    GridThumb(gif: post, isOfflineBadge: !isSelecting && offline.isDownloaded(post))
+                                        .overlay {
+                                            if isSelecting {
+                                                ZStack(alignment: .bottomTrailing) {
+                                                    Color.black.opacity(isChosen ? 0.28 : 0.05)
+                                                    Image(systemName: isChosen ? "checkmark.circle.fill" : "circle")
+                                                        .font(.system(size: 22, weight: .bold))
+                                                        .foregroundStyle(isChosen ? Theme.accentBright : .white.opacity(0.85))
+                                                        .shadow(color: .black.opacity(0.7), radius: 3)
+                                                        .padding(7)
+                                                }
+                                            }
+                                        }
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
@@ -1376,13 +1447,52 @@ struct GoonedLikesView: View {
                             }
                         }
                         .padding(.top, 12)
-                        .padding(.bottom, 92)
+                        .padding(.bottom, isSelecting ? 150 : 92)
                     }
                 }
+            }
+
+            if isSelecting {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 12) {
+                        Text("\(selectedIDs.count) selected")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Button {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            showCollectionShare = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                Text("Share (\(selectedIDs.count))")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .liquidGlassCapsule(active: !selectedIDs.isEmpty)
+                        }
+                        .disabled(selectedIDs.isEmpty)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .liquidGlassCard(cornerRadius: 22)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 86)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .sheet(item: $shareTarget) { post in
             ShareItemSheet(gif: post)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showCollectionShare) {
+            ShareCollectionSheet(posts: selectedPosts)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -2465,6 +2575,30 @@ struct AlgorithmEditorSheet: View {
 
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 18) {
+                        // 0. Orthogonal Archetype Guardrails (Separate Femboy/Trans/Futa from Gay/Yaoi)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("SMART ARCHETYPE GUARDRAILS")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(1.2)
+                                .foregroundStyle(.white.opacity(0.58))
+
+                            Text("Independently boost or hide categories. Hiding Gay / Yaoi will never hide Femboy, Trans Women, or Futanari.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white.opacity(0.65))
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    guardrailToggleChip(label: "Hide Gay (M/M)", tag: "gay", isBlock: true)
+                                    guardrailToggleChip(label: "Hide Yaoi / Bara", tag: "yaoi", isBlock: true)
+                                    guardrailToggleChip(label: "Boost Femboy", tag: "femboy", isBlock: false)
+                                    guardrailToggleChip(label: "Boost Trans Women", tag: "trans_woman", isBlock: false)
+                                    guardrailToggleChip(label: "Boost Futanari", tag: "futanari", isBlock: false)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
                         // 1. Pinned #Tags (Heavy For You Boost)
                         VStack(alignment: .leading, spacing: 12) {
                             Text("PINNED #TAGS (BOOSTED)")
@@ -2786,6 +2920,45 @@ struct AlgorithmEditorSheet: View {
                 await MainActor.run { suggestions = fetched }
             }
         }
+    }
+
+    private func guardrailToggleChip(label: String, tag: String, isBlock: Bool) -> some View {
+        let lower = tag.lowercased()
+        let isActive: Bool = isBlock
+            ? (store.data.algorithm.blockedTags.contains { $0.lowercased() == lower } || taste.state.suppressedTags.contains(lower))
+            : store.data.algorithm.boostedTags.contains { $0.lowercased() == lower }
+
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if isBlock {
+                if isActive {
+                    store.removeBlockedTag(lower)
+                    taste.unblockTag(lower)
+                } else {
+                    store.addBlockedTags(lower)
+                    taste.blockDislikedTag(lower)
+                }
+            } else {
+                if isActive {
+                    store.removeBoostedTag(lower)
+                } else {
+                    store.addBoostedTags(lower)
+                    store.adjustLearnedTag(lower, delta: 4.0)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: isActive ? (isBlock ? "eye.slash.fill" : "checkmark") : (isBlock ? "hand.raised" : "plus"))
+                    .font(.system(size: 10.5, weight: .bold))
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .liquidGlassCapsule(tinted: !isActive, active: isActive)
+        }
+        .buttonStyle(ScalePressButtonStyle())
     }
 
     private func addPinnedTags() {

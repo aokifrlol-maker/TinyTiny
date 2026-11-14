@@ -83,6 +83,8 @@ enum MediaHeaders {
             h["Referer"] = "https://www.instagram.com/"
         } else if host.contains("eporner") {
             h["Referer"] = "https://www.eporner.com/"
+        } else if host.contains("xvideos") {
+            h["Referer"] = "https://www.xvideos.com/"
         } else if host.contains("pornhub") || host.contains("phncdn") {
             h["Referer"] = "https://www.pornhub.com/"
         } else if host.contains("xhamster") || host.contains("xhcdn") {
@@ -1160,7 +1162,7 @@ struct GoonedReelCell: View {
                     VStack(spacing: 6) {
                         Spacer()
 
-                        HStack {
+                        HStack(spacing: 8) {
                             Button {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
@@ -1179,6 +1181,25 @@ struct GoonedReelCell: View {
                                 .liquidGlassCapsule(tinted: tinted)
                             }
                             .buttonStyle(ScalePressButtonStyle())
+
+                            if isLandscape || gif.isLongVideoPost || ((player.detectedAspect ?? gif.knownAspect ?? 0) > 1.15) {
+                                Button {
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    toggleLongOrientation(currentlyLandscape: isLandscape)
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: isLandscape ? "iphone" : "iphone.landscape")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text(isLandscape ? "Portrait" : "Full Wide")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .liquidGlassCapsule(tinted: tinted, active: isLandscape)
+                                }
+                                .buttonStyle(ScalePressButtonStyle())
+                            }
 
                             Spacer()
 
@@ -1217,11 +1238,11 @@ struct GoonedReelCell: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, isLandscape ? 24 : 14)
 
                         scrubberBar(width: geo.size.width)
                     }
-                    .padding(.bottom, 16)
+                    .padding(.bottom, isLandscape ? 10 : 16)
                     .foregroundStyle(.white)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
@@ -1230,24 +1251,26 @@ struct GoonedReelCell: View {
 
                         HStack(alignment: .bottom) {
                             VStack(alignment: .leading, spacing: 8) {
-                                if gif.isLongVideoPost {
+                                if gif.isLongVideoPost || isLandscape || ((player.detectedAspect ?? gif.knownAspect ?? 0) > 1.15) {
                                     HStack(spacing: 8) {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "play.rectangle.fill")
-                                                .font(.system(size: 11, weight: .bold))
-                                                .foregroundStyle(Theme.accentBright)
-                                            Text(gif.longVideoSiteLabel ?? "LONG")
-                                                .font(.system(size: 11, weight: .black, design: .rounded))
-                                            let dur = gif.duration ?? (player.durationSeconds > 0 ? player.durationSeconds : nil)
-                                            if let dur, dur > 0 {
-                                                Text("· \(formatTime(dur))")
-                                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                                    .foregroundStyle(.white.opacity(0.75))
+                                        if gif.isLongVideoPost {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "play.rectangle.fill")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                    .foregroundStyle(Theme.accentBright)
+                                                Text(gif.longVideoSiteLabel ?? "LONG")
+                                                    .font(.system(size: 11, weight: .black, design: .rounded))
+                                                let dur = gif.duration ?? (player.durationSeconds > 0 ? player.durationSeconds : nil)
+                                                if let dur, dur > 0 {
+                                                    Text("· \(formatTime(dur))")
+                                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                        .foregroundStyle(.white.opacity(0.75))
+                                                }
                                             }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .liquidGlassCapsule(tinted: tinted)
                                         }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .liquidGlassCapsule(tinted: tinted)
 
                                         Button {
                                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -1261,7 +1284,7 @@ struct GoonedReelCell: View {
                                             }
                                             .padding(.horizontal, 10)
                                             .padding(.vertical, 6)
-                                            .liquidGlassCapsule(tinted: tinted)
+                                            .liquidGlassCapsule(tinted: tinted, active: isLandscape)
                                         }
                                         .buttonStyle(ScalePressButtonStyle())
                                     }
@@ -1281,6 +1304,12 @@ struct GoonedReelCell: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .onChange(of: isLandscape) { _, nowLandscape in
+                guard isActive else { return }
+                withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                    store.data.settings.controlsCollapsed = nowLandscape
+                }
+            }
         }
         .sheet(isPresented: $showMoreSheet) {
             PostMoreSheet(
@@ -1781,9 +1810,18 @@ struct GoonedReelCell: View {
     }
 
     private func toggleLongOrientation(currentlyLandscape: Bool) {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-        let mask: UIInterfaceOrientationMask = currentlyLandscape ? .portrait : .landscapeRight
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+        if currentlyLandscape {
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                store.data.settings.controlsCollapsed = false
+            }
+            OrientationDelegate.setOrientation(.allButUpsideDown, rotateTo: .portrait)
+        } else {
+            localFitOverride = true
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                store.data.settings.controlsCollapsed = true
+            }
+            OrientationDelegate.setOrientation(.allButUpsideDown, rotateTo: .landscapeRight)
+        }
     }
 
     private func zone(width: CGFloat, onDoubleTap: @escaping () -> Void) -> some View {

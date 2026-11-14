@@ -325,9 +325,17 @@ actor OnlyFansAPI {
             let cname = row.creatorName ?? fallbackCreatorName ?? "creator"
             let cachedCreator = creatorById[cid] ?? creatorByName[cname.lowercased()]
             let resolvedGender = cachedCreator?.gender?.lowercased()
-            if let g = resolvedGender, hiddenGenders.contains(g) { continue }
-
             let mergedTags = (row.tags ?? []) + (row.creatorTags ?? []) + (cachedCreator?.creatorTags ?? [])
+            let lowerTags = Set(mergedTags.map { $0.lowercased().replacingOccurrences(of: "#", with: "") })
+            let isFemboyOrTrans = !lowerTags.isDisjoint(with: SmartTasteEngine.femboyOrTransRescueTags)
+
+            if let g = resolvedGender, hiddenGenders.contains(g) {
+                if (g == "man" || g == "nonbinary") && isFemboyOrTrans {
+                    // Rescued: Femboy / Trans creator labeled as `man` in raw cum.st DB
+                } else {
+                    continue
+                }
+            }
             let text = (row.captionText?.isEmpty == false) ? row.captionText : row.title
             let candidates = videosOnly
                 ? row.attachments.filter { $0.kind.lowercased() == "video" }
@@ -402,6 +410,132 @@ actor OnlyFansAPI {
     }
 
     // MARK: - Public Discovery Feeds (Infinite Scroll)
+
+    /// Personalized OnlyFans "For You" Feed:
+    /// Blends (1) Similar-Creator Graph (`/onlyfans/user/{id}/similar`) from liked/followed OF creators,
+    /// (2) Active `creator_tag` & keyword searches for the user's top/pinned Smart Personalization tags,
+    /// and (3) Filtered Popular/Recent discovery.
+    func forYou(
+        after: String?,
+        seedCreatorIds: [String],
+        tasteTags: [String]
+    ) async -> GoonedFeedResponse {
+        let cur = decodeCursor(after)
+        let page = (cur?["page"] as? Int) ?? 0
+        let cleanTags = tasteTags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: "#", with: "") }
+            .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
+
+        var buckets: [[Gif]] = []
+
+        await withTaskGroup(of: [Gif].self) { group in
+            // 1. Taste-Tag & Creator-Tag Queries (e.g., femboy, goth, latina, ebony, milf, cosplay, trans)
+            if !cleanTags.isEmpty {
+                let tagPick1 = cleanTags[page % cleanTags.count]
+                let tagPick2 = cleanTags.count > 1 ? cleanTags[(page + 1) % cleanTags.count] : nil
+                for tag in [tagPick1, tagPick2].compactMap({ $0 }) {
+                    group.addTask {
+                        let isFemboyQuery = SmartTasteEngine.femboyOrTransRescueTags.contains(tag)
+                        var params: [String: String] = [
+                            "service": "onlyfans",
+                            "type": "videos",
+                            "q": tag,
+                            "sort": page % 2 == 0 ? "popular" : "recent",
+                            "o": "\((page / max(1, cleanTags.count)) * 24)",
+                            "n": "24"
+                        ]
+                        if !isFemboyQuery {
+                            params = self.withHiddenGenders(params)
+                        }
+                        if let resp: OFPostsResponse = try? await self.get("/posts", params), !resp.posts.isEmpty {
+                            return await self.mapPosts(resp.posts, videosOnly: true)
+                        }
+                        var tagParams: [String: String] = [
+                            "service": "onlyfans",
+                            "type": "videos",
+                            "creator_tag": tag,
+                            "sort": "recent",
+                            "o": "\((page / max(1, cleanTags.count)) * 24)",
+                            "n": "24"
+                        ]
+                        if !isFemboyQuery {
+                            tagParams = self.withHiddenGenders(tagParams)
+                        }
+                        if let resp2: OFPostsResponse = try? await self.get("/posts", tagParams) {
+                            return await self.mapPosts(resp2.posts, videosOnly: true)
+                        }
+                        return []
+                    }
+                }
+            }
+
+            // 2. Similar-Creators Graph (`SimClusters`) seeded from Liked & Followed OF Creators
+            if !seedCreatorIds.isEmpty {
+                let seedId = seedCreatorIds[page % seedCreatorIds.count]
+                group.addTask {
+                    if let sim: OFSimilarCreatorsResponse = try? await self.get("/onlyfans/user/\(seedId)/similar"),
+                       !sim.creators.isEmpty {
+                        await self.cacheCreators(sim.creators)
+                        let pick = sim.creators[(page / max(1, seedCreatorIds.count)) % sim.creators.count]
+                        if let resp: OFPostsResponse = try? await self.get("/onlyfans/user/\(pick.id)/posts", [
+                            "type": "videos",
+                            "sort": "popular",
+                            "o": "0",
+                            "n": "16"
+                        ]) {
+                            return await self.mapPosts(resp.posts, fallbackCreatorId: pick.id, fallbackCreatorName: pick.name, videosOnly: true)
+                        }
+                    }
+                    if let direct: OFPostsResponse = try? await self.get("/onlyfans/user/\(seedId)/posts", [
+                        "type": "videos",
+                        "sort": "recent",
+                        "o": "\((page / max(1, seedCreatorIds.count)) * 12)",
+                        "n": "12"
+                    ]) {
+                        return await self.mapPosts(direct.posts, fallbackCreatorId: seedId, fallbackCreatorName: nil, videosOnly: true)
+                    }
+                    return []
+                }
+            }
+
+            // 3. Popular + Fresh Discovery Backbone
+            group.addTask {
+                let popCursor = self.encodeCursor([
+                    "mode": "pop",
+                    "period": page % 3 == 2 ? "month" : "week",
+                    "daysAgo": 0,
+                    "o": (page * 24) % 240
+                ])
+                let pop = await self.trending(after: popCursor)
+                return pop.posts
+            }
+
+            group.addTask {
+                let recCursor = self.encodeCursor(["mode": "recent", "o": page * 24])
+                let rec = await self.latest(after: recCursor)
+                return Array(rec.posts.prefix(16))
+            }
+
+            for await batch in group where !batch.isEmpty {
+                buckets.append(batch)
+            }
+        }
+
+        var merged: [Gif] = []
+        var seen = Set<String>()
+        let maxLen = buckets.map(\.count).max() ?? 0
+        for i in 0..<maxLen {
+            for b in buckets where i < b.count {
+                let item = b[i]
+                if seen.insert(item.id).inserted {
+                    merged.append(item)
+                }
+            }
+        }
+
+        let nextCursor = encodeCursor(["page": page + 1])
+        return GoonedFeedResponse(posts: merged, after: nextCursor)
+    }
 
     /// Trending OnlyFans videos: fast cached leaderboards (week -> month -> stepping back -> recent 1.98M archive).
     func trending(after: String?) async -> GoonedFeedResponse {

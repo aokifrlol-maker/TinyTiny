@@ -2,13 +2,32 @@ import SwiftUI
 import AVFoundation
 
 final class OrientationDelegate: NSObject, UIApplicationDelegate {
-    static var orientationLock: UIInterfaceOrientationMask = .portrait
+    static var orientationLock: UIInterfaceOrientationMask = .allButUpsideDown
 
     func application(
         _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         Self.orientationLock
+    }
+
+    @MainActor
+    static func setOrientation(_ targetMask: UIInterfaceOrientationMask, rotateTo: UIInterfaceOrientationMask? = nil) {
+        orientationLock = targetMask
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        for window in scene.windows {
+            window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        if let rotateTo {
+            if #available(iOS 16.0, *) {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: rotateTo)) { _ in }
+            }
+            let rawOrientation: Int = (rotateTo == .portrait)
+                ? UIInterfaceOrientation.portrait.rawValue
+                : UIInterfaceOrientation.landscapeRight.rawValue
+            UIDevice.current.setValue(rawOrientation, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
     }
 }
 
@@ -101,8 +120,8 @@ enum HomeChannel: Hashable {
     case xForYou, xFollowing, xBookmarks
     case rule34
     case igReels, igFollowing, igSaved
-    case ofTrending, ofLatest, ofDMs
-    case longAll, longEporner, longPornhub, longXHamster, longSpankBang
+    case ofForYou, ofTrending, ofLatest, ofDMs
+    case longAll, longEporner, longXVideos, longPornhub, longXHamster, longSpankBang
     case custom
 }
 
@@ -118,11 +137,13 @@ struct GoonedMainShell: View {
     @StateObject private var igReelsModel = FeedModel(source: .igReels)
     @StateObject private var igFollowingModel = FeedModel(source: .igFollowing)
     @StateObject private var igSavedModel = FeedModel(source: .igSaved)
+    @StateObject private var ofForYouModel = FeedModel(source: .ofForYou)
     @StateObject private var ofTrendingModel = FeedModel(source: .ofTrending)
     @StateObject private var ofLatestModel = FeedModel(source: .ofLatest)
     @StateObject private var ofDMsModel = FeedModel(source: .ofDMs)
     @StateObject private var longAllModel = FeedModel(source: .longVideos(.all))
     @StateObject private var longEpornerModel = FeedModel(source: .longVideos(.eporner))
+    @StateObject private var longXVideosModel = FeedModel(source: .longVideos(.xvideos))
     @StateObject private var longPornhubModel = FeedModel(source: .longVideos(.pornhub))
     @StateObject private var longXHamsterModel = FeedModel(source: .longVideos(.xhamster))
     @StateObject private var longSpankBangModel = FeedModel(source: .longVideos(.spankbang))
@@ -139,7 +160,7 @@ struct GoonedMainShell: View {
     @State private var activeChannel: HomeChannel = .forYou
     @State private var lastXChannel: HomeChannel = .xForYou
     @State private var lastIGChannel: HomeChannel = .igReels
-    @State private var lastOFChannel: HomeChannel = .ofTrending
+    @State private var lastOFChannel: HomeChannel = .ofForYou
     @State private var lastLongChannel: HomeChannel = .longAll
     @State private var slotPostIDs: [HomeChannel: String] = [:]
     @State private var customBackStack: [CustomBackHistoryItem] = []
@@ -162,11 +183,11 @@ struct GoonedMainShell: View {
     }
 
     private var isOFChannel: Bool {
-        activeChannel == .ofTrending || activeChannel == .ofLatest || activeChannel == .ofDMs
+        activeChannel == .ofForYou || activeChannel == .ofTrending || activeChannel == .ofLatest || activeChannel == .ofDMs
     }
 
     private var isLongChannel: Bool {
-        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang
+        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longXVideos || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang
     }
 
     private var activeModel: FeedModel {
@@ -180,11 +201,13 @@ struct GoonedMainShell: View {
         case .igReels: return igReelsModel
         case .igFollowing: return igFollowingModel
         case .igSaved: return igSavedModel
+        case .ofForYou: return ofForYouModel
         case .ofTrending: return ofTrendingModel
         case .ofLatest: return ofLatestModel
         case .ofDMs: return ofDMsModel
         case .longAll: return longAllModel
         case .longEporner: return longEpornerModel
+        case .longXVideos: return longXVideosModel
         case .longPornhub: return longPornhubModel
         case .longXHamster: return longXHamsterModel
         case .longSpankBang: return longSpankBangModel
@@ -416,8 +439,8 @@ struct GoonedMainShell: View {
             if r34Model.items.isEmpty {
                 Task { await r34Model.loadMore() }
             }
-            if ofTrendingModel.items.isEmpty {
-                Task { await ofTrendingModel.loadMore() }
+            if ofForYouModel.items.isEmpty {
+                Task { await ofForYouModel.loadMore() }
             }
             if store.data.xSession.isConnected {
                 Task { @MainActor in
@@ -464,6 +487,13 @@ struct GoonedMainShell: View {
                 shareService.pendingReceivedPost = nil
             }
         }
+        .onChange(of: shareService.pendingReceivedPosts) { _, posts in
+            if let posts, !posts.isEmpty {
+                openSharedCollection(posts, title: shareService.pendingReceivedTitle ?? "Shared Collection")
+                shareService.pendingReceivedPosts = nil
+                shareService.pendingReceivedTitle = nil
+            }
+        }
         .onChange(of: activeChannel) { _, _ in syncOrientationLock() }
         .onChange(of: activeTab) { _, _ in syncOrientationLock() }
         .onChange(of: customModel.source) { _, _ in syncOrientationLock() }
@@ -479,13 +509,24 @@ struct GoonedMainShell: View {
         }
     }
 
+    private func openSharedCollection(_ posts: [Gif], title: String) {
+        pushCustomBackHistory(returnTab: activeTab)
+        customModel.switchSource(.list(title: title), initialItems: posts)
+        slotPostIDs[.custom] = posts.first?.id
+        activeChannel = .custom
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+            activeTab = .home
+        }
+    }
+
     private func syncOrientationLock() {
-        let allowLandscape = (activeTab == .home && activeModel.source.isLongVideoFeed)
+        let allowLandscape = (activeTab == .home)
         let target: UIInterfaceOrientationMask = allowLandscape ? .allButUpsideDown : .portrait
         guard OrientationDelegate.orientationLock != target else { return }
-        OrientationDelegate.orientationLock = target
-        if !allowLandscape, let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        if allowLandscape {
+            OrientationDelegate.setOrientation(.allButUpsideDown)
+        } else {
+            OrientationDelegate.setOrientation(.portrait, rotateTo: .portrait)
         }
     }
 
@@ -597,6 +638,14 @@ struct GoonedMainShell: View {
                 slotPostIDs[.igSaved] = nil
                 Task { await igSavedModel.refresh(rotateCursor: true) }
             }
+        case .ofForYou:
+            customBackStack.removeAll()
+            activeChannel = .ofForYou
+            lastOFChannel = .ofForYou
+            if forceReload {
+                slotPostIDs[.ofForYou] = nil
+                Task { await ofForYouModel.refresh(rotateCursor: true) }
+            }
         case .ofTrending:
             customBackStack.removeAll()
             activeChannel = .ofTrending
@@ -628,6 +677,7 @@ struct GoonedMainShell: View {
             switch site {
             case .all: mapped = .longAll; model = longAllModel
             case .eporner: mapped = .longEporner; model = longEpornerModel
+            case .xvideos: mapped = .longXVideos; model = longXVideosModel
             case .pornhub: mapped = .longPornhub; model = longPornhubModel
             case .xhamster: mapped = .longXHamster; model = longXHamsterModel
             case .spankbang: mapped = .longSpankBang; model = longSpankBangModel
@@ -681,13 +731,13 @@ struct GoonedMainShell: View {
         case .xForYou, .xFollowing, .xBookmarks: return 2
         case .rule34: return 3
         case .igReels, .igFollowing, .igSaved: return 4
-        case .ofTrending, .ofLatest, .ofDMs: return 5
-        case .longAll, .longEporner, .longPornhub, .longXHamster, .longSpankBang: return 6
+        case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return 5
+        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return 6
         }
     }
 
     private func handleHorizontalFeedSwipe(dx: CGFloat) {
-        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofTrending, .longVideos(.all)]
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofForYou, .longVideos(.all)]
         let cur = homeChannelIndex
         // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF -> Long Videos
         // Swipe right (dx > 0) moves backward
@@ -763,6 +813,7 @@ struct GoonedMainShell: View {
                 ]) { selectIGFeedOrLogin($0) }
             } else if isOFChannel {
                 subChannelBar([
+                    (.ofForYou, "For You", .ofForYou),
                     (.ofTrending, "Trending", .ofTrending),
                     (.ofLatest, "Latest", .ofLatest),
                     (.ofDMs, "DMs", .ofDMs)
@@ -771,6 +822,7 @@ struct GoonedMainShell: View {
                 subChannelBar([
                     (.longVideos(.all), "All", .longAll),
                     (.longVideos(.eporner), "Eporner", .longEporner),
+                    (.longVideos(.xvideos), "XVideos", .longXVideos),
                     (.longVideos(.pornhub), "Pornhub", .longPornhub),
                     (.longVideos(.xhamster), "xHamster", .longXHamster),
                     (.longVideos(.spankbang), "SpankBang", .longSpankBang)
@@ -836,7 +888,13 @@ struct GoonedMainShell: View {
                             if isOFChannel {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
-                                let target: FeedSource = lastOFChannel == .ofLatest ? .ofLatest : (lastOFChannel == .ofDMs ? .ofDMs : .ofTrending)
+                                let target: FeedSource
+                                switch lastOFChannel {
+                                case .ofTrending: target = .ofTrending
+                                case .ofLatest: target = .ofLatest
+                                case .ofDMs: target = .ofDMs
+                                default: target = .ofForYou
+                                }
                                 selectFeed(target)
                             }
                         } label: {
@@ -850,6 +908,7 @@ struct GoonedMainShell: View {
                                 let targetSite: LongVideoSite
                                 switch lastLongChannel {
                                 case .longEporner: targetSite = .eporner
+                                case .longXVideos: targetSite = .xvideos
                                 case .longPornhub: targetSite = .pornhub
                                 case .longXHamster: targetSite = .xhamster
                                 case .longSpankBang: targetSite = .spankbang

@@ -7,9 +7,10 @@ import UniformTypeIdentifiers
 
 struct ShareDropPayload: Codable {
     var version: Int = 1
-    var kind: String // "post" | "file" | "encrypted_blob"
+    var kind: String // "post" | "collection" | "file" | "encrypted_blob"
     var title: String
     var post: Gif?
+    var posts: [Gif]?
     var fileName: String?
     var fileExtension: String?
     var encryptedBlobUrl: String?
@@ -21,6 +22,7 @@ final class ShareService: ObservableObject {
     static let shared = ShareService()
 
     @Published var pendingReceivedPost: Gif?
+    @Published var pendingReceivedPosts: [Gif]?
     @Published var pendingReceivedMediaURL: URL?
     @Published var pendingReceivedTitle: String?
     @Published var showReceiveSheet: Bool = false
@@ -35,15 +37,35 @@ final class ShareService: ObservableObject {
 
     private init() {}
 
-    /// Creates an AES-256-GCM encrypted drop (`tinytiny://drop/<code>#k=<key>` + HTTPS universal link).
+    /// Creates an AES-256-GCM encrypted drop (`https://.../s/<id>#k=<key>` + `TTDROP:` code).
     /// Zero plaintext leaves the device: the Worker / KV only stores encrypted ciphertext.
     func createEncryptedShareLink(for post: Gif) async -> (link: String, code: String)? {
         let payload = ShareDropPayload(
             kind: "post",
             title: post.title ?? post.author ?? "Shared Video",
             post: post,
+            posts: nil,
             fileName: "\(post.id).mp4",
             fileExtension: post.isImage ? "jpg" : "mp4"
+        )
+        return await sealAndPublishPayload(payload)
+    }
+
+    /// Creates an AES-256-GCM encrypted multi-video collection share URL (`https://.../s/<id>#k=<key>`).
+    /// Recipients can watch all shared videos in any browser or open the full collection inside TinyTiny.
+    func createEncryptedCollectionShareLink(for posts: [Gif], title: String? = nil) async -> (link: String, code: String)? {
+        guard !posts.isEmpty else { return nil }
+        if posts.count == 1, let single = posts.first {
+            return await createEncryptedShareLink(for: single)
+        }
+        let cleanTitle = (title?.isEmpty == false) ? title! : "Shared Collection (\(posts.count) Videos)"
+        let payload = ShareDropPayload(
+            kind: "collection",
+            title: cleanTitle,
+            post: nil,
+            posts: posts,
+            fileName: nil,
+            fileExtension: nil
         )
         return await sealAndPublishPayload(payload)
     }
@@ -129,7 +151,7 @@ final class ShareService: ObservableObject {
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let shareId = json["id"] as? String {
                 let code = "TTDROP:\(shareId).\(encodedKey)"
-                let link = "tinytiny://drop/\(shareId)#k=\(encodedKey)"
+                let link = "\(base)/s/\(shareId)#k=\(encodedKey)"
                 return (link, code)
             }
         }
@@ -213,8 +235,17 @@ final class ShareService: ObservableObject {
     }
 
     private func openDecryptedPayload(_ payload: ShareDropPayload, key: SymmetricKey) async -> String? {
+        if let posts = payload.posts, !posts.isEmpty {
+            pendingReceivedPosts = posts
+            pendingReceivedPost = nil
+            pendingReceivedTitle = payload.title
+            pendingReceivedMediaURL = nil
+            return nil
+        }
+
         if let post = payload.post {
             pendingReceivedPost = post
+            pendingReceivedPosts = nil
             pendingReceivedTitle = payload.title
             pendingReceivedMediaURL = nil
             return nil
@@ -501,6 +532,8 @@ struct ReceiveDropSheet: View {
                                 } else if let post = ShareService.shared.pendingReceivedPost {
                                     onOpenPost(post)
                                     dismiss()
+                                } else if ShareService.shared.pendingReceivedPosts != nil {
+                                    dismiss()
                                 }
                             }
                         } label: {
@@ -550,6 +583,147 @@ struct ReceiveDropSheet: View {
                 }
             }
         }
+    }
+}
+
+struct ShareCollectionSheet: View {
+    let posts: [Gif]
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var collectionTitle: String = ""
+    @State private var generatedLink: String?
+    @State private var generatedCode: String?
+    @State private var isCreating = false
+    @State private var statusNote: String?
+    @State private var showActivitySheet = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Theme.modalGradient.ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Share \(posts.count) Video\(posts.count == 1 ? "" : "s")")
+                                .font(.system(size: 20, weight: .bold))
+                            Text("Anyone with this link can watch in browser or TinyTiny")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 34, height: 34)
+                                .liquidGlassCircle()
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Collection Title (Optional)")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.75))
+                        TextField("e.g. Weekend Stash (\(posts.count) clips)", text: $collectionTitle)
+                            .font(.system(size: 14))
+                            .padding(11)
+                            .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+
+                        if let statusNote {
+                            Text(statusNote)
+                                .font(.caption.bold())
+                                .foregroundStyle(Theme.accentBright)
+                        }
+
+                        if let link = generatedLink {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Share URL (Web + TinyTiny)")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white.opacity(0.65))
+                                HStack {
+                                    Text(link)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("Copy URL") {
+                                        UIPasteboard.general.string = link
+                                        statusNote = "Copied share URL!"
+                                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    }
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .liquidGlassCapsule(active: true)
+                                }
+                                .padding(10)
+                                .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await generateLink() }
+                            } label: {
+                                Group {
+                                    if isCreating { ProgressView().tint(.white) }
+                                    else { Text(generatedLink == nil ? "Create Share URL" : "Regenerate Link") }
+                                }
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 11)
+                                .liquidGlassCapsule(active: true)
+                            }
+                            .disabled(isCreating || posts.isEmpty)
+
+                            if generatedLink != nil {
+                                Button {
+                                    showActivitySheet = true
+                                } label: {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 15, weight: .bold))
+                                        .frame(width: 44, height: 42)
+                                        .liquidGlassCircle()
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .liquidGlassCard(cornerRadius: 18)
+
+                    Spacer()
+                }
+                .padding(18)
+                .foregroundStyle(.white)
+            }
+            .task {
+                if generatedLink == nil && !posts.isEmpty {
+                    await generateLink()
+                }
+            }
+            .sheet(isPresented: $showActivitySheet) {
+                if let link = generatedLink, let u = URL(string: link) {
+                    ActivityShareSheet(items: [u])
+                } else if let link = generatedLink {
+                    ActivityShareSheet(items: [link])
+                }
+            }
+        }
+    }
+
+    private func generateLink() async {
+        isCreating = true
+        statusNote = nil
+        let cleanTitle = collectionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let res = await ShareService.shared.createEncryptedCollectionShareLink(
+            for: posts,
+            title: cleanTitle.isEmpty ? nil : cleanTitle
+        ) {
+            generatedLink = res.link
+            generatedCode = res.code
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } else {
+            statusNote = "Could not create share URL. Check connection."
+        }
+        isCreating = false
     }
 }
 

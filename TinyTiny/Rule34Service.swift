@@ -214,32 +214,73 @@ actor Rule34API {
     ) async -> GoonedFeedResponse {
         let page = Int(after ?? "0") ?? 0
         let tags = Self.parseTags(tag ?? "")
-        let blocked = await MainActor.run {
-            Array(Set(UserStore.shared.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags))
+        let (blocked, tasteTags) = await MainActor.run { () -> ([String], [String]) in
+            let algo = UserStore.shared.data.algorithm
+            let engine = SmartTasteEngine.shared
+            var combinedBlocked = Set(algo.blockedTags.map { $0.lowercased() }).union(engine.state.suppressedTags)
+            let pinnedLower = Set(algo.pinnedTags.map { $0.lowercased() })
+            if (combinedBlocked.contains("gay") || combinedBlocked.contains("men") || combinedBlocked.contains("yaoi"))
+                && !pinnedLower.contains("gay") && !pinnedLower.contains("yaoi") {
+                combinedBlocked.formUnion(["gay", "yaoi", "bara", "male_only", "males_only"])
+            }
+            let activeTaste = algo.enabled ? engine.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6) : []
+            return (Array(combinedBlocked), activeTaste)
         }
         let cleanTagString = tags.joined(separator: " ")
 
         var combined: [Gif] = []
         var seen = Set<String>()
 
-        // 1. Direct api.rule34.xxx JSON API
+        // 1. Direct api.rule34.xxx JSON API (+ Smart Personalization taste query when browsing default feed)
         if credentials.isConnected {
-            let directPosts = await fetchDirectRule34XXX(
-                tag: cleanTagString,
-                blockedTags: blocked,
-                sort: sort,
-                page: page,
-                credentials: credentials
-            )
-            for p in directPosts where seen.insert(p.id).inserted {
-                combined.append(p)
+            let activeTasteTag: String? = {
+                guard cleanTagString.isEmpty, !tasteTags.isEmpty else { return nil }
+                return tasteTags[page % tasteTags.count].replacingOccurrences(of: " ", with: "_")
+            }()
+
+            if let tTag = activeTasteTag {
+                async let tasteFetch = fetchDirectRule34XXX(
+                    tag: tTag,
+                    blockedTags: blocked,
+                    sort: sort,
+                    page: page,
+                    credentials: credentials
+                )
+                async let mainFetch = fetchDirectRule34XXX(
+                    tag: cleanTagString,
+                    blockedTags: blocked,
+                    sort: sort,
+                    page: page,
+                    credentials: credentials
+                )
+                let (tastePosts, directPosts) = await (tasteFetch, mainFetch)
+                let maxLen = max(tastePosts.count, directPosts.count)
+                for idx in 0..<maxLen {
+                    if idx < tastePosts.count, seen.insert(tastePosts[idx].id).inserted {
+                        combined.append(tastePosts[idx])
+                    }
+                    if idx < directPosts.count, seen.insert(directPosts[idx].id).inserted {
+                        combined.append(directPosts[idx])
+                    }
+                }
+            } else {
+                let directPosts = await fetchDirectRule34XXX(
+                    tag: cleanTagString,
+                    blockedTags: blocked,
+                    sort: sort,
+                    page: page,
+                    credentials: credentials
+                )
+                for p in directPosts where seen.insert(p.id).inserted {
+                    combined.append(p)
+                }
             }
         }
 
         // 2. Supplement ONLY from other explicit Booru engines (NEVER Reddit!), and if multi-tag AND returned 0 on page 0, relax to primary tag on boorus
         if combined.count < 12 {
             let effectiveQuery = (combined.isEmpty && tags.count > 1) ? (tags.first ?? "") : cleanTagString
-            let booruPosts = await fetchZeroAuthBooru(tag: effectiveQuery, sort: sort, page: page)
+            let booruPosts = await fetchZeroAuthBooru(tag: effectiveQuery, blockedTags: blocked, sort: sort, page: page)
             for p in booruPosts where seen.insert(p.id).inserted {
                 combined.append(p)
             }
@@ -262,7 +303,7 @@ actor Rule34API {
         // Strictly explicit adult content only (-rating:safe -rating:questionable)
         tagParts.append("-rating:safe")
         tagParts.append("-rating:questionable")
-        for b in blockedTags.prefix(6) where !b.isEmpty && !tag.lowercased().contains(b.lowercased()) {
+        for b in blockedTags.prefix(8) where !b.isEmpty && !tag.lowercased().contains(b.lowercased()) {
             tagParts.append("-\(b.replacingOccurrences(of: " ", with: "_"))")
         }
         if sort == "top" || sort == "hot" {
@@ -294,10 +335,14 @@ actor Rule34API {
 
     // MARK: - Tier 2: Zero-Auth Explicit Booru JSON APIs (MP4 & High-Res Art, Parallel)
 
-    private func fetchZeroAuthBooru(tag: String, sort: String, page: Int) async -> [Gif] {
+    private func fetchZeroAuthBooru(tag: String, blockedTags: [String] = [], sort: String, page: Int) async -> [Gif] {
         let pageNum = page + 1
-        let yandeTags = tag.isEmpty ? "order:score rating:e" : "\(tag) rating:e"
-        let gelTags = tag.isEmpty ? "-rating:safe -rating:questionable" : "\(tag) -rating:safe -rating:questionable"
+        let negBlock = blockedTags.prefix(5)
+            .filter { !$0.isEmpty && !tag.lowercased().contains($0.lowercased()) }
+            .map { "-\($0.replacingOccurrences(of: " ", with: "_"))" }
+            .joined(separator: " ")
+        let yandeTags = (tag.isEmpty ? "order:score rating:e" : "\(tag) rating:e") + (negBlock.isEmpty ? "" : " \(negBlock)")
+        let gelTags = (tag.isEmpty ? "-rating:safe -rating:questionable" : "\(tag) -rating:safe -rating:questionable") + (negBlock.isEmpty ? "" : " \(negBlock)")
 
         async let yandeTask: [Gif] = {
             var comps = URLComponents(string: "https://yande.re/post.json")
@@ -398,8 +443,15 @@ actor Rule34API {
             let height = (item["height"] as? Int) ?? Int((item["height"] as? String) ?? "0")
             let owner = (item["owner"] as? String) ?? "rule34"
             let rawTags = (item["tags"] as? String) ?? ""
-            let topTags = rawTags
+            let splitTags = rawTags
                 .split(separator: " ")
+                .map { String($0).lowercased() }
+                .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
+            let postId = "\(sourcePrefix)_\(idVal)"
+            if !splitTags.isEmpty {
+                MediaMetaRegistry.register(postId: postId, categories: Array(splitTags.prefix(18)), author: owner)
+            }
+            let topTags = splitTags
                 .prefix(8)
                 .map { "#\($0)" }
                 .joined(separator: " ")
@@ -413,7 +465,7 @@ actor Rule34API {
 
             posts.append(
                 Gif(
-                    id: "\(sourcePrefix)_\(idVal)",
+                    id: postId,
                     title: topTags,
                     author: owner,
                     subreddit: "rule34.xxx",
@@ -467,12 +519,20 @@ actor Rule34API {
             let height = item["height"] as? Int
             let author = (item["author"] as? String) ?? "rule34"
             let rawTags = (item["tags"] as? String) ?? ""
-            let topTags = rawTags.split(separator: " ").prefix(8).map { "#\($0)" }.joined(separator: " ")
+            let splitTags = rawTags
+                .split(separator: " ")
+                .map { String($0).lowercased() }
+                .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
+            let postId = "\(sourcePrefix)_\(idVal)"
+            if !splitTags.isEmpty {
+                MediaMetaRegistry.register(postId: postId, categories: Array(splitTags.prefix(18)), author: author)
+            }
+            let topTags = splitTags.prefix(8).map { "#\($0)" }.joined(separator: " ")
 
             let preferredImage = isGif ? fileUrl : sampleUrl
             posts.append(
                 Gif(
-                    id: "\(sourcePrefix)_\(idVal)",
+                    id: postId,
                     title: topTags,
                     author: author,
                     subreddit: "rule34.xxx",

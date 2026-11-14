@@ -17,6 +17,7 @@ enum FeedSource: Hashable {
     case igSaved
     case igUser(String)
     case rule34(String) // "" for general Rule34.xxx feed, or tag name
+    case ofForYou
     case ofTrending
     case ofLatest
     case ofDMs
@@ -46,6 +47,7 @@ enum FeedSource: Hashable {
         case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
         case .rule34(let tag):
             return tag.isEmpty ? "Rule34.xxx" : "R34: \(tag)"
+        case .ofForYou: return "OF For You"
         case .ofTrending: return "OF Trending"
         case .ofLatest: return "OF Latest"
         case .ofDMs: return "OF DMs"
@@ -85,7 +87,7 @@ enum FeedSource: Hashable {
 
     var isOFFeed: Bool {
         switch self {
-        case .ofTrending, .ofLatest, .ofDMs, .ofCreator, .ofSearch:
+        case .ofForYou, .ofTrending, .ofLatest, .ofDMs, .ofCreator, .ofSearch:
             return true
         default:
             return false
@@ -124,6 +126,7 @@ enum FeedSource: Hashable {
         case .igSaved: return ("igsaved", "igsaved")
         case .igUser(let u): return ("iguser", u)
         case .rule34(let tag): return ("rule34", tag.isEmpty ? "all" : tag)
+        case .ofForYou: return ("offoryou", "offoryou")
         case .ofTrending: return ("oftrending", "oftrending")
         case .ofLatest: return ("oflatest", "oflatest")
         case .ofDMs: return ("ofdms", "ofdms")
@@ -419,7 +422,7 @@ final class FeedModel: ObservableObject {
 
                 let isDiscoverySource: Bool = {
                     switch source {
-                    case .forYou, .xForYou, .igReels, .category, .rule34, .ofTrending, .ofLatest, .ofDMs, .longVideos:
+                    case .forYou, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
                         return true
                     default:
                         return false
@@ -470,7 +473,7 @@ final class FeedModel: ObservableObject {
                 }
 
                 switch source {
-                case .forYou, .xForYou, .igReels, .category, .rule34, .ofTrending, .ofDMs:
+                case .forYou, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
                     batchUnseen = store.rankWithAlgorithm(batchUnseen)
                 default:
                     break
@@ -692,6 +695,27 @@ final class FeedModel: ObservableObject {
                 after: cursor,
                 credentials: store.data.r34Credentials
             )
+        case .ofForYou:
+            var seeds: [String] = []
+            for ofc in store.data.followedOFCreators {
+                if !ofc.name.isEmpty { seeds.append(ofc.name) }
+                if !ofc.id.isEmpty && !seeds.contains(ofc.id) { seeds.append(ofc.id) }
+            }
+            for s in SmartTasteEngine.shared.topOnlyFansSeedHandles(limit: 8) where !seeds.contains(s) {
+                seeds.append(s)
+            }
+            let tasteTags = store.data.algorithm.enabled
+                ? SmartTasteEngine.shared.activeQueryTags(
+                    pinned: store.data.algorithm.pinnedTags,
+                    blocked: store.data.algorithm.blockedTags,
+                    count: 6
+                )
+                : []
+            return await OnlyFansAPI.shared.forYou(
+                after: cursor,
+                seedCreatorIds: seeds,
+                tasteTags: tasteTags
+            )
         case .ofTrending:
             return await OnlyFansAPI.shared.trending(after: cursor)
         case .ofLatest:
@@ -739,13 +763,47 @@ final class FeedModel: ObservableObject {
         let curIG = self.igMixAfterCursor
         let curOF = self.ofMixOffset
 
+        let algo = store.data.algorithm
+        let activeTasteTags = algo.enabled
+            ? SmartTasteEngine.shared.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6)
+            : []
+        let topLearnedSubs = algo.enabled ? store.topAlgorithmSubreddits(limit: 4) : []
+        var ofSeeds: [String] = []
+        for ofc in store.data.followedOFCreators {
+            if !ofc.name.isEmpty { ofSeeds.append(ofc.name) }
+            if !ofc.id.isEmpty && !ofSeeds.contains(ofc.id) { ofSeeds.append(ofc.id) }
+        }
+        for s in SmartTasteEngine.shared.topOnlyFansSeedHandles(limit: 6) where !ofSeeds.contains(s) {
+            ofSeeds.append(s)
+        }
+
         async let redditTask: GoonedFeedResponse? = wantReddit
-            ? (try? await api.forYou(sort: sort.rawValue, after: cursor, limit: 24))
+            ? (try? await api.forYou(sort: sort.rawValue, after: cursor, limit: 20))
             : nil
+        async let redditTasteTask: [Gif] = {
+            guard wantReddit else { return [] }
+            var tasteBatch: [Gif] = []
+            if !activeTasteTags.isEmpty {
+                let tagPick = activeTasteTags[curOF % activeTasteTags.count]
+                    .replacingOccurrences(of: "_", with: "")
+                if let catResp = try? await api.category(tagPick, sort: self.sort.rawValue, after: nil, limit: 14) {
+                    tasteBatch.append(contentsOf: catResp.posts)
+                }
+            }
+            if !topLearnedSubs.isEmpty {
+                let subPick = topLearnedSubs[curOF % topLearnedSubs.count]
+                if let subResp = try? await api.subreddit(subPick, sort: self.sort.rawValue, after: nil, limit: 12) {
+                    tasteBatch.append(contentsOf: subResp.posts)
+                }
+            }
+            return tasteBatch
+        }()
         async let ofTask: GoonedFeedResponse? = wantOF
-            ? await (curOF % 2 == 0
-                ? OnlyFansAPI.shared.trending(after: curOF == 0 ? nil : "\(curOF * 24)")
-                : OnlyFansAPI.shared.latest(after: "\(curOF * 24)"))
+            ? await OnlyFansAPI.shared.forYou(
+                after: curOF == 0 ? nil : "\(curOF * 24)",
+                seedCreatorIds: ofSeeds,
+                tasteTags: activeTasteTags
+            )
             : nil
         async let xTask: GoonedFeedResponse? = wantX
             ? await XAPI.forYou(after: curX)
@@ -754,7 +812,7 @@ final class FeedModel: ObservableObject {
             ? await InstagramAPI.reels(after: curIG)
             : nil
 
-        let (rResp, ofResp, xResp, igResp) = await (redditTask, ofTask, xTask, igTask)
+        let (rResp, rTastePosts, ofResp, xResp, igResp) = await (redditTask, redditTasteTask, ofTask, xTask, igTask)
 
         if let xa = xResp?.after { self.xMixAfterCursor = xa }
         if let ia = igResp?.after { self.igMixAfterCursor = ia }
@@ -767,7 +825,7 @@ final class FeedModel: ObservableObject {
                 .sorted { store.scorePost($0) > store.scorePost($1) }
         }
 
-        let rPosts = prep(rResp?.posts)
+        let rPosts = prep((rTastePosts + (rResp?.posts ?? [])))
         let ofPosts = prep(ofResp?.posts)
         let xPosts = prep(xResp?.posts)
         let igPosts = prep(igResp?.posts)

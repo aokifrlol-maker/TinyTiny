@@ -18,19 +18,21 @@ struct InstagramAccountSession: Codable, Equatable {
 // MARK: - Recursive Instagram GraphQL / REST v1 Video & Reel Parser
 
 enum InstagramParser {
-    static func parseReels(from data: Data) -> [Gif] {
+    static func parseReels(from data: Data, routeKey: String = "") -> [Gif] {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return []
         }
         var results: [Gif] = []
         var seen = Set<String>()
-        walk(node: root, inheritedAuthor: nil, results: &results, seen: &seen)
+        walk(node: root, inheritedAuthor: nil, inheritedFollowed: nil, routeKey: routeKey, results: &results, seen: &seen)
         return results
     }
 
     private static func walk(
         node: Any,
         inheritedAuthor: String?,
+        inheritedFollowed: Bool?,
+        routeKey: String,
         results: inout [Gif],
         seen: inout Set<String>
     ) {
@@ -42,11 +44,22 @@ enum InstagramParser {
             if let paid = dict["is_paid_partnership"] as? Bool, paid {
                 return
             }
+            if routeKey == "ig_following" {
+                if dict["explore_item_info"] != nil || dict["suggested_users"] != nil || dict["bloks_netego"] != nil {
+                    return
+                }
+                if let inv = (dict["inventory_source"] as? String)?.lowercased(),
+                   inv.contains("recommend") || inv.contains("explore") || inv.contains("suggest") || inv.contains("unconnected") || inv.contains("isf_") || inv.contains("chaining") {
+                    return
+                }
+            }
 
-            let author = extractUsername(from: dict) ?? inheritedAuthor
+            let authorMeta = extractUserMeta(from: dict)
+            let author = authorMeta.username ?? inheritedAuthor
+            let isFollowed = authorMeta.isFollowed ?? inheritedFollowed
 
             var didExtractMediaWrapper = false
-            if let gif = extractGif(fromMediaDict: dict, fallbackAuthor: author) {
+            if let gif = extractGif(fromMediaDict: dict, fallbackAuthor: author, fallbackFollowed: isFollowed, routeKey: routeKey) {
                 didExtractMediaWrapper = (dict["media"] != nil)
                 if seen.insert(gif.canonicalDedupeKey).inserted {
                     results.append(gif)
@@ -55,29 +68,47 @@ enum InstagramParser {
 
             for (key, value) in dict {
                 if didExtractMediaWrapper && key == "media" { continue }
-                walk(node: value, inheritedAuthor: author, results: &results, seen: &seen)
+                if routeKey == "ig_following" && (key == "suggested_users" || key == "clips_netego" || key == "EndOfFeedDemarcator") {
+                    continue
+                }
+                walk(node: value, inheritedAuthor: author, inheritedFollowed: isFollowed, routeKey: routeKey, results: &results, seen: &seen)
             }
         } else if let arr = node as? [Any] {
             for item in arr {
-                walk(node: item, inheritedAuthor: inheritedAuthor, results: &results, seen: &seen)
+                walk(node: item, inheritedAuthor: inheritedAuthor, inheritedFollowed: inheritedFollowed, routeKey: routeKey, results: &results, seen: &seen)
             }
         }
     }
 
-    private static func extractUsername(from dict: [String: Any]) -> String? {
-        if let user = dict["user"] as? [String: Any],
-           let un = user["username"] as? String, !un.isEmpty {
-            return un
+    private static func extractUserMeta(from dict: [String: Any]) -> (username: String?, isFollowed: Bool?) {
+        for key in ["user", "owner"] {
+            if let u = dict[key] as? [String: Any] {
+                let un = (u["username"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                let fs = u["friendship_status"] as? [String: Any]
+                let followed = (fs?["following"] as? Bool)
+                    ?? (u["is_following"] as? Bool)
+                    ?? (u["followed_by_viewer"] as? Bool)
+                if un != nil || followed != nil {
+                    return (un, followed)
+                }
+            }
         }
-        if let owner = dict["owner"] as? [String: Any],
-           let un = owner["username"] as? String, !un.isEmpty {
-            return un
-        }
-        return nil
+        return (nil, nil)
     }
 
-    private static func extractGif(fromMediaDict dict: [String: Any], fallbackAuthor: String?) -> Gif? {
+    private static func extractGif(
+        fromMediaDict dict: [String: Any],
+        fallbackAuthor: String?,
+        fallbackFollowed: Bool?,
+        routeKey: String
+    ) -> Gif? {
         let media = (dict["media"] as? [String: Any]) ?? dict
+        if routeKey == "ig_following" {
+            if let inv = (media["inventory_source"] as? String)?.lowercased(),
+               inv.contains("recommend") || inv.contains("explore") || inv.contains("suggest") || inv.contains("unconnected") || inv.contains("isf_") || inv.contains("chaining") {
+                return nil
+            }
+        }
 
         var bestMp4: String?
         var sdMp4: String?
@@ -137,7 +168,21 @@ enum InstagramParser {
         // Normalize "34567890123_987654" -> "34567890123" so REST v1 and GraphQL yield the exact same ID
         let rawId = rawCandidate.split(separator: "_").first.map(String.init) ?? rawCandidate
 
-        let author = extractUsername(from: media) ?? fallbackAuthor ?? "instagram"
+        let mediaMeta = extractUserMeta(from: media)
+        let author = mediaMeta.username ?? fallbackAuthor ?? "instagram"
+        let isFollowed = mediaMeta.isFollowed ?? fallbackFollowed
+
+        // Strict IG Following check: if Instagram reports `following == false` on the author, drop it
+        if routeKey == "ig_following", isFollowed == false {
+            return nil
+        }
+
+        let postId = "ig_\(rawId)"
+        MediaMetaRegistry.register(
+            postId: postId,
+            creatorName: author,
+            followedByViewer: isFollowed
+        )
 
         var captionText = ""
         if let capDict = media["caption"] as? [String: Any],
@@ -465,7 +510,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             nextMaxIdByRoute[activeRouteKey] = maxId
         }
 
-        let reels = InstagramParser.parseReels(from: data)
+        let reels = InstagramParser.parseReels(from: data, routeKey: activeRouteKey)
             .filter {
                 AdultContentClassifier.isEligibleIGReel(
                     caption: $0.title ?? "",
@@ -476,10 +521,17 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard !reels.isEmpty else { return }
 
         let store = UserStore.shared
-        let fresh = reels.filter {
-            !store.isSeen($0)
-            && !store.isBlockedByAlgorithm($0)
-            && seenIds.insert($0.canonicalDedupeKey).inserted
+        let fresh = reels.filter { post in
+            guard !store.isSeen(post),
+                  !store.isBlockedByAlgorithm(post) else { return false }
+            if activeRouteKey == "ig_following" {
+                let author = post.author ?? ""
+                let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
+                if viewerFollows == false && !store.isFollowingIGUser(author) {
+                    return false
+                }
+            }
+            return seenIds.insert(post.canonicalDedupeKey).inserted
         }
         guard !fresh.isEmpty else { return }
 
@@ -755,15 +807,24 @@ enum InstagramAPI {
     static func following(after: String?) async -> GoonedFeedResponse {
         let url = URL(string: "https://www.instagram.com/?variant=following")!
         let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_following") ?? "") : ""
-        let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
+        let escapedMax = maxId.replacingOccurrences(of: "'", with: "")
+        let bodyExpr = escapedMax.isEmpty
+            ? "'variant=following&is_async_ads_in_headload_enabled=0'"
+            : "'variant=following&max_id=\(escapedMax)&reason=pagination'"
         let triggerFeedJS = """
         (async function() {
             try {
-                await fetch('https://www.instagram.com/api/v1/feed/timeline/\(query)', {
+                const csrfMatch = document.cookie.match(/csrftoken=([^;]+)/);
+                const csrf = csrfMatch ? csrfMatch[1] : '';
+                await fetch('https://www.instagram.com/api/v1/feed/timeline/', {
+                    method: 'POST',
                     headers: {
                         'X-IG-App-ID': '936619743392459',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
+                        'X-CSRFToken': csrf,
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: \(bodyExpr)
                 });
             } catch (e) {}
         })();

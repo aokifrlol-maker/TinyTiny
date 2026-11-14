@@ -29,6 +29,7 @@ enum XTweetParser {
             node: root,
             inheritedAuthor: nil,
             inheritedBio: nil,
+            inheritedFollowed: nil,
             routeKey: routeKey,
             results: &results,
             seen: &seen
@@ -61,6 +62,7 @@ enum XTweetParser {
         node: Any,
         inheritedAuthor: String?,
         inheritedBio: String?,
+        inheritedFollowed: Bool?,
         routeKey: String,
         results: inout [Gif],
         seen: inout Set<String>
@@ -70,20 +72,24 @@ enum XTweetParser {
             if dict["promotedMetadata"] != nil || dict["promoted_metadata"] != nil {
                 return
             }
-            if let entryId = dict["entryId"] as? String,
-               entryId.lowercased().contains("promoted") {
-                return
+            if let entryId = dict["entryId"] as? String {
+                let lowerEntry = entryId.lowercased()
+                if lowerEntry.contains("promoted") || lowerEntry.contains("who-to-follow") || lowerEntry.contains(" module") {
+                    return
+                }
             }
 
             let authorMeta = extractAuthorAndBio(from: dict)
             let currentAuthor = authorMeta.screenName ?? inheritedAuthor
             let currentBio = authorMeta.bio ?? inheritedBio
+            let currentFollowed = authorMeta.isFollowedByViewer ?? inheritedFollowed
 
             // Check if this dictionary is a Tweet object with `legacy` or direct `extended_entities`
             if let gif = extractGif(
                 fromTweetDict: dict,
                 fallbackAuthor: currentAuthor,
                 fallbackBio: currentBio,
+                fallbackFollowed: currentFollowed,
                 routeKey: routeKey
             ), seen.insert(gif.canonicalDedupeKey).inserted, seen.insert(gif.id).inserted {
                 results.append(gif)
@@ -92,10 +98,22 @@ enum XTweetParser {
             // Continue walking children
             for (key, value) in dict {
                 if key == "promotedMetadata" { continue }
+                // On `x_following`, do NOT walk into retweets or quote-tweets of unfollowed 3rd-party accounts
+                if routeKey == "x_following" && (
+                    key == "retweeted_status_result" ||
+                    key == "retweeted_status_results" ||
+                    key == "quoted_status_result" ||
+                    key == "quoted_status_results" ||
+                    key == "retweeted_status" ||
+                    key == "quoted_status"
+                ) {
+                    continue
+                }
                 walk(
                     node: value,
                     inheritedAuthor: currentAuthor,
                     inheritedBio: currentBio,
+                    inheritedFollowed: currentFollowed,
                     routeKey: routeKey,
                     results: &results,
                     seen: &seen
@@ -107,6 +125,7 @@ enum XTweetParser {
                     node: item,
                     inheritedAuthor: inheritedAuthor,
                     inheritedBio: inheritedBio,
+                    inheritedFollowed: inheritedFollowed,
                     routeKey: routeKey,
                     results: &results,
                     seen: &seen
@@ -115,42 +134,49 @@ enum XTweetParser {
         }
     }
 
-    private static func extractAuthorAndBio(from dict: [String: Any]) -> (screenName: String?, bio: String?) {
-        // GraphQL tweet -> core -> user_results -> result -> (core | legacy) -> (screen_name, description)
+    private static func extractAuthorAndBio(from dict: [String: Any]) -> (screenName: String?, bio: String?, isFollowedByViewer: Bool?) {
+        // GraphQL tweet -> core -> user_results -> result -> (core | legacy) -> (screen_name, description, following)
         if let core = dict["core"] as? [String: Any],
            let userResults = core["user_results"] as? [String: Any],
            let result = userResults["result"] as? [String: Any] {
             let innerCore = result["core"] as? [String: Any]
             let innerLegacy = result["legacy"] as? [String: Any]
+            let relPersp = result["relationship_perspectives"] as? [String: Any]
             let sn = (innerCore?["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 ?? (innerLegacy?["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let bio = (innerLegacy?["description"] as? String)
                 ?? (innerCore?["description"] as? String)
                 ?? (result["description"] as? String)
-            if sn != nil || bio != nil {
-                return (sn, bio)
+            let following = (relPersp?["following"] as? Bool)
+                ?? (innerLegacy?["following"] as? Bool)
+            if sn != nil || bio != nil || following != nil {
+                return (sn, bio, following)
             }
         }
-        // REST / v1.1 tweet -> user -> (screen_name, description)
+        // REST / v1.1 tweet -> user -> (screen_name, description, following)
         if let user = dict["user"] as? [String: Any] {
             let sn = (user["screen_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let bio = user["description"] as? String
-            if sn != nil || bio != nil {
-                return (sn, bio)
+            let following = user["following"] as? Bool
+            if sn != nil || bio != nil || following != nil {
+                return (sn, bio, following)
             }
         }
-        return (nil, nil)
+        return (nil, nil, nil)
     }
 
     private static func extractGif(
         fromTweetDict dict: [String: Any],
         fallbackAuthor: String?,
         fallbackBio: String?,
+        fallbackFollowed: Bool?,
         routeKey: String
     ) -> Gif? {
-        // Avoid extracting twice from outer retweet wrapper; walk() visits inner retweeted_status_result
         let legacy = (dict["legacy"] as? [String: Any]) ?? dict
         if dict["retweeted_status_results"] != nil || legacy["retweeted_status_result"] != nil || legacy["retweeted_status_results"] != nil {
+            if routeKey == "x_following" {
+                return nil
+            }
             if dict["media_entities2"] == nil && legacy["extended_entities"] == nil {
                 return nil
             }
@@ -217,16 +243,26 @@ enum XTweetParser {
                 ?? (media["source_status_id_str"] as? String).map { "xsrc_\($0)" }
                 ?? (media["id_str"] as? String).map { "xmed_\($0)" }
 
-            let allVariantURLs = mp4Variants.map(\.url) + (hlsVariant.map { [$0] } ?? [])
-            MediaMetaRegistry.register(
-                postId: "x_\(rawTweetId)",
-                fingerprint: mediaFingerprint,
-                extraVideoURLs: allVariantURLs
-            )
-
             let authorMeta = extractAuthorAndBio(from: dict)
             let author = authorMeta.screenName ?? fallbackAuthor ?? "x_user"
             let authorBio = authorMeta.bio ?? fallbackBio ?? ""
+            let isFollowed = authorMeta.isFollowedByViewer ?? fallbackFollowed
+
+            // Strict X Following check: if X reports `following == false` on the author, reject on x_following
+            if routeKey == "x_following", isFollowed == false {
+                return nil
+            }
+
+            let allVariantURLs = mp4Variants.map(\.url) + (hlsVariant.map { [$0] } ?? [])
+            let bioTags = PornTagCatalog.extractRecognizedTags(fromQuery: authorBio, categories: GoonedCategory.defaultCategories)
+            MediaMetaRegistry.register(
+                postId: "x_\(rawTweetId)",
+                fingerprint: mediaFingerprint,
+                extraVideoURLs: allVariantURLs,
+                tags: bioTags,
+                creatorName: author,
+                followedByViewer: isFollowed
+            )
             let rawText = (legacy["full_text"] as? String)
                 ?? (details?["full_text"] as? String)
                 ?? (dict["full_text"] as? String)
@@ -628,11 +664,11 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             UserStore.shared.data.xSession.screenName = sn
         }
 
-        // Strict route isolation: never let X's "For you" HomeTimeline or Search payloads leak into Following/Bookmarks/User feeds
+        // Strict route isolation: never let X's "For you" HomeTimeline, initial SSR HTML, or Search payloads leak into Following/Bookmarks/User feeds
         let pageUrl = (body["pageUrl"] as? String ?? "").lowercased()
         if activeRouteKey == "x_following" {
-            let isForYouTimeline = url.contains("HomeTimeline") && !url.contains("HomeLatestTimeline")
-            let isSearchResult = url.contains("SearchTimeline") || pageUrl.contains("/search")
+            let isForYouTimeline = (url.contains("HomeTimeline") && !url.contains("HomeLatestTimeline")) || url == "ssr_x"
+            let isSearchResult = url.contains("SearchTimeline") || pageUrl.contains("/search") || url.contains("adaptive.json")
             if isForYouTimeline || isSearchResult {
                 return
             }
@@ -645,10 +681,17 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         let tweets = XTweetParser.parseTweets(from: data, routeKey: activeRouteKey)
         if !tweets.isEmpty {
             let store = UserStore.shared
-            let fresh = tweets.filter {
-                !store.isSeen($0)
-                    && !store.isBlockedByAlgorithm($0)
-                    && seenIds.insert($0.canonicalDedupeKey).inserted
+            let fresh = tweets.filter { post in
+                guard !store.isSeen(post),
+                      !store.isBlockedByAlgorithm(post) else { return false }
+                if activeRouteKey == "x_following" {
+                    let author = post.author ?? ""
+                    let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
+                    if viewerFollows == false && !store.isFollowingXUser(author) {
+                        return false
+                    }
+                }
+                return seenIds.insert(post.canonicalDedupeKey).inserted
             }
             if !fresh.isEmpty {
                 dryPayloadCount = 0
@@ -1020,22 +1063,65 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 enum XAPI {
     static func forYou(after: String? = nil) async -> GoonedFeedResponse {
         let url = URL(string: "https://x.com/home")!
-        return await XWebEngine.shared.fetchFeed(
+        let store = UserStore.shared
+        let tasteQueries = (store.data.algorithm.boostedTags + store.topAlgorithmTags.prefix(4).map(\.tag))
+            .filter { !MediaMetaRegistry.isStopTag($0) }
+
+        async let homeRes = XWebEngine.shared.fetchFeed(
             routeKey: "x_foryou",
             targetURL: url,
             homeTabLabel: "For you",
             isRefresh: after == nil
         )
+
+        if store.data.settings.algorithmEnabled, let pick = tasteQueries.randomElement() {
+            let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
+                .filter { !MediaMetaRegistry.isStopTag($0) }
+                .prefix(4)
+                .map { "-\($0)" }
+                .joined(separator: " ")
+            let q = "\(pick) \(blocked)".trimmingCharacters(in: .whitespaces)
+            async let tasteRes = XWebEngine.shared.searchFast(query: q, sort: "Top", after: nil)
+            let (h, t) = await (homeRes, tasteRes)
+            var merged: [Gif] = []
+            var seen = Set<String>()
+            let maxLen = max(h.posts.count, t.posts.count)
+            for i in 0..<maxLen {
+                if i < h.posts.count, seen.insert(h.posts[i].canonicalDedupeKey).inserted {
+                    merged.append(h.posts[i])
+                }
+                if i < t.posts.count, seen.insert(t.posts[i].canonicalDedupeKey).inserted {
+                    merged.append(t.posts[i])
+                }
+            }
+            return GoonedFeedResponse(posts: merged, after: h.after ?? t.after)
+        }
+
+        return await homeRes
     }
 
     static func following(after: String? = nil) async -> GoonedFeedResponse {
         let url = URL(string: "https://x.com/home")!
-        return await XWebEngine.shared.fetchFeed(
+        let store = UserStore.shared
+        async let homeFollowing = XWebEngine.shared.fetchFeed(
             routeKey: "x_following",
             targetURL: url,
             homeTabLabel: "Following",
             isRefresh: after == nil
         )
+        // Also blend recent videos from any X creators explicitly followed inside TinyTiny
+        let localHandles = Array(store.data.followedXUsers.prefix(3))
+        if !localHandles.isEmpty, after == nil, let pick = localHandles.randomElement() {
+            async let localCreator = XWebEngine.shared.searchFast(query: "from:\(pick)", sort: "Latest", after: nil)
+            let (hf, lc) = await (homeFollowing, localCreator)
+            var merged = hf.posts
+            var seen = Set(merged.map(\.canonicalDedupeKey))
+            for item in lc.posts where seen.insert(item.canonicalDedupeKey).inserted {
+                merged.append(item)
+            }
+            return GoonedFeedResponse(posts: merged, after: hf.after)
+        }
+        return await homeFollowing
     }
 
     static func bookmarks(after: String? = nil) async -> GoonedFeedResponse {

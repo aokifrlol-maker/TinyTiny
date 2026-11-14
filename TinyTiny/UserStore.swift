@@ -421,15 +421,21 @@ final class UserStore: ObservableObject {
     private func sanitizeLearnedProfile() {
         var normalizedTags: [String: Double] = [:]
         for (rawKey, weight) in data.algorithm.tagWeights {
-            guard abs(weight) > 0.2,
-                  let canonical = PornTagCatalog.normalize(rawKey, categories: categories) else { continue }
+            let clean = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: "#", with: "")
+            guard abs(weight) > 0.2, !clean.isEmpty, !MediaMetaRegistry.isStopTag(clean) else { continue }
+            let canonical = PornTagCatalog.normalize(clean, categories: categories) ?? clean
+            guard !MediaMetaRegistry.isStopTag(canonical) else { continue }
             normalizedTags[canonical] = min(max((normalizedTags[canonical] ?? 0) + weight, -12), 45)
         }
         data.algorithm.tagWeights = normalizedTags
+        data.algorithm.boostedTags.removeAll { MediaMetaRegistry.isStopTag($0) }
+        data.algorithm.blockedTags.removeAll { MediaMetaRegistry.isStopTag($0) }
     }
 
     func recordAlgorithmSignal(for post: Gif, weight: Double) {
         guard data.settings.algorithmEnabled else { return }
+
+        SmartTasteEngine.shared.ingestPostIntoCreatorGraph(post, categories: categories)
 
         // Time decay so recent preferences outweigh stale ones
         data.algorithm.totalSignals += 1
@@ -440,20 +446,31 @@ final class UserStore: ObservableObject {
         }
 
         if let sub = post.subreddit?.lowercased(), !sub.isEmpty,
-           !AdultContentClassifier.sfwBlockedSubreddits.contains(sub) {
+           !AdultContentClassifier.sfwBlockedSubreddits.contains(sub),
+           !MediaMetaRegistry.isStopTag(sub) {
             let cur = data.algorithm.subredditWeights[sub] ?? 0
             data.algorithm.subredditWeights[sub] = min(max(cur + weight, -12), 45)
         }
         if let author = post.author?.lowercased(), !author.isEmpty,
-           author != "instagram", author != "x_user", author != "rule34" {
+           !["instagram", "x_user", "rule34", "eporner", "pornhub", "xhamster", "spankbang", "xvideos"].contains(author) {
             let cur = data.algorithm.creatorWeights[author] ?? 0
             data.algorithm.creatorWeights[author] = min(max(cur + weight * 1.15, -12), 45)
         }
 
-        // Only learn recognized pornographic categories and verified adult tags — never arbitrary words!
-        let recognized = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
-        for tag in recognized {
+        // Extract both direct and creator-cluster inherited tags (so tagless IG/X/OF videos still train & reinforce clusters)
+        let recognized = SmartTasteEngine.extractExtendedTags(from: post, categories: categories)
+        for tag in recognized where !MediaMetaRegistry.isStopTag(tag) {
             let cur = data.algorithm.tagWeights[tag] ?? 0
+            // Contrastive Protection: when weight < 0 (dislike / fast skip), do NOT nuke tags the user already loves or pinned!
+            if weight < 0 {
+                let isPinned = data.algorithm.boostedTags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+                if isPinned || cur >= 3.0 {
+                    continue
+                }
+                if SmartTasteEngine.protectedBroadTags.contains(tag) {
+                    continue
+                }
+            }
             let updated = min(max(cur + weight * 0.85, -12), 45)
             if abs(updated) < 0.15 {
                 data.algorithm.tagWeights.removeValue(forKey: tag)
@@ -466,34 +483,39 @@ final class UserStore: ObservableObject {
         let alpha = weight > 0 ? 0.06 : 0.02
         data.algorithm.videoPreference = min(max(data.algorithm.videoPreference + (target - data.algorithm.videoPreference) * alpha, 0.1), 0.95)
         if weight > 0 {
-            SmartTasteEngine.shared.recordPositivePlatformSignal(post, boost: min(0.25, weight * 0.03))
+            SmartTasteEngine.shared.recordPositiveEngagement(for: post, intensity: weight, categories: categories)
         }
     }
 
     func recordDwellSignal(for post: Gif, secondsWatched: TimeInterval) {
         if secondsWatched >= 9.0 {
-            recordAlgorithmSignal(for: post, weight: 2.6)
-        } else if secondsWatched >= 3.5 {
-            recordAlgorithmSignal(for: post, weight: 1.4)
-        } else if secondsWatched < 1.3 {
-            // Immediate skip reduces relevance
-            recordAlgorithmSignal(for: post, weight: -1.2)
+            recordAlgorithmSignal(for: post, weight: 3.2)
+        } else if secondsWatched >= 3.8 {
+            recordAlgorithmSignal(for: post, weight: 1.6)
+        } else if secondsWatched < 1.6 {
+            // Immediate skip reduces relevance without hurting pinned/loved tags
+            recordAlgorithmSignal(for: post, weight: -1.1)
+            SmartTasteEngine.shared.recordFastSkip(for: post, categories: categories)
         }
     }
 
     func recordLoopSignal(for post: Gif) {
-        // Repeatedly watching / looping a clip strengthens its category affinity
-        recordAlgorithmSignal(for: post, weight: 2.2)
+        // Repeatedly watching / looping a clip is the strongest implicit positive signal (like IG Reels / TikTok)
+        recordAlgorithmSignal(for: post, weight: 3.8)
     }
 
     func recordSearchSignal(_ rawQuery: String) {
         guard data.settings.algorithmEnabled else { return }
-        let matched = PornTagCatalog.extractRecognizedTags(fromQuery: rawQuery, categories: categories)
+        var matched = PornTagCatalog.extractRecognizedTags(fromQuery: rawQuery, categories: categories)
+        let customTokens = Rule34API.parseTags(rawQuery).filter { !MediaMetaRegistry.isStopTag($0) }
+        for tok in customTokens where !matched.contains(tok) {
+            matched.append(tok)
+        }
         guard !matched.isEmpty else { return }
         data.algorithm.totalSignals += 1
-        for tag in matched {
+        for tag in matched where !MediaMetaRegistry.isStopTag(tag) {
             let cur = data.algorithm.tagWeights[tag] ?? 0
-            data.algorithm.tagWeights[tag] = min(max(cur + 3.5, -12), 45)
+            data.algorithm.tagWeights[tag] = min(max(cur + 4.5, -12), 45)
         }
     }
 
@@ -525,21 +547,21 @@ final class UserStore: ObservableObject {
             }
         }
 
-        let recognizedTags = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
+        let recognizedTags = SmartTasteEngine.extractExtendedTags(from: post, categories: categories)
         for tag in recognizedTags {
             let direct = data.algorithm.tagWeights[tag] ?? 0
-            score += direct * 1.8
+            score += direct * 1.9
 
             // Cross-tag cluster synergy: consistent interest in related categories boosts companion tags
             if let related = PornTagCatalog.relatedTags[tag] {
                 var clusterBonus = 0.0
                 for rel in related {
                     let relWeight = data.algorithm.tagWeights[rel] ?? 0
-                    if relWeight >= 3.0 {
-                        clusterBonus += relWeight * 0.30
+                    if relWeight >= 2.5 {
+                        clusterBonus += relWeight * 0.32
                     }
                 }
-                score += min(clusterBonus, 6.0)
+                score += min(clusterBonus, 7.0)
             }
         }
 
@@ -547,8 +569,8 @@ final class UserStore: ObservableObject {
             let p = pinned.lowercased()
             let cleanP = p.replacingOccurrences(of: "_", with: "")
             let canonicalPinned = PornTagCatalog.normalize(p, categories: categories) ?? p
-            if recognizedTags.contains(canonicalPinned) || subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) {
-                score += 15.0
+            if recognizedTags.contains(canonicalPinned) || recognizedTags.contains(p) || subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) {
+                score += 18.0
             }
         }
         if !post.isImage {
@@ -632,10 +654,14 @@ final class UserStore: ObservableObject {
 
     /// Ranks posts using an 80/20 Exploit-Explore mix so For You feels personalized yet never repetitive.
     func rankWithAlgorithm(_ posts: [Gif]) -> [Gif] {
+        for p in posts {
+            SmartTasteEngine.shared.ingestPostIntoCreatorGraph(p, categories: categories)
+        }
+        SmartTasteEngine.shared.precomputeVisualSimilarity(for: posts)
         guard data.settings.algorithmEnabled, posts.count > 3 else {
             return posts.shuffled()
         }
-        let scored = posts.map { ($0, scorePost($0) + Double.random(in: -0.75...0.75)) }
+        let scored = posts.map { ($0, scorePost($0) + Double.random(in: -0.65...0.65)) }
             .sorted { $0.1 > $1.1 }
 
         // Separate high-affinity matches from discovery posts, interleaving 1 discovery post every 4 items
@@ -736,18 +762,18 @@ final class UserStore: ObservableObject {
 
 enum PornTagCatalog {
     static let quickPickerCategories: [String] = [
-        "ebony", "femboy", "trans", "goth", "hentai", "rule34", "latina", "asian",
+        "ebony", "femboy", "trans_woman", "futanari", "goth", "hentai", "latina", "asian",
         "milf", "petite", "curvy", "big_tits", "ass", "anal", "blowjob", "creampie",
-        "cumshot", "futanari", "ahegao", "cosplay", "bdsm", "femdom", "lesbian",
-        "threesome", "pov", "amateur", "public", "solo", "squirt", "interracial"
+        "cumshot", "ahegao", "cosplay", "bdsm", "femdom", "lesbian",
+        "threesome", "public", "squirt", "interracial", "pawg", "redhead"
     ]
 
     static let canonicalTags: Set<String> = [
-        "ebony", "femboy", "trans", "futanari", "hentai", "rule34", "ahegao", "cosplay",
+        "ebony", "femboy", "trans", "trans_woman", "trans_man", "futanari", "hentai", "ahegao", "cosplay",
         "goth", "bimbo", "milf", "mature", "teen", "petite", "curvy", "thick", "pawg",
         "bbw", "latina", "asian", "jav", "indian", "interracial", "bbc", "redhead",
-        "blonde", "brunette", "amateur", "homemade", "onlyfans", "tiktok_nsfw", "snapchat_nsfw",
-        "lesbian", "gay", "twink", "bisexual", "threesome", "gangbang", "cuckold", "hotwife",
+        "blonde", "brunette", "amateur", "homemade",
+        "lesbian", "gay", "yaoi", "bara", "twink", "bisexual", "threesome", "gangbang", "cuckold", "hotwife",
         "freeuse", "public", "pov", "solo", "masturbation", "joi", "vintage", "anal", "ass",
         "twerk", "big_tits", "boobs", "natural_tits", "blowjob", "deepthroat", "facefuck",
         "handjob", "titfuck", "paizuri", "creampie", "breeding", "cumshot", "facial",
@@ -756,8 +782,7 @@ enum PornTagCatalog {
         "hardcore", "feet", "footjob", "stockings", "thigh_highs", "lingerie", "latex",
         "upskirt", "flashing", "oil", "tentacle", "hypno", "monster_girl", "elf",
         "succubus", "bunny_girl", "maid", "nurse", "flexible", "riding", "cowgirl",
-        "doggystyle", "missionary", "prone_bone", "dildo", "vibrator", "fucking_machine",
-        "gooning"
+        "doggystyle", "missionary", "prone_bone", "dildo", "vibrator", "fucking_machine"
     ]
 
     static let aliases: [String: String] = [
@@ -788,13 +813,12 @@ enum PornTagCatalog {
         "interracial": "interracial", "blacked": "interracial", "blackedpawgs": "interracial", "blackchickswhitedicks": "interracial",
         "bbc": "bbc", "bbcparadise": "bbc",
         "redhead": "redhead", "redheads": "redhead", "ginger": "redhead", "gingerbeauties": "redhead", "petitegingers": "redhead", "redheadmilfs": "redhead", "redheadsporn": "redhead",
-        // Styles / Platforms
+        // Styles / Orientations (Orthogonal Separation: Femboy / Trans / Futa / Gay / Yaoi)
         "amateur": "amateur", "realgirls": "amateur", "homemadexxx": "homemade", "homemade": "homemade", "onoff": "amateur", "gonewild": "amateur",
-        "onlyfans": "onlyfans", "onlyfans101": "onlyfans", "slutsofonlyfans": "onlyfans", "onlyfanshottest": "onlyfans", "onlyfans_blessed": "onlyfans", "onlyfans_wild": "onlyfans",
-        "tiktokporn": "tiktok_nsfw", "tiktoknsfw": "tiktok_nsfw", "tiktokthots": "tiktok_nsfw", "tiktok_ass": "tiktok_nsfw", "tiktok_tits": "tiktok_nsfw",
-        "slutsofsnapchat": "snapchat_nsfw", "nsfw_snapchat": "snapchat_nsfw",
-        "lesbian": "lesbian", "lesbians": "lesbian", "girlskissing": "lesbian", "girlswithgirls": "lesbian", "lesbian_gifs": "lesbian", "cutelesbians": "lesbian", "wlw": "lesbian",
-        "gay": "gay", "gayporn": "gay", "malesmasturbating": "gay", "gaybrosgonewild": "gay", "twink": "twink",
+        "lesbian": "lesbian", "lesbians": "lesbian", "girlskissing": "lesbian", "girlswithgirls": "lesbian", "lesbian_gifs": "lesbian", "cutelesbians": "lesbian", "wlw": "lesbian", "yuri": "lesbian",
+        "gay": "gay", "gayporn": "gay", "malesmasturbating": "gay", "gaybrosgonewild": "gay", "twink": "twink", "m4m": "gay",
+        "yaoi": "yaoi", "bara": "bara",
+        "trans_woman": "trans_woman", "trans_man": "trans_man", "ftm": "trans_man",
         "threesome": "threesome", "threesomesnsfw": "threesome", "threesomegw": "threesome",
         "gangbang": "gangbang", "groupsex_gw": "gangbang", "groupsexnsfw": "gangbang",
         "cuckold": "cuckold", "hotwife": "hotwife", "hotwifecuckolds": "cuckold", "wifesharing": "cuckold",
@@ -822,17 +846,16 @@ enum PornTagCatalog {
         "oilporn": "oil", "wetoil": "oil", "oil": "oil", "tentai": "tentacle", "tentacle": "tentacle", "tentacles": "tentacle",
         "hypno": "hypno", "monstergirl": "monster_girl", "monster_girl": "monster_girl", "elf": "elf", "succubus": "succubus", "bunny_girl": "bunny_girl", "maid": "maid", "nurse": "nurse",
         "cowgirl": "cowgirl", "riding": "riding", "doggystyle": "doggystyle", "missionary": "missionary", "pronebone": "prone_bone", "prone_bone": "prone_bone",
-        "dildo": "dildo", "hugedildos": "dildo", "vibrator": "vibrator", "fuckingmachine": "fucking_machine", "fuckingmachines": "fucking_machine", "fucking_machine": "fucking_machine",
-        "gooned": "gooning", "gooning": "gooning", "pornrelapsed": "gooning"
+        "dildo": "dildo", "hugedildos": "dildo", "vibrator": "vibrator", "fuckingmachine": "fucking_machine", "fuckingmachines": "fucking_machine", "fucking_machine": "fucking_machine"
     ]
 
     static let relatedTags: [String: [String]] = [
         "ebony": ["curvy", "ass", "interracial", "bbc", "big_tits"],
-        "femboy": ["trans", "anal", "thigh_highs", "solo", "dildo"],
-        "trans": ["femboy", "anal", "blowjob", "solo", "threesome"],
-        "futanari": ["hentai", "rule34", "creampie", "big_tits"],
-        "hentai": ["rule34", "ahegao", "futanari", "tentacle", "paizuri"],
-        "rule34": ["hentai", "futanari", "cosplay", "ahegao"],
+        "femboy": ["thigh_highs", "cosplay", "anal", "dildo", "stockings"],
+        "trans": ["trans_woman", "anal", "blowjob", "thigh_highs", "lingerie"],
+        "trans_woman": ["trans", "anal", "blowjob", "thigh_highs", "lingerie"],
+        "futanari": ["hentai", "creampie", "big_tits", "ahegao"],
+        "hentai": ["ahegao", "futanari", "tentacle", "paizuri", "cosplay"],
         "goth": ["alt", "amateur", "big_tits", "bdsm", "stockings"],
         "latina": ["curvy", "ass", "pawg", "big_tits"],
         "asian": ["petite", "jav", "amateur", "cosplay"],
@@ -854,7 +877,7 @@ enum PornTagCatalog {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "#", with: "")
             .replacingOccurrences(of: "r/", with: "")
-        guard !cleaned.isEmpty else { return nil }
+        guard !cleaned.isEmpty, !MediaMetaRegistry.isStopTag(cleaned) else { return nil }
         if canonicalTags.contains(cleaned) { return cleaned }
         if let mapped = aliases[cleaned] { return mapped }
         for cat in categories {
@@ -875,7 +898,7 @@ enum PornTagCatalog {
                 found.insert(norm)
             } else {
                 let subLower = sub.lowercased()
-                for key in ["ebony", "femboy", "trans", "futanari", "hentai", "rule34", "latina", "asian", "milf", "goth", "cosplay", "lesbian", "bdsm", "femdom", "anal", "blowjob", "creampie", "cumshot", "squirt", "petite", "curvy", "pawg", "bbw", "amateur", "redhead", "interracial", "threesome", "onlyfans"] {
+                for key in ["ebony", "femboy", "trans", "futanari", "hentai", "latina", "asian", "milf", "goth", "cosplay", "lesbian", "bdsm", "femdom", "anal", "blowjob", "creampie", "cumshot", "squirt", "petite", "curvy", "pawg", "bbw", "redhead", "interracial", "threesome"] {
                     if subLower.contains(key) {
                         found.insert(key)
                     }
@@ -930,7 +953,12 @@ enum PornTagCatalog {
         switch tag.lowercased() {
         case "femboy": return "Femboys"
         case "ebony": return "Ebony"
-        case "trans": return "Trans"
+        case "trans", "trans_woman": return "Trans Women"
+        case "trans_man": return "Trans Men"
+        case "gay": return "Gay (M/M)"
+        case "yaoi": return "Yaoi / 2D M/M"
+        case "bara": return "Bara"
+        case "futanari": return "Futanari"
         case "milf": return "MILF"
         case "bdsm": return "BDSM"
         case "pov": return "POV"

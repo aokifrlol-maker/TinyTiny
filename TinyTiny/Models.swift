@@ -147,6 +147,7 @@ struct Gif: Codable, Identifiable, Hashable {
     var longVideoSiteLabel: String? {
         guard isLongVideoPost else { return nil }
         if id.hasPrefix("lv_ep_") { return "Eporner" }
+        if id.hasPrefix("lv_xv_") { return "XVideos" }
         if id.hasPrefix("lv_ph_") { return "Pornhub" }
         if id.hasPrefix("lv_xh_") { return "xHamster" }
         if id.hasPrefix("lv_sb_") { return "SpankBang" }
@@ -189,7 +190,7 @@ struct Gif: Codable, Identifiable, Hashable {
             return true
         }
         // Some CDN video URLs don't end in .mp4 (e.g. X/IG/Reddit v.redd.it without ext)
-        return lower.contains("video.twimg.com") || lower.contains("v.redd.it") || lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") || lower.contains("eporner.com") || lower.contains("phncdn.com") || lower.contains("xhcdn.com") || lower.contains("sb-cd.com")
+        return lower.contains("video.twimg.com") || lower.contains("v.redd.it") || lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") || lower.contains("eporner.com") || lower.contains("phncdn.com") || lower.contains("xhcdn.com") || lower.contains("sb-cd.com") || lower.contains("xvideos-cdn.com")
     }
 
     private static func isRenderableImageURLString(_ s: String) -> Bool {
@@ -372,9 +373,28 @@ enum MediaMetaRegistry {
     private static var fingerprints: [String: String] = [:]
     private static var extraVideos: [String: [String]] = [:]
     private static var postTags: [String: [String]] = [:]
+    private static var creatorClusterTags: [String: [String]] = [:]
     private static var postCreatorGender: [String: String] = [:]
     private static var postCreatorIds: [String: String] = [:]
     private static var creatorGenderByKey: [String: String] = [:]
+    private static var viewerFollowsByKey: [String: Bool] = [:]
+
+    static let nonContentStopTags: Set<String> = [
+        "onlyfans", "of", "rule34", "r34", "reddit", "x", "twitter", "instagram", "ig",
+        "eporner", "pornhub", "xhamster", "spankbang", "xvideos", "tiktok", "tiktok_nsfw",
+        "snapchat", "snapchat_nsfw", "fyp", "foryou", "foryoupage", "viral", "trending",
+        "new", "free", "ppv", "customs", "linkinbio", "dm", "dms", "announcements",
+        "vip", "promo", "subscribe", "sub", "like", "repost", "rt", "video", "videos",
+        "gif", "gifs", "hd", "4k", "1080p", "720p", "mp4", "nsfw", "xxx", "porn",
+        "adult", "18+", "18plus", "explore", "reels", "reel", "shorts", "gooning", "gooned"
+    ]
+
+    static func isStopTag(_ raw: String) -> Bool {
+        let norm = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "#", with: "")
+        return norm.count < 2 || nonContentStopTags.contains(norm)
+    }
 
     static func register(
         postId: String,
@@ -383,7 +403,8 @@ enum MediaMetaRegistry {
         tags: [String] = [],
         creatorGender: String? = nil,
         creatorId: String? = nil,
-        creatorName: String? = nil
+        creatorName: String? = nil,
+        followedByViewer: Bool? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -393,11 +414,26 @@ enum MediaMetaRegistry {
         if !extraVideoURLs.isEmpty {
             extraVideos[postId] = extraVideoURLs
         }
-        let cleanedTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        let cleanedTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: "#", with: "") }
+            .filter { !$0.isEmpty && !isStopTag($0) }
         if !cleanedTags.isEmpty {
             var merged = Set(postTags[postId] ?? [])
             for t in cleanedTags { merged.insert(t) }
-            postTags[postId] = Array(merged)
+            let arr = Array(merged)
+            postTags[postId] = arr
+            if let creatorId, !creatorId.isEmpty {
+                let k = "id:\(creatorId.lowercased())"
+                var cMerged = Set(creatorClusterTags[k] ?? [])
+                for t in arr { cMerged.insert(t) }
+                creatorClusterTags[k] = Array(cMerged.prefix(24))
+            }
+            if let creatorName, !creatorName.isEmpty {
+                let k = "name:\(creatorName.lowercased())"
+                var cMerged = Set(creatorClusterTags[k] ?? [])
+                for t in arr { cMerged.insert(t) }
+                creatorClusterTags[k] = Array(cMerged.prefix(24))
+            }
         }
         if let creatorId, !creatorId.isEmpty {
             postCreatorIds[postId] = creatorId
@@ -412,19 +448,53 @@ enum MediaMetaRegistry {
                 creatorGenderByKey["name:\(creatorName.lowercased())"] = norm
             }
         }
+        if let followedByViewer {
+            viewerFollowsByKey["post:\(postId)"] = followedByViewer
+            if let creatorName, !creatorName.isEmpty {
+                viewerFollowsByKey["user:\(creatorName.lowercased())"] = followedByViewer
+            }
+        }
     }
 
-    static func registerCreatorGender(creatorId: String?, creatorName: String?, gender: String?) {
-        guard let gender, !gender.isEmpty else { return }
-        let norm = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    static func registerCreatorGender(creatorId: String?, creatorName: String?, gender: String?, tags: [String] = []) {
+        let cleanedTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: "#", with: "") }
+            .filter { !$0.isEmpty && !isStopTag($0) }
         lock.lock()
         defer { lock.unlock() }
-        if let creatorId, !creatorId.isEmpty {
-            creatorGenderByKey["id:\(creatorId.lowercased())"] = norm
+        if let gender, !gender.isEmpty {
+            let norm = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let creatorId, !creatorId.isEmpty {
+                creatorGenderByKey["id:\(creatorId.lowercased())"] = norm
+            }
+            if let creatorName, !creatorName.isEmpty {
+                creatorGenderByKey["name:\(creatorName.lowercased())"] = norm
+            }
         }
-        if let creatorName, !creatorName.isEmpty {
-            creatorGenderByKey["name:\(creatorName.lowercased())"] = norm
+        if !cleanedTags.isEmpty {
+            if let creatorId, !creatorId.isEmpty {
+                let k = "id:\(creatorId.lowercased())"
+                var cMerged = Set(creatorClusterTags[k] ?? [])
+                for t in cleanedTags { cMerged.insert(t) }
+                creatorClusterTags[k] = Array(cMerged.prefix(24))
+            }
+            if let creatorName, !creatorName.isEmpty {
+                let k = "name:\(creatorName.lowercased())"
+                var cMerged = Set(creatorClusterTags[k] ?? [])
+                for t in cleanedTags { cMerged.insert(t) }
+                creatorClusterTags[k] = Array(cMerged.prefix(24))
+            }
         }
+    }
+
+    static func isFollowedByViewer(postId: String, author: String?) -> Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let direct = viewerFollowsByKey["post:\(postId)"] { return direct }
+        if let author, !author.isEmpty, let byUser = viewerFollowsByKey["user:\(author.lowercased())"] {
+            return byUser
+        }
+        return nil
     }
 
     static func canonicalMediaFingerprint(for gif: Gif) -> String? {
@@ -439,10 +509,20 @@ enum MediaMetaRegistry {
         return extraVideos[postId] ?? []
     }
 
-    static func tags(for postId: String) -> [String] {
+    static func tags(for postId: String, author: String? = nil) -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return postTags[postId] ?? []
+        if let direct = postTags[postId], !direct.isEmpty {
+            return direct
+        }
+        // Creator-cluster inheritance for tagless videos (IG Reels / X / OF)
+        if let cid = postCreatorIds[postId], let inherited = creatorClusterTags["id:\(cid.lowercased())"], !inherited.isEmpty {
+            return inherited
+        }
+        if let author, !author.isEmpty, let inherited = creatorClusterTags["name:\(author.lowercased())"], !inherited.isEmpty {
+            return inherited
+        }
+        return []
     }
 
     static func creatorId(for postId: String) -> String? {

@@ -376,33 +376,186 @@ function renderShareLandingHTML(shareId) {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>TinyTiny Encrypted Drop</title>
+<title>TinyTiny Shared Collection</title>
 <style>
-  body { margin:0; background:#09090d; color:#fff; font-family:-apple-system,BlinkMacSystemFont,sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; }
-  .card { max-width:420px; width:90%; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.16); border-radius:24px; padding:28px; text-align:center; }
-  h1 { font-size:22px; margin:0 0 8px; }
-  p { font-size:14px; color:rgba(255,255,255,0.7); line-height:1.45; }
-  a.btn, button.btn { display:block; width:100%; box-sizing:border-box; margin-top:14px; padding:14px 18px; border-radius:999px; border:none; background:#e93b78; color:#fff; font-weight:700; font-size:15px; text-decoration:none; cursor:pointer; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#09090d; color:#fff; font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif; min-height:100vh; padding:24px 16px 60px; }
+  .wrap { max-width:960px; margin:0 auto; }
+  .header { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.14); border-radius:22px; padding:20px 22px; margin-bottom:20px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { font-size:13px; color:rgba(255,255,255,0.68); margin:0; }
+  .actions { display:flex; flex-wrap:wrap; gap:10px; }
+  a.btn, button.btn { display:inline-flex; align-items:center; justify-content:center; padding:11px 18px; border-radius:999px; border:none; background:#e93b78; color:#fff; font-weight:700; font-size:13.5px; text-decoration:none; cursor:pointer; }
   button.secondary { background:rgba(255,255,255,0.12); }
+  #status { text-align:center; padding:36px 16px; color:rgba(255,255,255,0.72); font-size:14px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:16px; }
+  .item { background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:18px; overflow:hidden; display:flex; flex-direction:column; }
+  .media { width:100%; aspect-ratio:9/16; max-height:480px; background:#000; object-fit:contain; display:block; }
+  .meta { padding:12px 14px; }
+  .title { font-size:13.5px; font-weight:600; line-height:1.35; margin:0 0 6px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .author { font-size:12px; color:rgba(255,255,255,0.6); }
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Encrypted TinyTiny Drop</h1>
-    <p>This drop is end-to-end encrypted with AES-256-GCM. The decryption key stays strictly inside your link fragment and never reaches the server.</p>
-    <a id="openBtn" class="btn" href="#">Open in TinyTiny</a>
-    <button id="copyBtn" class="btn secondary">Copy Drop Code</button>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1 id="dropTitle">TinyTiny Shared Drop</h1>
+        <p class="sub" id="dropSub">End-to-end encrypted with AES-256-GCM. Decrypted locally in your browser.</p>
+      </div>
+      <div class="actions">
+        <a id="openBtn" class="btn" href="#">Open in TinyTiny</a>
+        <button id="copyBtn" class="btn secondary">Copy Drop Code</button>
+      </div>
+    </div>
+    <div id="status">Decrypting shared videos...</div>
+    <div id="gallery" class="grid"></div>
   </div>
   <script>
     const hash = location.hash || "";
     const deep = "tinytiny://drop/${shareId}" + hash;
     document.getElementById("openBtn").href = deep;
-    const k = hash.startsWith("#k=") ? hash.slice(3) : "";
+    const k = hash.startsWith("#k=") ? hash.slice(3) : (new URLSearchParams(location.search).get("k") || "");
     const code = k ? "TTDROP:${shareId}." + k : deep;
     document.getElementById("copyBtn").onclick = async () => {
       await navigator.clipboard.writeText(code);
       document.getElementById("copyBtn").textContent = "Copied!";
     };
+
+    function b64UrlToBytes(token) {
+      let b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    function b64ToBytes(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    async function openTTENC(cipherBytes, cryptoKey) {
+      let offset = 0;
+      if (
+        cipherBytes.length > 6 &&
+        cipherBytes[0] === 84 && cipherBytes[1] === 84 && cipherBytes[2] === 69 &&
+        cipherBytes[3] === 78 && cipherBytes[4] === 67 && cipherBytes[5] === 49
+      ) {
+        offset = 6;
+      }
+      const iv = cipherBytes.slice(offset, offset + 12);
+      const ct = cipherBytes.slice(offset + 12);
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, cryptoKey, ct);
+      return new Uint8Array(plain);
+    }
+
+    function pickVideoUrl(post) {
+      return post.muxedUrlHd || post.muxedUrl || post.mediaUrl || post.hlsUrl || "";
+    }
+
+    function renderPostCard(post) {
+      const card = document.createElement("div");
+      card.className = "item";
+      const src = pickVideoUrl(post);
+      const poster = post.posterUrl || post.thumbnailUrl || "";
+      const isImg = (post.mediaType || "").toLowerCase() === "image" || /\\.(jpe?g|png|webp|gif)(\\?|$)/i.test(src);
+      if (src) {
+        if (isImg) {
+          const img = document.createElement("img");
+          img.className = "media";
+          img.src = src;
+          img.loading = "lazy";
+          card.appendChild(img);
+        } else {
+          const vid = document.createElement("video");
+          vid.className = "media";
+          vid.src = src;
+          if (poster) vid.poster = poster;
+          vid.controls = true;
+          vid.playsInline = true;
+          vid.preload = "metadata";
+          card.appendChild(vid);
+        }
+      }
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = post.title || "Shared Clip";
+      const author = document.createElement("div");
+      author.className = "author";
+      author.textContent = [post.author ? "@" + post.author : "", post.subreddit || ""].filter(Boolean).join(" · ");
+      meta.appendChild(title);
+      if (author.textContent) meta.appendChild(author);
+      card.appendChild(meta);
+      return card;
+    }
+
+    (async () => {
+      const statusEl = document.getElementById("status");
+      const galleryEl = document.getElementById("gallery");
+      if (!k) {
+        statusEl.textContent = "Missing decryption key (#k=...) in URL.";
+        return;
+      }
+      try {
+        const resp = await fetch("/v1/share/${shareId}");
+        if (!resp.ok) {
+          statusEl.textContent = "This share link has expired or does not exist.";
+          return;
+        }
+        const { cipher } = await resp.json();
+        const keyBytes = b64UrlToBytes(k);
+        const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["decrypt"]);
+        const plainBytes = await openTTENC(b64ToBytes(cipher), cryptoKey);
+        const payload = JSON.parse(new TextDecoder().decode(plainBytes));
+
+        if (payload.title) {
+          document.getElementById("dropTitle").textContent = payload.title;
+        }
+
+        const list = Array.isArray(payload.posts) && payload.posts.length
+          ? payload.posts
+          : (payload.post ? [payload.post] : []);
+
+        if (list.length > 0) {
+          statusEl.style.display = "none";
+          document.getElementById("dropSub").textContent = list.length + " shared video" + (list.length === 1 ? "" : "s") + " · Decrypted locally in your browser.";
+          for (const p of list) {
+            galleryEl.appendChild(renderPostCard(p));
+          }
+          return;
+        }
+
+        if (payload.encryptedBlobUrl) {
+          statusEl.textContent = "Decrypting encrypted video file...";
+          const bResp = await fetch(payload.encryptedBlobUrl);
+          const encBuf = new Uint8Array(await bResp.arrayBuffer());
+          const filePlain = await openTTENC(encBuf, cryptoKey);
+          const ext = (payload.fileExtension || "mp4").toLowerCase();
+          const isImg = ["jpg", "jpeg", "png", "webp", "gif"].includes(ext);
+          const mime = isImg ? "image/" + (ext === "jpg" ? "jpeg" : ext) : "video/mp4";
+          const blobUrl = URL.createObjectURL(new Blob([filePlain], { type: mime }));
+          statusEl.style.display = "none";
+          galleryEl.appendChild(renderPostCard({
+            title: payload.title || payload.fileName || "Encrypted Video",
+            author: "TinyTiny Drop",
+            mediaType: isImg ? "image" : "video",
+            mediaUrl: blobUrl,
+            muxedUrl: blobUrl
+          }));
+          return;
+        }
+
+        statusEl.textContent = "Tap Open in TinyTiny to view this drop.";
+      } catch (e) {
+        statusEl.textContent = "Could not decrypt drop (" + (e && e.message ? e.message : "invalid key") + ").";
+      }
+    })();
   </script>
 </body>
 </html>`;

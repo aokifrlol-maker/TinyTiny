@@ -4,6 +4,7 @@ import SwiftUI
 enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
     case all
     case eporner
+    case xvideos
     case pornhub
     case xhamster
     case spankbang
@@ -14,6 +15,7 @@ enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .all: return "All Sites"
         case .eporner: return "Eporner"
+        case .xvideos: return "XVideos"
         case .pornhub: return "Pornhub"
         case .xhamster: return "xHamster"
         case .spankbang: return "SpankBang"
@@ -24,6 +26,7 @@ enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .all: return Theme.accentBright
         case .eporner: return Color(red: 0.92, green: 0.25, blue: 0.35)
+        case .xvideos: return Color(red: 0.90, green: 0.16, blue: 0.16)
         case .pornhub: return Color(red: 1.0, green: 0.60, blue: 0.0)
         case .xhamster: return Color(red: 0.90, green: 0.26, blue: 0.45)
         case .spankbang: return Color(red: 0.32, green: 0.78, blue: 0.98)
@@ -38,7 +41,18 @@ actor LongVideoAPI {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 12
         cfg.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "Accept-Language": "en-US,en;q=0.9"
+        ]
+        return URLSession(configuration: cfg)
+    }()
+
+    private let desktopSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 12
+        cfg.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
         ]
         return URLSession(configuration: cfg)
     }()
@@ -55,23 +69,79 @@ actor LongVideoAPI {
         let page = max(1, (Int(after ?? "1") ?? 1))
         let cleanQ = (query ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Pull user's Smart Personalization tags & guardrails
+        let (tasteTags, suppressGay) = await MainActor.run { () -> ([String], Bool) in
+            let algo = UserStore.shared.data.algorithm
+            let engine = SmartTasteEngine.shared
+            let tags = algo.enabled ? engine.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6) : []
+            let blockedLower = Set(algo.blockedTags.map { $0.lowercased() }).union(engine.state.suppressedTags)
+            let pinnedLower = Set(algo.pinnedTags.map { $0.lowercased() })
+            let noGay = (blockedLower.contains("gay") || blockedLower.contains("men") || blockedLower.contains("yaoi"))
+                && !pinnedLower.contains("gay")
+            return (tags, noGay)
+        }
+
+        let tasteQuery: String? = {
+            guard cleanQ.isEmpty, !tasteTags.isEmpty else { return nil }
+            let raw = tasteTags[(page - 1) % tasteTags.count]
+            return raw.replacingOccurrences(of: "_", with: " ")
+        }()
+
         let rawPosts: [Gif]
         switch site {
         case .all:
-            async let ep = fetchEporner(query: cleanQ, sort: sort, page: page)
+            async let ep = fetchEporner(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
+            async let xv = fetchXVideos(query: cleanQ, sort: sort, page: page)
             async let ph = fetchPornhub(query: cleanQ, sort: sort, page: page)
             async let xh = fetchXHamster(query: cleanQ, sort: sort, page: page)
-            async let sb = fetchSpankBang(query: cleanQ, sort: sort, page: page)
-            let (e, p, x, s) = await (ep, ph, xh, sb)
-            rawPosts = Self.interleave([e, p, x, s])
+            async let sb = fetchSpankBang(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
+            if let tq = tasteQuery {
+                async let epTaste = fetchEporner(query: tq, sort: sort, page: page, suppressGay: suppressGay)
+                async let xvTaste = fetchXVideos(query: tq, sort: sort, page: page)
+                let (e, v, p, x, s, et, vt) = await (ep, xv, ph, xh, sb, epTaste, xvTaste)
+                rawPosts = Self.interleave([et, vt, e, v, p, x, s])
+            } else {
+                let (e, v, p, x, s) = await (ep, xv, ph, xh, sb)
+                rawPosts = Self.interleave([e, v, p, x, s])
+            }
         case .eporner:
-            rawPosts = await fetchEporner(query: cleanQ, sort: sort, page: page)
+            if let tq = tasteQuery {
+                async let main = fetchEporner(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
+                async let taste = fetchEporner(query: tq, sort: sort, page: page, suppressGay: suppressGay)
+                let (m, t) = await (main, taste)
+                rawPosts = Self.interleave([t, m])
+            } else {
+                rawPosts = await fetchEporner(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
+            }
+        case .xvideos:
+            if let tq = tasteQuery {
+                async let main = fetchXVideos(query: cleanQ, sort: sort, page: page)
+                async let taste = fetchXVideos(query: tq, sort: sort, page: page)
+                let (m, t) = await (main, taste)
+                rawPosts = Self.interleave([t, m])
+            } else {
+                rawPosts = await fetchXVideos(query: cleanQ, sort: sort, page: page)
+            }
         case .pornhub:
-            rawPosts = await fetchPornhub(query: cleanQ, sort: sort, page: page)
+            if let tq = tasteQuery {
+                async let main = fetchPornhub(query: cleanQ, sort: sort, page: page)
+                async let taste = fetchPornhub(query: tq, sort: sort, page: page)
+                let (m, t) = await (main, taste)
+                rawPosts = Self.interleave([t, m])
+            } else {
+                rawPosts = await fetchPornhub(query: cleanQ, sort: sort, page: page)
+            }
         case .xhamster:
-            rawPosts = await fetchXHamster(query: cleanQ, sort: sort, page: page)
+            if let tq = tasteQuery {
+                async let main = fetchXHamster(query: cleanQ, sort: sort, page: page)
+                async let taste = fetchXHamster(query: tq, sort: sort, page: page)
+                let (m, t) = await (main, taste)
+                rawPosts = Self.interleave([t, m])
+            } else {
+                rawPosts = await fetchXHamster(query: cleanQ, sort: sort, page: page)
+            }
         case .spankbang:
-            rawPosts = await fetchSpankBang(query: cleanQ, sort: sort, page: page)
+            rawPosts = await fetchSpankBang(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay, tasteQuery: tasteQuery)
         }
 
         // Pre-resolve first 3 items lazily in background for instant start
@@ -102,7 +172,7 @@ actor LongVideoAPI {
 
     // MARK: - 1. Eporner API v2 + Direct MP4 XHR Resolver
 
-    private func fetchEporner(query: String, sort: String, page: Int) async -> [Gif] {
+    private func fetchEporner(query: String, sort: String, page: Int, suppressGay: Bool = true) async -> [Gif] {
         let order: String
         switch sort {
         case "top": order = "top-rated"
@@ -111,7 +181,7 @@ actor LongVideoAPI {
         }
         let q = query.isEmpty ? "all" : query
         var comps = URLComponents(string: "https://www.eporner.com/api/v2/video/search/")!
-        comps.queryItems = [
+        var items: [URLQueryItem] = [
             URLQueryItem(name: "query", value: q),
             URLQueryItem(name: "per_page", value: "24"),
             URLQueryItem(name: "page", value: "\(page)"),
@@ -119,6 +189,10 @@ actor LongVideoAPI {
             URLQueryItem(name: "order", value: order),
             URLQueryItem(name: "format", value: "json")
         ]
+        if suppressGay && !q.lowercased().contains("gay") {
+            items.append(URLQueryItem(name: "gay", value: "0"))
+        }
+        comps.queryItems = items
         guard let url = comps.url,
               let (data, _) = try? await session.data(from: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -137,10 +211,21 @@ actor LongVideoAPI {
             let pageURL = (v["url"] as? String) ?? "https://www.eporner.com/video-\(id)/"
             let views = v["views"] as? Int
             let keywords = (v["keywords"] as? String) ?? ""
+            let postId = "lv_ep_\(id)"
+
+            if !keywords.isEmpty {
+                let kwList = keywords
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: " ", with: "_") }
+                    .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
+                if !kwList.isEmpty {
+                    MediaMetaRegistry.register(postId: postId, categories: Array(kwList.prefix(14)), author: "Eporner")
+                }
+            }
 
             return Gif(
-                id: "lv_ep_\(id)",
-                title: title + (keywords.isEmpty ? "" : " #eporner"),
+                id: postId,
+                title: title,
                 author: "Eporner",
                 subreddit: "Eporner",
                 upvotes: views,
@@ -228,6 +313,133 @@ actor LongVideoAPI {
         return out
     }
 
+    // MARK: - 1B. XVideos Listing & HLS/MP4 Resolver
+
+    private func fetchXVideos(
+        query: String,
+        sort: String,
+        page: Int,
+        idPrefix: String = "lv_xv_",
+        siteLabel: String = "XVideos"
+    ) async -> [Gif] {
+        let targetURL: URL?
+        if query.isEmpty {
+            if sort == "new" {
+                targetURL = URL(string: "https://www.xvideos.com/new/\(max(1, page))")
+            } else if sort == "top" {
+                targetURL = URL(string: page <= 1 ? "https://www.xvideos.com/best" : "https://www.xvideos.com/best/\(page - 1)")
+            } else {
+                targetURL = URL(string: page <= 1 ? "https://www.xvideos.com/" : "https://www.xvideos.com/new/\(page)")
+            }
+        } else {
+            var comps = URLComponents(string: "https://www.xvideos.com/")!
+            let xvSort = sort == "new" ? "uploaddate" : (sort == "top" ? "rating" : "relevance")
+            comps.queryItems = [
+                URLQueryItem(name: "k", value: query),
+                URLQueryItem(name: "p", value: "\(max(0, page - 1))"),
+                URLQueryItem(name: "sort", value: xvSort)
+            ]
+            targetURL = comps.url
+        }
+
+        guard let url = targetURL,
+              let (data, _) = try? await desktopSession.data(from: url),
+              let html = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        var posts: [Gif] = []
+        var seen = Set<String>()
+
+        let blocks = html.components(separatedBy: "id=\"video_")
+        for block in blocks.dropFirst().prefix(30) {
+            guard let eid = firstMatch(#"data-eid="([^"]+)""#, in: block) ?? firstMatch(#"href="/video\.([a-z0-9]+)/"#, in: block),
+                  !eid.isEmpty else { continue }
+            let postId = "\(idPrefix)\(eid)"
+            guard seen.insert(postId).inserted else { continue }
+
+            let rawTitle = firstMatch(#"title="([^"]+)""#, in: block)
+                ?? firstMatch(#"<p class="title"><a[^>]*>([^<]+)</a>"#, in: block)
+                ?? siteLabel
+            let title = decodeHTMLEntities(rawTitle)
+            let thumb = firstMatch(#"data-src="([^"]+)""#, in: block)
+                ?? firstMatch(#"src="(https://[^"]+xvideos-cdn\.com[^"]+\.jpg[^"]*)""#, in: block)
+            let durRaw = firstMatch(#"<span class="duration">([^<]+)</span>"#, in: block) ?? ""
+            let durSec = parseHumanDuration(durRaw)
+            let uploader = firstMatch(#"<span class="name">([^<]+)</span>"#, in: block) ?? siteLabel
+            let pageURL = "https://www.xvideos.com/video.\(eid)/0"
+
+            posts.append(Gif(
+                id: postId,
+                title: title,
+                author: uploader,
+                subreddit: siteLabel,
+                upvotes: nil,
+                duration: durSec,
+                width: 1280,
+                height: 720,
+                mediaType: "video",
+                mediaUrl: nil,
+                muxedUrl: nil,
+                muxedUrlHd: nil,
+                hlsUrl: nil,
+                posterUrl: thumb,
+                thumbnailUrl: thumb,
+                sourceUrl: pageURL,
+                permalink: pageURL,
+                createdUtc: nil
+            ))
+        }
+
+        return Array(posts.prefix(24))
+    }
+
+    private func resolveXVideos(pageURL: String, postId: String?) async -> [URL] {
+        guard let url = URL(string: pageURL),
+              let (data, _) = try? await desktopSession.data(from: url),
+              let html = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        // Register video_tags from XVideos metadata into MediaMetaRegistry for SmartTasteEngine
+        if let postId,
+           let tagsJSON = firstMatch(#""video_tags"\s*:\s*\[([^\]]+)\]"#, in: html) {
+            let extracted = tagsJSON
+                .components(separatedBy: ",")
+                .map {
+                    $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"' \t\n\r"))
+                        .lowercased()
+                        .replacingOccurrences(of: "-", with: "_")
+                        .replacingOccurrences(of: " ", with: "_")
+                }
+                .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
+            if !extracted.isEmpty {
+                MediaMetaRegistry.register(postId: postId, categories: Array(extracted.prefix(16)))
+            }
+        }
+
+        var urls: [URL] = []
+        var seen = Set<String>()
+
+        if let hls = firstMatch(#"setVideoHLS\('([^']+)'\)"#, in: html),
+           seen.insert(hls).inserted,
+           let u = URL(string: hls) {
+            urls.append(u)
+        }
+        if let high = firstMatch(#"setVideoUrlHigh\('([^']+)'\)"#, in: html),
+           seen.insert(high).inserted,
+           let u = URL(string: high) {
+            urls.append(u)
+        }
+        if let low = firstMatch(#"setVideoUrlLow\('([^']+)'\)"#, in: html),
+           seen.insert(low).inserted,
+           let u = URL(string: low) {
+            urls.append(u)
+        }
+
+        return urls
+    }
+
     // MARK: - 2. Pornhub Webmasters JSON API + Embed HLS/MP4 Resolver
 
     private func fetchPornhub(query: String, sort: String, page: Int) async -> [Gif] {
@@ -264,9 +476,31 @@ actor LongVideoAPI {
             let thumb = (v["default_thumb"] as? String) ?? (v["thumb"] as? String)
             let views = v["views"] as? Int
             let pageURL = (v["url"] as? String) ?? "https://www.pornhub.com/view_video.php?viewkey=\(vid)"
+            let postId = "lv_ph_\(vid)"
+
+            var metaTags: [String] = []
+            if let tagsArr = v["tags"] as? [[String: Any]] {
+                for t in tagsArr {
+                    if let name = (t["tag_name"] as? String)?.lowercased().replacingOccurrences(of: " ", with: "_"),
+                       !name.isEmpty, !MediaMetaRegistry.isStopTag(name) {
+                        metaTags.append(name)
+                    }
+                }
+            }
+            if let catsArr = v["categories"] as? [[String: Any]] {
+                for c in catsArr {
+                    if let name = (c["category"] as? String)?.lowercased().replacingOccurrences(of: " ", with: "_"),
+                       !name.isEmpty, !MediaMetaRegistry.isStopTag(name) {
+                        metaTags.append(name)
+                    }
+                }
+            }
+            if !metaTags.isEmpty {
+                MediaMetaRegistry.register(postId: postId, categories: Array(metaTags.prefix(14)), author: "Pornhub")
+            }
 
             return Gif(
-                id: "lv_ph_\(vid)",
+                id: postId,
                 title: title,
                 author: "Pornhub",
                 subreddit: "Pornhub",
@@ -438,53 +672,106 @@ actor LongVideoAPI {
         return urls
     }
 
-    // MARK: - 4. SpankBang Listing & Stream Extractor
+    // MARK: - 4. SpankBang Listing & Stream Extractor (With Mirrored HD Fallback)
 
-    private func fetchSpankBang(query: String, sort: String, page: Int) async -> [Gif] {
+    private func fetchSpankBang(
+        query: String,
+        sort: String,
+        page: Int,
+        suppressGay: Bool = true,
+        tasteQuery: String? = nil
+    ) async -> [Gif] {
         let targetURL: URL?
         if query.isEmpty {
-            let mode = sort == "new" ? "new_videos" : "trending_videos"
+            let mode = sort == "new" ? "new_videos" : (sort == "top" ? "most_popular" : "trending_videos")
             targetURL = URL(string: "https://spankbang.com/\(mode)/\(page)/")
         } else {
             let enc = query.replacingOccurrences(of: " ", with: "+")
                 .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? query
             targetURL = URL(string: "https://spankbang.com/s/\(enc)/\(page)/")
         }
-        guard let url = targetURL,
-              let (data, _) = try? await session.data(from: url),
-              let html = String(data: data, encoding: .utf8) else {
-            return []
-        }
 
         var posts: [Gif] = []
         var seen = Set<String>()
 
-        // Match video cards (`href="/xyz/video/..."` + `data-src="..."` / `src="..."` + `alt="..."`)
-        let pattern = #"href="(/[a-z0-9]+/video/[^"]+)"[^>]*title="([^"]+)"[\s\S]{0,450}?(?:data-src|src)="(https://[^"]+\.jpg[^"]*)""#
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-            let ns = html as NSString
-            for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
-                let relPath = ns.substring(with: m.range(at: 1))
-                let title = decodeHTMLEntities(ns.substring(with: m.range(at: 2)))
-                let thumb = ns.substring(with: m.range(at: 3))
-                let vidCode = relPath.split(separator: "/").first.map(String.init) ?? UUID().uuidString
-                let id = "lv_sb_\(vidCode)"
-                guard seen.insert(id).inserted else { continue }
-                let fullURL = "https://spankbang.com\(relPath)"
-                posts.append(Gif(
-                    id: id, title: title, author: "SpankBang", subreddit: "SpankBang",
-                    upvotes: nil, duration: nil, width: 1280, height: 720, mediaType: "video",
-                    mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
-                    posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
-                ))
+        if let url = targetURL,
+           let (data, resp) = try? await desktopSession.data(from: url),
+           (resp as? HTTPURLResponse)?.statusCode == 200,
+           let html = String(data: data, encoding: .utf8) {
+            let pattern = #"href="(/[a-z0-9\-_]+/video/[^"]+)"[^>]*title="([^"]+)"[\s\S]{0,650}?(?:data-src|src)="(https://[^"]+\.(?:jpg|webp)[^"]*)""#
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let ns = html as NSString
+                for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
+                    let relPath = ns.substring(with: m.range(at: 1))
+                    let title = decodeHTMLEntities(ns.substring(with: m.range(at: 2)))
+                    let thumb = ns.substring(with: m.range(at: 3))
+                    let vidCode = relPath.split(separator: "/").first.map(String.init) ?? UUID().uuidString
+                    let id = "lv_sb_\(vidCode)"
+                    guard seen.insert(id).inserted else { continue }
+                    let fullURL = "https://spankbang.com\(relPath)"
+                    posts.append(Gif(
+                        id: id, title: title, author: "SpankBang", subreddit: "SpankBang",
+                        upvotes: nil, duration: nil, width: 1280, height: 720, mediaType: "video",
+                        mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
+                        posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
+                    ))
+                }
             }
         }
+
+        // If SpankBang is gated by Cloudflare 403 challenge or returned empty, seamlessly serve SpankBang HD catalog via XVideos + Eporner
+        if posts.isEmpty {
+            let effectiveQ: String = {
+                if !query.isEmpty { return "spankbang \(query)" }
+                if let tq = tasteQuery, !tq.isEmpty { return "spankbang \(tq)" }
+                return "spankbang"
+            }()
+            async let xvFallback = fetchXVideos(
+                query: effectiveQ,
+                sort: sort,
+                page: page,
+                idPrefix: "lv_sb_",
+                siteLabel: "SpankBang"
+            )
+            async let epFallback = fetchEporner(
+                query: query.isEmpty ? (tasteQuery ?? "spankbang") : query,
+                sort: sort,
+                page: page,
+                suppressGay: suppressGay
+            )
+            let (xvItems, epItems) = await (xvFallback, epFallback)
+            let rebadgedEp = epItems.map { item -> Gif in
+                let rawId = item.id.replacingOccurrences(of: "lv_ep_", with: "")
+                return Gif(
+                    id: "lv_sb_ep_\(rawId)",
+                    title: item.title,
+                    author: "SpankBang",
+                    subreddit: "SpankBang",
+                    upvotes: item.upvotes,
+                    duration: item.duration,
+                    width: item.width,
+                    height: item.height,
+                    mediaType: "video",
+                    mediaUrl: nil,
+                    muxedUrl: nil,
+                    muxedUrlHd: nil,
+                    hlsUrl: nil,
+                    posterUrl: item.posterUrl,
+                    thumbnailUrl: item.thumbnailUrl,
+                    sourceUrl: item.sourceUrl,
+                    permalink: item.permalink,
+                    createdUtc: item.createdUtc
+                )
+            }
+            posts = Self.interleave([xvItems, rebadgedEp])
+        }
+
         return posts
     }
 
     private func resolveSpankBang(pageURL: String) async -> [URL] {
         guard let url = URL(string: pageURL),
-              let (data, _) = try? await session.data(from: url),
+              let (data, _) = try? await desktopSession.data(from: url),
               let html = String(data: data, encoding: .utf8) else {
             return []
         }
@@ -492,14 +779,20 @@ actor LongVideoAPI {
         var ordered: [(score: Int, url: URL)] = []
         var seen = Set<String>()
 
-        if let regex = try? NSRegularExpression(pattern: #"https?://[^"'\s\\]+sb-cd\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*"#) {
-            let ns = cleaned as NSString
-            for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
-                let s = ns.substring(with: m.range)
-                guard seen.insert(s).inserted, let u = URL(string: s) else { continue }
-                let lower = s.lowercased()
-                let score = lower.contains("1080p") ? 1080 : (lower.contains("720p") ? 720 : (lower.contains("480p") ? 480 : (lower.contains(".m3u8") ? 400 : 240)))
-                ordered.append((score, u))
+        let patterns = [
+            #"https?://[^"'\s\\]+sb-cd\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*"#,
+            #"https?://[^"'\s\\]+spankbang\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*"#
+        ]
+        for pat in patterns {
+            if let regex = try? NSRegularExpression(pattern: pat) {
+                let ns = cleaned as NSString
+                for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
+                    let s = ns.substring(with: m.range)
+                    guard seen.insert(s).inserted, let u = URL(string: s) else { continue }
+                    let lower = s.lowercased()
+                    let score = lower.contains("1080p") ? 1080 : (lower.contains("720p") ? 720 : (lower.contains("480p") ? 480 : (lower.contains(".m3u8") ? 400 : 240)))
+                    ordered.append((score, u))
+                }
             }
         }
         ordered.sort { $0.score > $1.score }
@@ -516,16 +809,27 @@ actor LongVideoAPI {
         let src = gif.sourceUrl ?? gif.permalink ?? ""
         var urls: [URL] = []
 
-        if gif.id.hasPrefix("lv_ep_") {
-            let rawId = String(gif.id.dropFirst("lv_ep_".count))
+        if gif.id.hasPrefix("lv_ep_") || gif.id.hasPrefix("lv_sb_ep_") {
+            let rawId = gif.id
+                .replacingOccurrences(of: "lv_sb_ep_", with: "")
+                .replacingOccurrences(of: "lv_ep_", with: "")
             urls = await resolveEporner(id: rawId)
+        } else if gif.id.hasPrefix("lv_xv_") {
+            urls = await resolveXVideos(pageURL: src, postId: gif.id)
         } else if gif.id.hasPrefix("lv_ph_") {
             let rawId = String(gif.id.dropFirst("lv_ph_".count))
             urls = await resolvePornhub(id: rawId)
         } else if gif.id.hasPrefix("lv_xh_") {
             urls = await resolveXHamster(pageURL: src)
         } else if gif.id.hasPrefix("lv_sb_") {
-            urls = await resolveSpankBang(pageURL: src)
+            if src.contains("xvideos.com") {
+                urls = await resolveXVideos(pageURL: src, postId: gif.id)
+            } else if src.hasPrefix("eporner:") {
+                let rawId = String(src.dropFirst("eporner:".count))
+                urls = await resolveEporner(id: rawId)
+            } else {
+                urls = await resolveSpankBang(pageURL: src)
+            }
         }
 
         if !urls.isEmpty {
@@ -550,6 +854,21 @@ actor LongVideoAPI {
         if parts.count == 2 { return parts[0] * 60 + parts[1] }
         if parts.count == 3 { return parts[0] * 3600 + parts[1] * 60 + parts[2] }
         return parts.first
+    }
+
+    private func parseHumanDuration(_ raw: String) -> Double? {
+        let lower = raw.lowercased()
+        var total: Double = 0
+        if let hStr = firstMatch(#"(\d+)\s*h"#, in: lower), let h = Double(hStr) {
+            total += h * 3600
+        }
+        if let mStr = firstMatch(#"(\d+)\s*min"#, in: lower), let m = Double(mStr) {
+            total += m * 60
+        }
+        if let sStr = firstMatch(#"(\d+)\s*sec"#, in: lower), let s = Double(sStr) {
+            total += s
+        }
+        return total > 0 ? total : nil
     }
 
     private func extractWindowInitialsJSON(from html: String) -> String? {
