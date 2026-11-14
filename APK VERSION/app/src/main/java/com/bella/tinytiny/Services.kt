@@ -41,124 +41,108 @@ object HttpPool {
 }
 
 object GoonedAPI {
-    private val defaultSubs = listOf("nsfwgifs", "porninfifteenseconds", "60fpsporn", "NSFW_GIF", "gothsluts", "asiansgonewild", "femboys")
+    private const val BASE = "https://api.gooned.app"
+    private val goonedHeaders = mapOf(
+        "Accept" to "application/json",
+        "Origin" to "https://gooned.app",
+        "Referer" to "https://gooned.app/",
+        "Cache-Control" to "no-cache"
+    )
 
-    suspend fun forYou(sort: String, after: String?): GoonedFeedResponse = withContext(Dispatchers.IO) {
-        val sub = defaultSubs.random()
-        subreddit(sub, sort, after, 24)
+    private fun randomForYouCursor(offset: Int = 0): String {
+        val seed = java.util.UUID.randomUUID().toString().replace("-", "").lowercase().take(10)
+        val raw = """{"seed":"$seed","offset":$offset}"""
+        return android.util.Base64.encodeToString(raw.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
     }
 
-    suspend fun subreddit(name: String, sort: String, after: String?, limit: Int = 24): GoonedFeedResponse = withContext(Dispatchers.IO) {
-        val s = when (sort) {
-            "top" -> "top"
-            "new" -> "new"
-            else -> "hot"
-        }
+    suspend fun forYou(sort: String, after: String?): GoonedFeedResponse = withContext(Dispatchers.IO) {
+        val cur = after?.takeIf { it.isNotBlank() } ?: randomForYouCursor(0)
+        val url = "$BASE/reddit/foryou?sort=${HttpPool.encode(sort)}&limit=25&after=${HttpPool.encode(cur)}"
+        val body = HttpPool.getString(url, goonedHeaders) ?: return@withContext GoonedFeedResponse(emptyList())
+        parseGoonedResponse(body)
+    }
+
+    suspend fun subreddit(name: String, sort: String, after: String?, limit: Int = 25): GoonedFeedResponse = withContext(Dispatchers.IO) {
+        val clean = name.removePrefix("r/").removePrefix("/").trim()
         val afterQ = if (!after.isNullOrBlank()) "&after=${HttpPool.encode(after)}" else ""
-        val url = "https://www.reddit.com/r/${HttpPool.encode(name)}/$s.json?limit=$limit&raw_json=1$afterQ"
-        val body = HttpPool.getString(url, mapOf("Accept" to "application/json")) ?: return@withContext GoonedFeedResponse(emptyList())
-        parseRedditListing(body, name)
+        val url = "$BASE/reddit/subreddit/${HttpPool.encode(clean)}?sort=${HttpPool.encode(sort)}&limit=$limit$afterQ"
+        val body = HttpPool.getString(url, goonedHeaders) ?: return@withContext GoonedFeedResponse(emptyList())
+        parseGoonedResponse(body)
     }
 
     suspend fun user(name: String, after: String?): GoonedFeedResponse = withContext(Dispatchers.IO) {
+        val clean = name.removePrefix("u/").removePrefix("@").trim()
         val afterQ = if (!after.isNullOrBlank()) "&after=${HttpPool.encode(after)}" else ""
-        val url = "https://www.reddit.com/user/${HttpPool.encode(name)}/submitted.json?limit=24&raw_json=1$afterQ"
-        val body = HttpPool.getString(url, mapOf("Accept" to "application/json")) ?: return@withContext GoonedFeedResponse(emptyList())
-        parseRedditListing(body, name)
+        val url = "$BASE/reddit/user/${HttpPool.encode(clean)}?sort=hot&limit=25$afterQ"
+        val body = HttpPool.getString(url, goonedHeaders) ?: return@withContext GoonedFeedResponse(emptyList())
+        parseGoonedResponse(body)
     }
 
-    suspend fun category(name: String, sort: String, after: String?, limit: Int = 20): GoonedFeedResponse =
-        subreddit(name.replace(" ", ""), sort, after, limit)
+    suspend fun category(name: String, sort: String, after: String?, limit: Int = 25): GoonedFeedResponse = withContext(Dispatchers.IO) {
+        val afterQ = if (!after.isNullOrBlank()) "&after=${HttpPool.encode(after)}" else ""
+        val url = "$BASE/reddit/category/${HttpPool.encode(name)}?sort=${HttpPool.encode(sort)}&limit=$limit$afterQ"
+        val body = HttpPool.getString(url, goonedHeaders) ?: return@withContext GoonedFeedResponse(emptyList())
+        parseGoonedResponse(body)
+    }
 
     suspend fun searchSubreddits(query: String): List<String> = withContext(Dispatchers.IO) {
-        val url = "https://www.reddit.com/subreddits/search.json?q=${HttpPool.encode(query)}&include_over_18=on&limit=8"
-        val body = HttpPool.getString(url) ?: return@withContext emptyList()
+        val url = "$BASE/reddit/search?q=${HttpPool.encode(query)}"
+        val body = HttpPool.getString(url, goonedHeaders) ?: return@withContext emptyList()
         val out = mutableListOf<String>()
         runCatching {
-            val children = JSONObject(body).getJSONObject("data").getJSONArray("children")
-            for (i in 0 until children.length()) {
-                val d = children.getJSONObject(i).getJSONObject("data")
-                val name = d.optString("display_name")
-                if (name.isNotBlank()) out.add(name)
+            val arr = JSONObject(body).optJSONArray("subreddits") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val n = arr.getJSONObject(i).optString("name")
+                if (n.isNotBlank()) out.add(n)
             }
         }
         out
     }
 
-    private fun parseRedditListing(raw: String, fallbackSub: String): GoonedFeedResponse {
+    private fun parseGoonedResponse(raw: String): GoonedFeedResponse {
         val posts = mutableListOf<Gif>()
         var nextAfter: String? = null
         runCatching {
-            val data = JSONObject(raw).getJSONObject("data")
-            nextAfter = data.optString("after").takeIf { it.isNotBlank() && it != "null" }
-            val children = data.getJSONArray("children")
-            for (i in 0 until children.length()) {
-                val d = children.getJSONObject(i).optJSONObject("data") ?: continue
-                val id = d.optString("id").takeIf { it.isNotBlank() } ?: continue
-                val title = d.optString("title")
-                val author = d.optString("author")
-                val sub = d.optString("subreddit", fallbackSub)
-                val ups = d.optInt("ups", 0)
-                val permalink = "https://www.reddit.com" + d.optString("permalink")
-                val urlOver = d.optString("url_overridden_by_dest", d.optString("url"))
-                val created = d.optDouble("created_utc", 0.0)
-
-                var videoUrl: String? = null
-                var hlsUrl: String? = null
-                var posterUrl: String? = null
-                var mediaType = "video"
-
-                val redditVideo = d.optJSONObject("secure_media")?.optJSONObject("reddit_video")
-                    ?: d.optJSONObject("media")?.optJSONObject("reddit_video")
-                if (redditVideo != null) {
-                    videoUrl = redditVideo.optString("fallback_url").takeIf { it.isNotBlank() }
-                    hlsUrl = redditVideo.optString("hls_url").takeIf { it.isNotBlank() }
+            val obj = JSONObject(raw)
+            nextAfter = obj.optString("after").takeIf { it.isNotBlank() && it != "null" }
+            val arr = obj.optJSONArray("posts") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val p = arr.getJSONObject(i)
+                val id = p.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val title = p.optString("title").takeIf { it.isNotBlank() && it != "null" }
+                val author = p.optString("author").takeIf { it.isNotBlank() && it != "null" }
+                val sub = p.optString("subreddit").takeIf { it.isNotBlank() && it != "null" }
+                val mediaType = p.optString("mediaType").takeIf { it.isNotBlank() && it != "null" }
+                val mediaUrl = p.optString("mediaUrl").takeIf { it.isNotBlank() && it != "null" }
+                val muxedUrl = p.optString("muxedUrl").takeIf { it.isNotBlank() && it != "null" }
+                val muxedUrlHd = p.optString("muxedUrlHd").takeIf { it.isNotBlank() && it != "null" }
+                val hlsUrl = p.optString("hlsUrl").takeIf { it.isNotBlank() && it != "null" }
+                val posterUrl = p.optString("posterUrl").takeIf { it.isNotBlank() && it != "null" }
+                val thumbUrl = p.optString("thumbnailUrl").takeIf { it.isNotBlank() && it != "null" }
+                val sourceUrl = p.optString("sourceUrl").takeIf { it.isNotBlank() && it != "null" }
+                val permalink = p.optString("permalink").takeIf { it.isNotBlank() && it != "null" }
+                if (!sub.isNullOrBlank()) {
+                    MediaMetaRegistry.register(postId = id, tags = listOf(sub.lowercase()), creatorName = author)
                 }
-
-                val previewVideo = d.optJSONObject("preview")?.optJSONObject("reddit_video_preview")
-                if (videoUrl == null && previewVideo != null) {
-                    videoUrl = previewVideo.optString("fallback_url").takeIf { it.isNotBlank() }
-                    hlsUrl = previewVideo.optString("hls_url").takeIf { it.isNotBlank() }
-                }
-
-                val images = d.optJSONObject("preview")?.optJSONArray("images")
-                if (images != null && images.length() > 0) {
-                    posterUrl = images.getJSONObject(0).optJSONObject("source")?.optString("url")
-                }
-
-                if (videoUrl == null && hlsUrl == null) {
-                    val low = urlOver.lowercase()
-                    if (low.endsWith(".mp4") || low.endsWith(".webm")) {
-                        videoUrl = urlOver
-                    } else if (low.endsWith(".gifv")) {
-                        videoUrl = urlOver.replace(".gifv", ".mp4")
-                    } else if (low.endsWith(".jpg") || low.endsWith(".jpeg") || low.endsWith(".png") || low.endsWith(".webp") || low.endsWith(".gif")) {
-                        mediaType = "image"
-                        posterUrl = urlOver
-                    } else {
-                        continue
-                    }
-                }
-
-                val postId = "rd_$id"
-                MediaMetaRegistry.register(postId = postId, tags = listOf(sub.lowercase()), creatorName = author)
                 posts.add(
                     Gif(
-                        id = postId,
+                        id = id,
                         title = title,
                         author = author,
                         subreddit = sub,
-                        upvotes = ups,
+                        upvotes = p.optInt("upvotes", 0),
+                        duration = p.optDouble("duration", 0.0).takeIf { !it.isNaN() && it > 0 },
+                        width = p.optInt("width", 0).takeIf { it > 0 },
+                        height = p.optInt("height", 0).takeIf { it > 0 },
                         mediaType = mediaType,
-                        mediaUrl = videoUrl ?: posterUrl,
-                        muxedUrl = videoUrl,
-                        muxedUrlHd = videoUrl,
+                        mediaUrl = mediaUrl,
+                        muxedUrl = muxedUrl,
+                        muxedUrlHd = muxedUrlHd,
                         hlsUrl = hlsUrl,
                         posterUrl = posterUrl,
-                        thumbnailUrl = posterUrl,
-                        sourceUrl = urlOver,
-                        permalink = permalink,
-                        createdUtc = created
+                        thumbnailUrl = thumbUrl,
+                        sourceUrl = sourceUrl,
+                        permalink = permalink
                     )
                 )
             }
@@ -168,7 +152,14 @@ object GoonedAPI {
 }
 
 object OnlyFansAPI {
-    private const val BASE = "https://cum.st/api"
+    private const val BASE = "https://cum.st/api/v1"
+    private const val MEDIA_CDN = "https://cdn.cum.st/media"
+    private const val THUMB_CDN = "https://img.cum.st/thumbnail"
+    private val ofHeaders = mapOf(
+        "Accept" to "application/json",
+        "Referer" to "https://cum.st/",
+        "Origin" to "https://cum.st"
+    )
 
     private fun buildUrl(path: String, params: Map<String, String>): String {
         val merged = params.toMutableMap()
@@ -228,64 +219,92 @@ object OnlyFansAPI {
     }
 
     private fun fetchPosts(url: String, offset: Int): GoonedFeedResponse {
-        val body = HttpPool.getString(url, mapOf("Accept" to "application/json")) ?: return GoonedFeedResponse(emptyList())
+        val body = HttpPool.getString(url, ofHeaders) ?: return GoonedFeedResponse(emptyList())
         val posts = mutableListOf<Gif>()
         runCatching {
             val arr = if (body.trimStart().startsWith("[")) JSONArray(body) else JSONObject(body).optJSONArray("posts") ?: JSONArray()
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-                val id = obj.optString("id").takeIf { it.isNotBlank() } ?: continue
-                val title = obj.optString("content", obj.optString("title"))
+                val postIdRaw = obj.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val title = obj.optString("content", obj.optString("title")).takeIf { it.isNotBlank() && it != "null" }
                 val creatorObj = obj.optJSONObject("creator")
-                val cId = creatorObj?.optString("id") ?: obj.optString("user")
-                val cName = creatorObj?.optString("name") ?: obj.optString("creator_name", "onlyfans")
-                val cGender = creatorObj?.optString("gender")?.takeIf { it.isNotBlank() }
+                val cId = creatorObj?.optString("id")?.takeIf { it.isNotBlank() } ?: obj.optString("creatorId", obj.optString("user"))
+                val cName = creatorObj?.optString("name")?.takeIf { it.isNotBlank() } ?: obj.optString("creatorName", "onlyfans")
+                val cGender = creatorObj?.optString("gender")?.takeIf { it.isNotBlank() && it != "null" }
                 val tagsArr = obj.optJSONArray("tags")
                 val tagList = mutableListOf<String>()
                 if (tagsArr != null) {
                     for (t in 0 until tagsArr.length()) {
-                        tagList.add(tagsArr.optString(t))
+                        val s = tagsArr.optString(t)
+                        if (s.isNotBlank()) tagList.add(s)
                     }
                 }
 
-                var videoUrl: String? = null
-                var posterUrl: String? = null
-                val attachments = obj.optJSONArray("attachments")
-                if (attachments != null) {
-                    for (a in 0 until attachments.length()) {
-                        val att = attachments.getJSONObject(a)
-                        val u = att.optString("url", att.optString("path"))
-                        if (u.contains(".mp4") || u.contains(".m3u8")) {
-                            if (videoUrl == null) videoUrl = u
-                        } else if (u.isNotBlank() && posterUrl == null) {
-                            posterUrl = u
+                val attachments = obj.optJSONArray("attachments") ?: continue
+                for (a in 0 until attachments.length()) {
+                    val att = attachments.getJSONObject(a)
+                    val kind = att.optString("kind", "").lowercase()
+                    if (kind != "video" && kind != "image" && kind != "gif") continue
+                    val sk = att.optString("storageKey", "").takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val variantsArr = att.optJSONArray("variants")
+                    val variantNames = mutableListOf<String>()
+                    if (variantsArr != null) {
+                        for (v in 0 until variantsArr.length()) {
+                            val vn = variantsArr.getJSONObject(v).optString("name")
+                            if (vn.isNotBlank()) variantNames.add(vn)
                         }
                     }
-                }
-                if (videoUrl == null && posterUrl == null) continue
-                val postId = "of_$id"
-                MediaMetaRegistry.register(
-                    postId = postId,
-                    tags = tagList,
-                    creatorGender = cGender,
-                    creatorId = cId,
-                    creatorName = cName
-                )
-                posts.add(
-                    Gif(
-                        id = postId,
-                        title = title,
-                        author = cName,
-                        subreddit = "OnlyFans",
-                        mediaType = if (videoUrl != null) "video" else "image",
-                        mediaUrl = videoUrl ?: posterUrl,
-                        muxedUrl = videoUrl,
-                        muxedUrlHd = videoUrl,
-                        posterUrl = posterUrl,
-                        thumbnailUrl = posterUrl,
-                        permalink = "https://onlyfans.com/$cName"
+                    val thumbURL = "$THUMB_CDN/$sk/preview.webp"
+                    val gid = "of_${postIdRaw}_$a"
+                    MediaMetaRegistry.register(
+                        postId = gid,
+                        tags = tagList,
+                        creatorGender = cGender,
+                        creatorId = cId,
+                        creatorName = cName
                     )
-                )
+                    if (kind == "video") {
+                        val hdName = variantNames.firstOrNull { it == "original.mp4" }
+                            ?: variantNames.firstOrNull { it.contains("1080") }
+                            ?: variantNames.firstOrNull { it == "720p.mp4" }
+                            ?: variantNames.firstOrNull()
+                            ?: "original.mp4"
+                        val sdName = variantNames.firstOrNull { it == "720p.mp4" } ?: hdName
+                        val lowName = variantNames.firstOrNull { it == "240p.mp4" } ?: sdName
+                        posts.add(
+                            Gif(
+                                id = gid,
+                                title = title ?: "@$cName",
+                                author = cName,
+                                subreddit = "OnlyFans",
+                                mediaType = "video",
+                                mediaUrl = "$MEDIA_CDN/$sk/$lowName",
+                                muxedUrl = "$MEDIA_CDN/$sk/$sdName",
+                                muxedUrlHd = "$MEDIA_CDN/$sk/$hdName",
+                                posterUrl = thumbURL,
+                                thumbnailUrl = thumbURL,
+                                sourceUrl = "https://cum.st/creators/onlyfans/$cId",
+                                permalink = "https://cum.st/creators/onlyfans/$cId/post/$postIdRaw"
+                            )
+                        )
+                    } else {
+                        val imgName = variantNames.firstOrNull { it.startsWith("original") } ?: variantNames.firstOrNull() ?: "original.jpg"
+                        posts.add(
+                            Gif(
+                                id = gid,
+                                title = title ?: "@$cName",
+                                author = cName,
+                                subreddit = "OnlyFans",
+                                mediaType = "image",
+                                mediaUrl = "$MEDIA_CDN/$sk/$imgName",
+                                posterUrl = thumbURL,
+                                thumbnailUrl = thumbURL,
+                                sourceUrl = "https://cum.st/creators/onlyfans/$cId",
+                                permalink = "https://cum.st/creators/onlyfans/$cId/post/$postIdRaw"
+                            )
+                        )
+                    }
+                }
             }
         }
         return GoonedFeedResponse(posts, if (posts.isEmpty()) null else "${offset + posts.size}")

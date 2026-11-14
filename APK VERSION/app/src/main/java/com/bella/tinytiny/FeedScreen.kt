@@ -46,9 +46,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import okhttp3.OkHttpClient
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 
@@ -190,11 +193,33 @@ private fun ReelCell(
 
     val player = remember(gif.id) {
         if (videoUrl != null) {
-            ExoPlayer.Builder(context).build().apply {
-                repeatMode = Player.REPEAT_MODE_ONE
-                setMediaItem(MediaItem.fromUri(videoUrl))
-                prepare()
-            }
+            val mediaOkHttp = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val req = chain.request()
+                    val host = req.url.host.lowercase()
+                    val referer = when {
+                        host.contains("cum.st") -> "https://cum.st/"
+                        host.contains("twimg.com") || host.contains("x.com") -> "https://x.com/"
+                        host.contains("xvideos") -> "https://www.xvideos.com/"
+                        else -> "https://gooned.app/"
+                    }
+                    chain.proceed(
+                        req.newBuilder()
+                            .header("Referer", referer)
+                            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")
+                            .build()
+                    )
+                }
+                .build()
+            val factory = DefaultMediaSourceFactory(OkHttpDataSource.Factory(mediaOkHttp))
+            ExoPlayer.Builder(context)
+                .setMediaSourceFactory(factory)
+                .build()
+                .apply {
+                    repeatMode = Player.REPEAT_MODE_ONE
+                    setMediaItem(MediaItem.fromUri(videoUrl))
+                    prepare()
+                }
         } else null
     }
 
