@@ -422,63 +422,120 @@ struct PasscodePad: View {
 struct AgeGateView: View {
     @EnvironmentObject var app: AppState
     @State private var under = false
+    @State private var entered = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        ZStack {
+            Theme.bg.ignoresSafeArea()
 
-            ZStack {
-                Circle()
-                    .stroke(Theme.ringGradient, lineWidth: 3)
-                    .frame(width: 108, height: 108)
-                Circle()
-                    .fill(Theme.surfaceElevated)
-                    .frame(width: 96, height: 96)
-                    .overlay(
-                        Text("18+")
-                            .font(.system(size: 36, weight: .black, design: .rounded))
-                            .foregroundStyle(Theme.ringGradient)
-                    )
-            }
+            RadialGradient(
+                colors: [Color(red: 0.85, green: 0.14, blue: 0.44).opacity(0.26), .clear],
+                center: UnitPoint(x: 0.5, y: 0.34),
+                startRadius: 10,
+                endRadius: 340
+            )
+            .ignoresSafeArea()
 
-            VStack(spacing: 10) {
-                Text("Welcome to Gooned")
-                    .font(.system(size: 28, weight: .heavy, design: .rounded))
-                Text("Adults Only (18+)")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                Text("This platform contains sexually explicit adult media. By entering, you confirm you are at least 18 years old (or the legal age of majority in your jurisdiction).")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-            }
+            VStack(spacing: 0) {
+                Spacer()
 
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    app.ageConfirmed = true
-                } label: {
-                    Text("I am 18 or older — Continue")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 16))
-                        .foregroundStyle(.white)
+                ZStack {
+                    Circle()
+                        .fill(Theme.accent.opacity(0.20))
+                        .frame(width: 112, height: 112)
+                        .blur(radius: 22)
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 92, height: 92)
+                        .overlay(
+                            Circle()
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [.white.opacity(0.36), Theme.accent.opacity(0.45), .white.opacity(0.08)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.1
+                                )
+                        )
+                    Text("18+")
+                        .font(.system(size: 32, weight: .black, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.white, Color(red: 1.0, green: 0.72, blue: 0.86)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
                 }
-                .buttonStyle(ScalePressButtonStyle())
+                .scaleEffect(entered ? 1 : 0.78)
+                .opacity(entered ? 1 : 0)
 
-                Button("I am under 18") { under = true }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.vertical, 6)
+                VStack(spacing: 10) {
+                    Text("18+ Only")
+                        .font(.system(size: 30, weight: .black, design: .rounded))
+                        .padding(.top, 22)
+
+                    Text("Everything inside is explicit.\nConfirm you're of legal age to enter.")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                        .padding(.horizontal, 36)
+                }
+                .offset(y: entered ? 0 : 14)
+                .opacity(entered ? 1 : 0)
+
+                Spacer()
+
+                VStack(spacing: 14) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                            app.ageConfirmed = true
+                        }
+                    } label: {
+                        Text("I'm 18 or older")
+                            .font(.system(size: 16, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(
+                                Capsule()
+                                    .fill(Theme.brandGradient.opacity(0.85))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 0.9)
+                            )
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+
+                    Button("I'm under 18") { under = true }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .padding(.vertical, 4)
+
+                    Text("by bella")
+                        .font(.system(size: 11.5, weight: .medium, design: .serif))
+                        .italic()
+                        .tracking(0.8)
+                        .foregroundStyle(.white.opacity(0.24))
+                        .padding(.top, 4)
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 18)
+                .offset(y: entered ? 0 : 20)
+                .opacity(entered ? 1 : 0)
             }
         }
-        .padding(24)
         .foregroundStyle(.white)
-        .background(Theme.bg.ignoresSafeArea())
+        .onAppear {
+            withAnimation(.spring(response: 0.65, dampingFraction: 0.82)) {
+                entered = true
+            }
+        }
         .alert("Access Restricted", isPresented: $under) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -493,6 +550,8 @@ struct WelcomeOnboardingView: View {
     @State private var page = 0
     @State private var heroEntered = false
     @State private var pulseRing = false
+    @State private var cardReveal: [Bool] = [false, false, false]
+    @State private var chevronNudge = false
 
     var body: some View {
         ZStack {
@@ -563,6 +622,27 @@ struct WelcomeOnboardingView: View {
             withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
                 pulseRing = true
             }
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                chevronNudge = true
+            }
+            triggerCardStagger()
+        }
+        .onChange(of: page) { _, _ in
+            triggerCardStagger()
+        }
+    }
+
+    private func triggerCardStagger() {
+        cardReveal = [false, false, false]
+        for idx in 0..<3 {
+            let delay = 0.08 + Double(idx) * 0.11
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                withAnimation(.spring(response: 0.52, dampingFraction: 0.78)) {
+                    if idx < cardReveal.count {
+                        cardReveal[idx] = true
+                    }
+                }
+            }
         }
     }
 
@@ -629,6 +709,7 @@ struct WelcomeOnboardingView: View {
                         .font(.system(size: 15, weight: .bold))
                     Image(systemName: "chevron.right")
                         .font(.system(size: 13, weight: .bold))
+                        .offset(x: chevronNudge ? 4 : 0)
                 }
                 .foregroundStyle(.white.opacity(0.88))
                 .padding(.horizontal, 22)
@@ -655,18 +736,21 @@ struct WelcomeOnboardingView: View {
 
             VStack(spacing: 12) {
                 onboardingCard(
+                    index: 0,
                     icon: "square.stack.3d.up.fill",
                     accent: Color(red: 0.96, green: 0.28, blue: 0.56),
                     title: "6 Sites, 1 Spot",
                     detail: "X, Instagram, OnlyFans, Reddit, Rule34, and Long Videos — all right here."
                 )
                 onboardingCard(
+                    index: 1,
                     icon: "brain.head.profile",
                     accent: Color(red: 0.56, green: 0.36, blue: 0.98),
                     title: "Learns Your Type",
                     detail: "Picks up on what you actually like, even on untagged videos, without mixing up your niches."
                 )
                 onboardingCard(
+                    index: 2,
                     icon: "lock.shield.fill",
                     accent: Color(red: 0.20, green: 0.82, blue: 0.68),
                     title: "Send Drops Privately",
@@ -707,18 +791,21 @@ struct WelcomeOnboardingView: View {
 
             VStack(spacing: 12) {
                 onboardingCard(
+                    index: 0,
                     icon: "hand.tap.fill",
                     accent: Color(red: 0.98, green: 0.62, blue: 0.22),
                     title: "Tap & Hold",
                     detail: "Double-tap to like, hold anywhere for 2x speed, or hit Full Wide to flip sideways."
                 )
                 onboardingCard(
+                    index: 1,
                     icon: "slider.horizontal.3",
                     accent: Color(red: 0.28, green: 0.72, blue: 0.98),
                     title: "Tune Your Feed",
                     detail: "Open ⚙️ → Smart Algorithm to boost tags, block stuff you hate, or lock in guardrails."
                 )
                 onboardingCard(
+                    index: 2,
                     icon: "key.icloud.fill",
                     accent: Color(red: 0.78, green: 0.36, blue: 0.96),
                     title: "Accounts & Lock",
@@ -794,8 +881,9 @@ struct WelcomeOnboardingView: View {
         }
     }
 
-    private func onboardingCard(icon: String, accent: Color, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 14) {
+    private func onboardingCard(index: Int, icon: String, accent: Color, title: String, detail: String) -> some View {
+        let shown = index < cardReveal.count ? cardReveal[index] : true
+        return HStack(alignment: .top, spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(accent.opacity(0.20))
@@ -803,6 +891,7 @@ struct WelcomeOnboardingView: View {
                 Image(systemName: icon)
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(accent)
+                    .scaleEffect(pulseRing ? 1.07 : 0.96)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -820,6 +909,9 @@ struct WelcomeOnboardingView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
         )
+        .offset(y: shown ? 0 : 26)
+        .scaleEffect(shown ? 1 : 0.94)
+        .opacity(shown ? 1 : 0)
     }
 }
 

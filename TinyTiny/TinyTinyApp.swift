@@ -65,19 +65,28 @@ struct RootView: View {
             Theme.bg.ignoresSafeArea()
             if !app.ageConfirmed {
                 AgeGateView()
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
             } else if !app.onboardingCompleted {
                 WelcomeOnboardingView {
-                    app.onboardingCompleted = true
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                        app.onboardingCompleted = true
+                    }
                 }
+                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
             } else if !app.licenseActivated {
                 LicenseGateView {
-                    app.licenseActivated = true
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                        app.licenseActivated = true
+                    }
                 }
+                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
             } else if !app.passcodeChoiceCompleted {
                 PasscodeSetupView(mode: .create)
+                    .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .opacity))
             } else {
                 if app.hasUnlockedOnce || !app.requirePasscodeOnOpen {
                     GoonedMainShell()
+                        .transition(.opacity)
                 }
                 if app.isLocked {
                     LockView().transition(.opacity).zIndex(10)
@@ -87,6 +96,10 @@ struct RootView: View {
                 PrivacyCover().zIndex(20)
             }
         }
+        .animation(.spring(response: 0.45, dampingFraction: 0.86), value: app.ageConfirmed)
+        .animation(.spring(response: 0.45, dampingFraction: 0.86), value: app.onboardingCompleted)
+        .animation(.spring(response: 0.45, dampingFraction: 0.86), value: app.licenseActivated)
+        .animation(.spring(response: 0.45, dampingFraction: 0.86), value: app.passcodeChoiceCompleted)
         .animation(.easeInOut(duration: 0.2), value: app.isLocked)
         .task {
             if license.isValidAccess {

@@ -134,15 +134,16 @@ final class MediaImageLoader {
         if let existing = cache.object(forKey: key as NSString) { return existing }
         if let task = inFlight[key] { return await task.value }
 
-        let task = Task<UIImage?, Never> {
+        let task = Task.detached(priority: .utility) { [session, cache] () -> UIImage? in
             for useReferer in [true, false] {
                 var req = URLRequest(url: url)
-                for (k, v) in MediaHeaders.headers(for: url, includeReferer: useReferer) {
+                for (k, v) in await MediaHeaders.headers(for: url, includeReferer: useReferer) {
                     req.setValue(v, forHTTPHeaderField: k)
                 }
                 if let (data, resp) = try? await session.data(for: req),
                    (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
-                   let img = UIImage(data: data) {
+                   let rawImg = UIImage(data: data) {
+                    let img = await rawImg.byPreparingForDisplay() ?? rawImg
                     cache.setObject(img, forKey: key as NSString, cost: data.count)
                     return img
                 }
@@ -464,32 +465,30 @@ final class PlayerModel: ObservableObject {
         looper = nil
         player.removeAllItems()
 
-        if isHLS || url.isFileURL {
-            // AVPlayerLooper frequently freezes or black-frames on HLS (.m3u8); loop via end notification instead
-            player.insert(item, after: nil)
-            endObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemDidPlayToEndTime,
-                object: item,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.onClipEnded?()
-                    self.player.seek(to: .zero) { _ in
-                        Task { @MainActor [weak self] in
-                            guard let self, self.wantsPlaying else { return }
-                            self.player.play()
-                        }
+        // Loop via AVPlayerItemDidPlayToEndTime for all media (avoids AVPlayerLooper main-thread freezes)
+        player.insert(item, after: nil)
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.onClipEnded?()
+                self.player.seek(to: .zero) { _ in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.wantsPlaying else { return }
+                        self.player.play()
                     }
                 }
             }
-        } else {
-            looper = AVPlayerLooper(player: player, templateItem: item)
         }
 
         sizeObservation = player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
-            MainActor.assumeIsolated {
-                guard let self, let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 else { return }
+            let sz = p.currentItem?.presentationSize ?? .zero
+            guard sz.width > 0, sz.height > 0 else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 self.detectedAspect = Double(sz.width / sz.height)
                 self.hasValidVideoSize = true
                 self.promoteReadyIfRenderable()
@@ -497,12 +496,14 @@ final class PlayerModel: ObservableObject {
         }
 
         statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
-            MainActor.assumeIsolated {
+            let status = p.currentItem?.status
+            let sz = p.currentItem?.presentationSize ?? .zero
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                switch p.currentItem?.status {
+                switch status {
                 case .readyToPlay:
                     self.allFailed = false
-                    if let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 {
+                    if sz.width > 0, sz.height > 0 {
                         self.detectedAspect = Double(sz.width / sz.height)
                         self.hasValidVideoSize = true
                     }
@@ -738,30 +739,35 @@ struct FeedView: View {
         .onChange(of: store.data.settings.autoScrollDelay) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: store.data.settings.playVideosToEnd) { _, _ in scheduleAutoScrollTimer() }
         .onChange(of: currentID) { old, new in
-            if let old {
-                if let oldPost = model.items.first(where: { $0.id == old }) {
-                    store.markSeen(oldPost)
-                    let dwell = Date().timeIntervalSince(currentItemShownAt)
-                    store.recordDwellSignal(for: oldPost, secondsWatched: dwell)
-                } else {
-                    store.markSeen(old)
-                }
-            }
-            if let new {
-                currentItemShownAt = Date()
-                if let newPost = model.items.first(where: { $0.id == new }) {
-                    store.markSeen(newPost)
-                } else {
-                    store.markSeen(new)
-                }
-                if old != nil {
-                    let key = model.source.swipeKey
-                    store.recordSwipe(kind: key.kind, name: key.name, displayTitle: model.source.displayTitle, postID: new)
-                }
-            }
+            let shownAt = currentItemShownAt
+            currentItemShownAt = Date()
             preloadUpcoming()
             scheduleAutoScrollTimer()
             model.prefetchIfNeeded(currentID: new)
+            Task { @MainActor in
+                // Yield briefly so scroll-snap animation completes before mutating UserStore
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                if let old {
+                    if let oldPost = model.items.first(where: { $0.id == old }) {
+                        store.markSeen(oldPost)
+                        let dwell = Date().timeIntervalSince(shownAt)
+                        store.recordDwellSignal(for: oldPost, secondsWatched: dwell)
+                    } else {
+                        store.markSeen(old)
+                    }
+                }
+                if let new {
+                    if let newPost = model.items.first(where: { $0.id == new }) {
+                        store.markSeen(newPost)
+                    } else {
+                        store.markSeen(new)
+                    }
+                    if old != nil {
+                        let key = model.source.swipeKey
+                        store.recordSwipe(kind: key.kind, name: key.name, displayTitle: model.source.displayTitle, postID: new)
+                    }
+                }
+            }
         }
     }
 
