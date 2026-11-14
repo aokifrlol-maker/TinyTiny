@@ -1,8 +1,20 @@
 import SwiftUI
 import AVFoundation
 
+final class OrientationDelegate: NSObject, UIApplicationDelegate {
+    static var orientationLock: UIInterfaceOrientationMask = .portrait
+
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        Self.orientationLock
+    }
+}
+
 @main
 struct TinyTinyApp: App {
+    @UIApplicationDelegateAdaptor(OrientationDelegate.self) private var orientationDelegate
     @StateObject private var app = AppState()
     @StateObject private var store = UserStore.shared
 
@@ -26,6 +38,7 @@ struct TinyTinyApp: App {
 struct RootView: View {
     @EnvironmentObject var app: AppState
     @EnvironmentObject var store: UserStore
+    @ObservedObject private var license = LicenseManager.shared
     @Environment(\.scenePhase) private var phase
 
     var body: some View {
@@ -33,25 +46,42 @@ struct RootView: View {
             Theme.bg.ignoresSafeArea()
             if !app.ageConfirmed {
                 AgeGateView()
-            } else if !app.hasPasscode {
+            } else if !app.licenseActivated {
+                LicenseGateView {
+                    app.licenseActivated = true
+                }
+            } else if !app.passcodeChoiceCompleted {
                 PasscodeSetupView(mode: .create)
             } else {
-                if app.hasUnlockedOnce {
+                if app.hasUnlockedOnce || !app.requirePasscodeOnOpen {
                     GoonedMainShell()
                 }
                 if app.isLocked {
                     LockView().transition(.opacity).zIndex(10)
                 }
             }
-            if phase != .active && app.hasPasscode {
+            if phase != .active && app.hasPasscode && app.requirePasscodeOnOpen {
                 PrivacyCover().zIndex(20)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: app.isLocked)
+        .task {
+            if license.isValidAccess {
+                await license.verifySilently()
+                app.licenseActivated = license.isValidAccess
+            }
+        }
+        .onOpenURL { url in
+            Task {
+                _ = await ShareService.shared.handleIncomingShare(url.absoluteString)
+            }
+        }
         .onChange(of: phase) { _, p in
             if p == .background {
                 app.lock()
                 store.saveNow()
+                SmartTasteEngine.shared.saveNow()
+                Task { await license.syncEncryptedBackupNow() }
             }
         }
     }
@@ -72,11 +102,13 @@ enum HomeChannel: Hashable {
     case rule34
     case igReels, igFollowing, igSaved
     case ofTrending, ofLatest, ofDMs
+    case longAll, longEporner, longPornhub, longXHamster, longSpankBang
     case custom
 }
 
 struct GoonedMainShell: View {
     @EnvironmentObject var store: UserStore
+    @ObservedObject private var shareService = ShareService.shared
     @StateObject private var followingModel = FeedModel(source: .following)
     @StateObject private var forYouModel = FeedModel(source: .forYou)
     @StateObject private var xForYouModel = FeedModel(source: .xForYou)
@@ -89,6 +121,11 @@ struct GoonedMainShell: View {
     @StateObject private var ofTrendingModel = FeedModel(source: .ofTrending)
     @StateObject private var ofLatestModel = FeedModel(source: .ofLatest)
     @StateObject private var ofDMsModel = FeedModel(source: .ofDMs)
+    @StateObject private var longAllModel = FeedModel(source: .longVideos(.all))
+    @StateObject private var longEpornerModel = FeedModel(source: .longVideos(.eporner))
+    @StateObject private var longPornhubModel = FeedModel(source: .longVideos(.pornhub))
+    @StateObject private var longXHamsterModel = FeedModel(source: .longVideos(.xhamster))
+    @StateObject private var longSpankBangModel = FeedModel(source: .longVideos(.spankbang))
     @StateObject private var customModel = FeedModel(source: .forYou)
 
     private struct CustomBackHistoryItem {
@@ -103,6 +140,7 @@ struct GoonedMainShell: View {
     @State private var lastXChannel: HomeChannel = .xForYou
     @State private var lastIGChannel: HomeChannel = .igReels
     @State private var lastOFChannel: HomeChannel = .ofTrending
+    @State private var lastLongChannel: HomeChannel = .longAll
     @State private var slotPostIDs: [HomeChannel: String] = [:]
     @State private var customBackStack: [CustomBackHistoryItem] = []
     @State private var activeTab: GoonedDockTab = .home
@@ -127,6 +165,10 @@ struct GoonedMainShell: View {
         activeChannel == .ofTrending || activeChannel == .ofLatest || activeChannel == .ofDMs
     }
 
+    private var isLongChannel: Bool {
+        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang
+    }
+
     private var activeModel: FeedModel {
         switch activeChannel {
         case .following: return followingModel
@@ -141,6 +183,11 @@ struct GoonedMainShell: View {
         case .ofTrending: return ofTrendingModel
         case .ofLatest: return ofLatestModel
         case .ofDMs: return ofDMsModel
+        case .longAll: return longAllModel
+        case .longEporner: return longEpornerModel
+        case .longPornhub: return longPornhubModel
+        case .longXHamster: return longXHamsterModel
+        case .longSpankBang: return longSpankBangModel
         case .custom: return customModel
         }
     }
@@ -269,6 +316,9 @@ struct GoonedMainShell: View {
                         } else {
                             selectFeed(src)
                         }
+                    },
+                    onOpenPost: { post in
+                        openSharedPost(post)
                     },
                     onConnectX: {
                         pendingFeedAfterLogin = .xForYou
@@ -408,6 +458,35 @@ struct GoonedMainShell: View {
             Rule34KeySheet()
                 .environmentObject(store)
         }
+        .onChange(of: shareService.pendingReceivedPost) { _, post in
+            if let post {
+                openSharedPost(post)
+                shareService.pendingReceivedPost = nil
+            }
+        }
+        .onChange(of: activeChannel) { _, _ in syncOrientationLock() }
+        .onChange(of: activeTab) { _, _ in syncOrientationLock() }
+        .onChange(of: customModel.source) { _, _ in syncOrientationLock() }
+    }
+
+    private func openSharedPost(_ post: Gif) {
+        pushCustomBackHistory(returnTab: activeTab)
+        customModel.switchSource(.list(title: "Shared Drop"), initialItems: [post])
+        slotPostIDs[.custom] = post.id
+        activeChannel = .custom
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+            activeTab = .home
+        }
+    }
+
+    private func syncOrientationLock() {
+        let allowLandscape = (activeTab == .home && activeModel.source.isLongVideoFeed)
+        let target: UIInterfaceOrientationMask = allowLandscape ? .allButUpsideDown : .portrait
+        guard OrientationDelegate.orientationLock != target else { return }
+        OrientationDelegate.orientationLock = target
+        if !allowLandscape, let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        }
     }
 
     private func pushCustomBackHistory(returnTab: GoonedDockTab = .home) {
@@ -542,6 +621,23 @@ struct GoonedMainShell: View {
                 slotPostIDs[.ofDMs] = nil
                 Task { await ofDMsModel.refresh(rotateCursor: true) }
             }
+        case .longVideos(let site):
+            customBackStack.removeAll()
+            let mapped: HomeChannel
+            let model: FeedModel
+            switch site {
+            case .all: mapped = .longAll; model = longAllModel
+            case .eporner: mapped = .longEporner; model = longEpornerModel
+            case .pornhub: mapped = .longPornhub; model = longPornhubModel
+            case .xhamster: mapped = .longXHamster; model = longXHamsterModel
+            case .spankbang: mapped = .longSpankBang; model = longSpankBangModel
+            }
+            activeChannel = mapped
+            lastLongChannel = mapped
+            if forceReload {
+                slotPostIDs[mapped] = nil
+                Task { await model.refresh(rotateCursor: true) }
+            }
         default:
             if activeChannel != .custom || customModel.source != src {
                 pushCustomBackHistory(returnTab: .home)
@@ -586,13 +682,14 @@ struct GoonedMainShell: View {
         case .rule34: return 3
         case .igReels, .igFollowing, .igSaved: return 4
         case .ofTrending, .ofLatest, .ofDMs: return 5
+        case .longAll, .longEporner, .longPornhub, .longXHamster, .longSpankBang: return 6
         }
     }
 
     private func handleHorizontalFeedSwipe(dx: CGFloat) {
-        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofTrending]
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofTrending, .longVideos(.all)]
         let cur = homeChannelIndex
-        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF
+        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF -> Long Videos
         // Swipe right (dx > 0) moves backward
         let nextIdx = dx < 0 ? cur + 1 : cur - 1
         guard channels.indices.contains(nextIdx) else { return }
@@ -670,6 +767,14 @@ struct GoonedMainShell: View {
                     (.ofLatest, "Latest", .ofLatest),
                     (.ofDMs, "DMs", .ofDMs)
                 ]) { selectFeed($0) }
+            } else if isLongChannel {
+                subChannelBar([
+                    (.longVideos(.all), "All", .longAll),
+                    (.longVideos(.eporner), "Eporner", .longEporner),
+                    (.longVideos(.pornhub), "Pornhub", .longPornhub),
+                    (.longVideos(.xhamster), "xHamster", .longXHamster),
+                    (.longVideos(.spankbang), "SpankBang", .longSpankBang)
+                ]) { selectFeed($0) }
             }
         }
     }
@@ -736,6 +841,24 @@ struct GoonedMainShell: View {
                             }
                         } label: {
                             BrandLogoOnlyFans(active: isOFChannel)
+                        }
+
+                        brandChannelButton(id: 6, active: isLongChannel) {
+                            if isLongChannel {
+                                selectFeed(activeModel.source, forceReload: true)
+                            } else {
+                                let targetSite: LongVideoSite
+                                switch lastLongChannel {
+                                case .longEporner: targetSite = .eporner
+                                case .longPornhub: targetSite = .pornhub
+                                case .longXHamster: targetSite = .xhamster
+                                case .longSpankBang: targetSite = .spankbang
+                                default: targetSite = .all
+                                }
+                                selectFeed(.longVideos(targetSite))
+                            }
+                        } label: {
+                            BrandLogoLongVideos(active: isLongChannel)
                         }
 
                         Color.clear.frame(width: edgePad, height: 1)
@@ -814,22 +937,27 @@ struct GoonedMainShell: View {
         _ items: [(FeedSource, String, HomeChannel)],
         onSelect: @escaping (FeedSource) -> Void
     ) -> some View {
-        HStack(spacing: 14) {
-            ForEach(items, id: \.1) { src, label, chan in
-                let active = activeChannel == chan
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    onSelect(src)
-                } label: {
-                    Text(label)
-                        .font(.system(size: 12, weight: active ? .bold : .medium))
-                        .foregroundStyle(active ? .white : .white.opacity(0.60))
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: items.count > 3 ? 12 : 14) {
+                ForEach(items, id: \.1) { src, label, chan in
+                    let active = activeChannel == chan
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        onSelect(src)
+                    } label: {
+                        Text(label)
+                            .font(.system(size: 12, weight: active ? .bold : .medium))
+                            .foregroundStyle(active ? .white : .white.opacity(0.60))
+                            .fixedSize()
+                    }
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 5)
+        .fixedSize(horizontal: items.count <= 3, vertical: true)
         .liquidGlassCapsule(tinted: tinted)
+        .padding(.horizontal, items.count > 3 ? 16 : 0)
     }
 
     private var customFeedTitlePill: some View {
@@ -1008,6 +1136,34 @@ struct BrandLogoInstagram: View {
                     .overlay(Circle().stroke(Color.black, lineWidth: 1))
                     .offset(x: 1, y: -1)
             }
+        }
+        .opacity(active ? 1.0 : 0.90)
+        .frame(width: 26, height: 26)
+    }
+}
+
+struct BrandLogoLongVideos: View {
+    var active: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color(red: 1.0, green: 0.56, blue: 0.14), Color(red: 0.90, green: 0.24, blue: 0.44)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 26, height: 26)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.8 : 0.7)
+                )
+            Image(systemName: "play.fill")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .offset(x: 0.5)
         }
         .opacity(active ? 1.0 : 0.90)
         .frame(width: 26, height: 26)

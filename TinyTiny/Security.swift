@@ -71,9 +71,18 @@ final class AppState: ObservableObject {
     @Published var ageConfirmed: Bool = UserDefaults.standard.bool(forKey: "ageConfirmed") {
         didSet { UserDefaults.standard.set(ageConfirmed, forKey: "ageConfirmed") }
     }
+    @Published var licenseActivated: Bool = LicenseManager.shared.isValidAccess
+    @Published var passcodeChoiceCompleted: Bool = UserDefaults.standard.bool(forKey: "tt.passcodeChoiceCompleted") || Passcode.exists {
+        didSet { UserDefaults.standard.set(passcodeChoiceCompleted, forKey: "tt.passcodeChoiceCompleted") }
+    }
     @Published var hasPasscode: Bool = Passcode.exists
-    @Published var isLocked = true
-    @Published var hasUnlockedOnce = false
+    /// By default once License + Passcode setup completes, the app never prompts for a passcode on launch
+    /// (so users aren't locked out of their likes/vault), unless they explicitly turn ON "Lock on Open" in Settings.
+    @Published var requirePasscodeOnOpen: Bool = UserDefaults.standard.bool(forKey: "tt.requirePasscodeOnOpen") {
+        didSet { UserDefaults.standard.set(requirePasscodeOnOpen, forKey: "tt.requirePasscodeOnOpen") }
+    }
+    @Published var isLocked: Bool = Passcode.exists && UserDefaults.standard.bool(forKey: "tt.requirePasscodeOnOpen")
+    @Published var hasUnlockedOnce = !(Passcode.exists && UserDefaults.standard.bool(forKey: "tt.requirePasscodeOnOpen"))
 
     func unlock() {
         isLocked = false
@@ -81,7 +90,22 @@ final class AppState: ObservableObject {
     }
 
     func lock() {
-        if hasPasscode { isLocked = true }
+        if hasPasscode && requirePasscodeOnOpen { isLocked = true }
+    }
+
+    func skipPasscodeOnOnboarding() {
+        Passcode.delete()
+        hasPasscode = false
+        passcodeChoiceCompleted = true
+        isLocked = false
+        hasUnlockedOnce = true
+    }
+
+    func removePasscodeKeepingData() {
+        Passcode.delete()
+        hasPasscode = false
+        isLocked = false
+        hasUnlockedOnce = true
     }
 
     func eraseEverything() {
@@ -89,7 +113,8 @@ final class AppState: ObservableObject {
         UserStore.shared.eraseAll()
         ageConfirmed = false
         hasPasscode = false
-        isLocked = true
+        passcodeChoiceCompleted = false
+        isLocked = false
         hasUnlockedOnce = false
     }
 }
@@ -508,7 +533,7 @@ struct PasscodeSetupView: View {
     private var subtitle: String? {
         if let message { return message }
         if mode == .create && step == .enter {
-            return "Your passcode is your private Gooned vault key."
+            return "Optional — skip below to stay unlocked across launches."
         }
         return nil
     }
@@ -516,22 +541,43 @@ struct PasscodeSetupView: View {
     private var stepBadge: String? {
         guard mode == .create else { return nil }
         switch step {
-        case .enter: return "STEP 1 OF 2"
-        case .confirm: return "STEP 2 OF 2"
+        case .enter: return "OPTIONAL LOCK"
+        case .confirm: return "CONFIRM LOCK"
         case .current: return nil
         }
     }
 
     var body: some View {
-        PasscodePad(
-            title: title,
-            subtitle: subtitle,
-            code: $code,
-            shakes: shakes,
-            stepBadge: stepBadge,
-            showSignature: true
-        ) { c in
-            handle(c)
+        ZStack(alignment: .top) {
+            PasscodePad(
+                title: title,
+                subtitle: subtitle,
+                code: $code,
+                shakes: shakes,
+                stepBadge: stepBadge,
+                showSignature: true
+            ) { c in
+                handle(c)
+            }
+
+            if mode == .create {
+                HStack {
+                    Spacer()
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        app.skipPasscodeOnOnboarding()
+                    } label: {
+                        Text("Skip Passcode")
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .liquidGlassCapsule()
+                    }
+                    .padding(.top, 54)
+                    .padding(.trailing, 18)
+                }
+            }
         }
         .alert("Enable Face ID Unlock?", isPresented: $askFaceID) {
             Button("Enable Face ID") {
@@ -572,6 +618,7 @@ struct PasscodeSetupView: View {
     }
 
     private func finish() {
+        app.passcodeChoiceCompleted = true
         if mode == .create {
             app.hasPasscode = true
             app.unlock()
@@ -591,7 +638,9 @@ struct LockView: View {
     @State private var failures = 0
     @State private var lockedUntil: Date?
     @State private var message: String?
-    @State private var confirmErase = false
+    @State private var showKeyRecovery = false
+    @State private var recoveryKeyInput = ""
+    @State private var recoveryError: String?
 
     private var faceIDOn: Bool { store.data.settings.faceID && Biometrics.available }
 
@@ -607,17 +656,28 @@ struct LockView: View {
             ) { c in
                 check(c)
             }
-            Button("Forgot Passcode?") { confirmErase = true }
-                .font(.footnote)
+            Button("Forgot Passcode? Recover with License Key") { showKeyRecovery = true }
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(Theme.textSecondary)
-                .padding(.bottom, 10)
+                .padding(.bottom, 12)
         }
         .onAppear { if phase == .active { tryFaceID() } }
         .onChange(of: phase) { _, p in if p == .active { tryFaceID() } }
-        .confirmationDialog("Reset Gooned Vault?", isPresented: $confirmErase, titleVisibility: .visible) {
-            Button("Erase All Data & Reset", role: .destructive) { app.eraseEverything() }
+        .alert("Reset Passcode (Keep All Likes & Data)", isPresented: $showKeyRecovery) {
+            TextField("TT-XXXX-XXXX-XXXX", text: $recoveryKeyInput)
+                .textInputAutocapitalization(.characters)
+            Button("Remove Passcode") {
+                Task {
+                    if await LicenseManager.shared.verifyPasscodeRecovery(rawKey: recoveryKeyInput) {
+                        app.removePasscodeKeepingData()
+                    } else {
+                        message = "License key did not match."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your passcode cannot be recovered. Resetting permanently deletes saved likes, follows, and preferences.")
+            Text("Enter your active License Key to remove your lock passcode without losing likes, follows, or downloads.")
         }
     }
 

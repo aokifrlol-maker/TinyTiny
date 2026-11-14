@@ -22,6 +22,9 @@ enum FeedSource: Hashable {
     case ofDMs
     case ofCreator(id: String, handle: String, displayName: String?)
     case ofSearch(String)
+    case longVideos(LongVideoSite)
+    case longSearch(LongVideoSite, String)
+    case multiSearch(String)
     case list(title: String)
 
     var displayTitle: String {
@@ -50,6 +53,9 @@ enum FeedSource: Hashable {
             let clean = handle.replacingOccurrences(of: "@", with: "")
             return (displayName?.isEmpty == false) ? "\(displayName!) (@\(clean))" : "OF @\(clean)"
         case .ofSearch(let q): return "OF: \(q)"
+        case .longVideos(let site): return site == .all ? "Long Videos" : site.displayTitle
+        case .longSearch(let site, let q): return site == .all ? "Long: \(q)" : "\(site.displayTitle): \(q)"
+        case .multiSearch(let q): return "Search: \(q)"
         case .list(let t): return t
         }
     }
@@ -86,6 +92,15 @@ enum FeedSource: Hashable {
         }
     }
 
+    var isLongVideoFeed: Bool {
+        switch self {
+        case .longVideos, .longSearch:
+            return true
+        default:
+            return false
+        }
+    }
+
     var isList: Bool {
         if case .list = self { return true }
         return false
@@ -114,6 +129,9 @@ enum FeedSource: Hashable {
         case .ofDMs: return ("ofdms", "ofdms")
         case .ofCreator(let id, let handle, _): return ("ofcreator", "\(id)|\(handle)")
         case .ofSearch(let q): return ("ofsearch", q)
+        case .longVideos(let site): return ("longvideos", site.rawValue)
+        case .longSearch(let site, let q): return ("longsearch", "\(site.rawValue):\(q)")
+        case .multiSearch(let q): return ("multisearch", q)
         case .list(let t): return ("list", t)
         }
     }
@@ -153,9 +171,11 @@ final class FeedModel: ObservableObject {
     private var afterCursor: String? = nil
     private var xMixAfterCursor: String? = nil
     private var igMixAfterCursor: String? = nil
+    private var ofMixOffset: Int = 0
     private var hasMore = true
     private var ids = Set<String>()
     private var mediaKeys = Set<String>()
+    private var seenSimKeys = Set<String>()
     private var activeLoadTask: Task<Void, Never>?
     private var emptyPageStreak = 0
     private var followingRoundRobin = 0
@@ -174,6 +194,7 @@ final class FeedModel: ObservableObject {
         }
         self.ids = Set(self.items.map(\.id))
         self.mediaKeys = Set(self.items.map(\.canonicalDedupeKey))
+        self.seenSimKeys = Set(self.items.compactMap(\.contentSimilarityKey))
         if case .list = source { hasMore = false }
     }
 
@@ -245,11 +266,13 @@ final class FeedModel: ObservableObject {
             afterCursor = nil
             xMixAfterCursor = nil
             igMixAfterCursor = nil
+            ofMixOffset = 0
             errorText = nil
         } else {
             items = []
             ids = []
             mediaKeys = []
+            seenSimKeys = []
             hasMore = true
             isSwitching = true
             isLoading = false
@@ -306,6 +329,7 @@ final class FeedModel: ObservableObject {
         items = []
         ids = []
         mediaKeys = []
+        seenSimKeys = []
         emptyPageStreak = 0
         followingRoundRobin = 0
         followingCursors = [:]
@@ -320,11 +344,25 @@ final class FeedModel: ObservableObject {
         }
         xMixAfterCursor = nil
         igMixAfterCursor = nil
+        ofMixOffset = 0
         hasMore = true
         errorText = nil
         if case .list = source { hasMore = false; isSwitching = false; return }
         await loadMore()
         isSwitching = false
+    }
+
+    func removeDisliked(_ post: Gif) {
+        let dedupe = post.canonicalDedupeKey
+        let sim = post.contentSimilarityKey
+        items.removeAll { item in
+            if item.id == post.id || item.canonicalDedupeKey == dedupe { return true }
+            if let sim, let itemSim = item.contentSimilarityKey, sim == itemSim { return true }
+            return false
+        }
+        ids.insert(post.id)
+        mediaKeys.insert(dedupe)
+        if let sim { seenSimKeys.insert(sim) }
     }
 
     func loadMore() async {
@@ -351,10 +389,20 @@ final class FeedModel: ObservableObject {
                 afterCursor = resp.after
                 store.setSavedCursor(resp.after, for: cursorKey)
 
-                let playablePosts = resp.posts.filter {
-                    $0.hasPlayableMedia
-                    && !store.isBlockedByAlgorithm($0)
-                    && AdultContentClassifier.isEligible($0, source: source, categories: store.categories, store: store)
+                let isDiscoverySource: Bool = {
+                    switch source {
+                    case .forYou, .xForYou, .igReels, .category, .rule34, .ofTrending, .ofLatest, .ofDMs, .longVideos:
+                        return true
+                    default:
+                        return false
+                    }
+                }()
+
+                let playablePosts = resp.posts.filter { post in
+                    guard post.hasPlayableMedia else { return false }
+                    if SmartTasteEngine.shared.isDisliked(post) { return false }
+                    if isDiscoverySource && store.isBlockedByAlgorithm(post) { return false }
+                    return AdultContentClassifier.isEligible(post, source: source, categories: store.categories, store: store)
                 }
 
                 if playablePosts.isEmpty && (resp.after == nil || resp.after?.isEmpty == true) {
@@ -363,6 +411,9 @@ final class FeedModel: ObservableObject {
                             afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...12) * 25)
                         } else if case .rule34 = source {
                             let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
+                            afterCursor = "\(nextP)"
+                        } else if case .longVideos = source {
+                            let nextP = (Int(afterCursor ?? "1") ?? 1) + 1
                             afterCursor = "\(nextP)"
                         } else {
                             store.setSavedCursor(nil, for: cursorKey)
@@ -382,6 +433,7 @@ final class FeedModel: ObservableObject {
                 for post in playablePosts {
                     guard ids.insert(post.id).inserted else { continue }
                     guard mediaKeys.insert(post.canonicalDedupeKey).inserted else { continue }
+                    if let sim = post.contentSimilarityKey, !seenSimKeys.insert(sim).inserted { continue }
                     if store.isSeen(post) {
                         fallbackSeen.append(post)
                     } else {
@@ -396,7 +448,7 @@ final class FeedModel: ObservableObject {
                     break
                 }
 
-                // Stream unseen items into the feed immediately (never recycle seen items mid-scroll!)
+                // Stream unseen items into the feed immediately
                 if !batchUnseen.isEmpty {
                     emptyPageStreak = 0
                     items.append(contentsOf: batchUnseen)
@@ -414,9 +466,13 @@ final class FeedModel: ObservableObject {
                         } else if case .rule34 = source {
                             let nextP = (Int(afterCursor ?? "0") ?? 0) + 1
                             afterCursor = "\(nextP)"
-                        } else if source.isXFeed && store.data.xSession.isConnected && emptyPageStreak >= 2 {
+                        } else if case .longVideos = source {
+                            let nextP = (Int(afterCursor ?? "1") ?? 1) + 1
+                            afterCursor = "\(nextP)"
+                        } else if source == .xForYou && store.data.xSession.isConnected && emptyPageStreak >= 2 {
+                            let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
                             let fallbackTag = store.data.algorithm.tagWeights
-                                .filter { $0.value > 0 }
+                                .filter { $0.value > 0 && !blocked.contains($0.key.lowercased()) }
                                 .sorted { $0.value > $1.value }
                                 .randomElement()?.key
                             let q = fallbackTag.map { "nsfw \($0)" } ?? "nsfw"
@@ -436,10 +492,8 @@ final class FeedModel: ObservableObject {
                                 isSwitching = false
                                 Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
                             }
-                        } else if source.isIGFeed && store.data.igSession.isConnected && emptyPageStreak >= 2 {
-                            let igFallback = (source == .igReels)
-                                ? await InstagramAPI.following(after: afterCursor)
-                                : await InstagramAPI.reels(after: afterCursor)
+                        } else if source == .igReels && store.data.igSession.isConnected && emptyPageStreak >= 2 {
+                            let igFallback = await InstagramAPI.reels(after: nil)
                             let extra = igFallback.posts.filter {
                                 $0.hasPlayableMedia
                                 && !store.isBlockedByAlgorithm($0)
@@ -467,118 +521,17 @@ final class FeedModel: ObservableObject {
                 }
             }
 
-            // Only if the entire screen is still empty after trying multiple fresh pages (e.g. brand-new small account),
-            // allow non-IG/non-X feeds to show a shuffled batch instead of a blank black screen.
+            // Never fall back to seen items on personal X/IG/Following/Search feeds
             if items.isEmpty && !fallbackSeen.isEmpty && !source.isIGFeed && !source.isXFeed && source != .following {
                 items.append(contentsOf: fallbackSeen.shuffled())
-            }
-
-            // Algorithm Taste Boost: when enabled on For You, pull fresh posts from pinned #tags or top-liked subreddit
-            if case .forYou = source,
-               store.data.settings.algorithmEnabled {
-                let favSub = store.topAlgorithmSubreddits.randomElement()
-                let boostedTag = store.data.algorithm.boostedTags.randomElement()
-                Task { @MainActor [weak self] in
-                    guard let self, case .forYou = self.source else { return }
-                    var boostedPosts: [Gif] = []
-                    if let tag = boostedTag {
-                        let r34Resp = await Rule34API.shared.fetchFeed(
-                            tag: tag,
-                            sort: self.sort.rawValue,
-                            after: nil,
-                            credentials: store.data.r34Credentials
-                        )
-                        boostedPosts.append(contentsOf: r34Resp.posts.prefix(4))
-                    }
-                    if boostedPosts.isEmpty, let sub = favSub,
-                       let subResp = try? await api.subreddit(sub, sort: self.sort.rawValue, after: nil, limit: 8) {
-                        boostedPosts.append(contentsOf: subResp.posts)
-                    }
-                    let freshFavs = boostedPosts.filter {
-                        $0.hasPlayableMedia
-                        && !store.isBlockedByAlgorithm($0)
-                        && AdultContentClassifier.isEligible($0, source: self.source, categories: store.categories, store: store)
-                        && !store.isSeen($0)
-                        && self.ids.insert($0.id).inserted
-                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
-                    }
-                    guard !freshFavs.isEmpty else { return }
-                    var combined = self.items
-                    var idx = max(2, combined.count - 6)
-                    for p in freshFavs.prefix(3) {
-                        if idx <= combined.count {
-                            combined.insert(p, at: idx)
-                            idx += 3
-                        } else {
-                            combined.append(p)
-                        }
-                    }
-                    self.items = combined
-                }
-            }
-
-            // Blend X For You if enabled
-            if case .forYou = source, store.data.xSession.isConnected && store.data.xSession.mixIntoForYou {
-                let currentXCursor = xMixAfterCursor
-                Task { @MainActor [weak self] in
-                    let xResp = await XAPI.forYou(after: currentXCursor)
-                    guard let self, case .forYou = self.source else { return }
-                    self.xMixAfterCursor = xResp.after
-                    let freshX = xResp.posts.filter {
-                        !store.isBlockedByAlgorithm($0)
-                        && AdultContentClassifier.isEligible($0, source: .xForYou, categories: store.categories, store: store)
-                        && !store.isSeen($0)
-                        && self.ids.insert($0.id).inserted
-                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
-                    }
-                    guard !freshX.isEmpty else { return }
-                    var combined = self.items
-                    var insertIdx = max(2, combined.count - 8)
-                    for xPost in freshX {
-                        if insertIdx <= combined.count {
-                            combined.insert(xPost, at: insertIdx)
-                            insertIdx += 3
-                        } else {
-                            combined.append(xPost)
-                        }
-                    }
-                    self.items = combined
-                }
-            }
-
-            // Blend Instagram Reels if enabled
-            if case .forYou = source, store.data.igSession.isConnected && store.data.igSession.mixIntoForYou {
-                let currentIGCursor = igMixAfterCursor
-                Task { @MainActor [weak self] in
-                    let igResp = await InstagramAPI.reels(after: currentIGCursor)
-                    guard let self, case .forYou = self.source else { return }
-                    self.igMixAfterCursor = igResp.after
-                    let freshIG = igResp.posts.filter {
-                        !store.isBlockedByAlgorithm($0)
-                        && AdultContentClassifier.isEligible($0, source: .igReels, categories: store.categories, store: store)
-                        && !store.isSeen($0)
-                        && self.ids.insert($0.id).inserted
-                        && self.mediaKeys.insert($0.canonicalDedupeKey).inserted
-                    }
-                    guard !freshIG.isEmpty else { return }
-                    var combined = self.items
-                    var insertIdx = max(3, combined.count - 6)
-                    for igPost in freshIG {
-                        if insertIdx <= combined.count {
-                            combined.insert(igPost, at: insertIdx)
-                            insertIdx += 4
-                        } else {
-                            combined.append(igPost)
-                        }
-                    }
-                    self.items = combined
-                }
             }
 
             if items.isEmpty && source.isXFeed && !store.data.xSession.isConnected {
                 errorText = "Connect your personal X account to load X videos."
             } else if items.isEmpty && source.isIGFeed && !store.data.igSession.isConnected {
                 errorText = "Connect your personal Instagram account to load Instagram Reels."
+            } else if items.isEmpty && (source == .xFollowing || source == .igFollowing || source == .following) {
+                errorText = "No recent videos from accounts you follow yet. Follow creators in For You / Reels or tap Retry."
             } else if items.isEmpty {
                 errorText = "Couldn't load \(source.displayTitle) yet. Tap Retry."
             } else {
@@ -606,7 +559,7 @@ final class FeedModel: ObservableObject {
     private func fetchPage(api: GoonedAPI, store: UserStore, cursor: String?) async throws -> GoonedFeedResponse {
         switch source {
         case .forYou:
-            return try await api.forYou(sort: sort.rawValue, after: cursor, limit: 25)
+            return await fetchBalancedForYou(api: api, store: store, cursor: cursor)
         case .following:
             let subs = store.data.followedSubreddits
             let users = store.data.followedUsers
@@ -627,35 +580,44 @@ final class FeedModel: ObservableObject {
                 return GoonedFeedResponse(posts: [], after: nil)
             }
 
-            let poolKey = poolKeys[followingRoundRobin % poolKeys.count]
-            let poolCursor = followingCursors[poolKey]
-            followingRoundRobin += 1
-
-            let resp: GoonedFeedResponse
-            if poolKey == "reddit" {
-                resp = try await api.following(subreddits: subs, users: users, after: poolCursor)
-            } else if poolKey == "ig_following" {
-                resp = await InstagramAPI.following(after: poolCursor)
-            } else if poolKey == "x_following" {
-                resp = await XAPI.following(after: poolCursor)
-            } else if poolKey.hasPrefix("x_user:") {
-                let handle = String(poolKey.dropFirst("x_user:".count))
-                resp = await XAPI.userMedia(handle, after: poolCursor)
-            } else if poolKey.hasPrefix("ig_user:") {
-                let handle = String(poolKey.dropFirst("ig_user:".count))
-                resp = await InstagramAPI.userReels(handle, after: poolCursor)
-            } else {
-                let raw = String(poolKey.dropFirst("of_creator:".count))
-                let parts = raw.split(separator: "|", maxSplits: 1).map(String.init)
-                let cid = parts.first ?? raw
-                let chandle = parts.count > 1 ? parts[1] : cid
-                resp = await OnlyFansAPI.shared.creatorFeed(id: cid, handle: chandle, sort: sort.rawValue, after: poolCursor)
+            // Fetch up to 2 distinct pools in parallel on each scroll batch so General Following is rich and responsive
+            var selectedPools: [String] = []
+            for _ in 0..<min(2, poolKeys.count) {
+                let k = poolKeys[followingRoundRobin % poolKeys.count]
+                followingRoundRobin += 1
+                if !selectedPools.contains(k) { selectedPools.append(k) }
             }
 
-            if let next = resp.after, !next.isEmpty {
-                followingCursors[poolKey] = next
+            var collected: [Gif] = []
+            for poolKey in selectedPools {
+                let poolCursor = followingCursors[poolKey]
+                let resp: GoonedFeedResponse
+                if poolKey == "reddit" {
+                    resp = (try? await api.following(subreddits: subs, users: users, after: poolCursor)) ?? GoonedFeedResponse(posts: [], after: nil)
+                } else if poolKey == "ig_following" {
+                    resp = await InstagramAPI.following(after: poolCursor)
+                } else if poolKey == "x_following" {
+                    resp = await XAPI.following(after: poolCursor)
+                } else if poolKey.hasPrefix("x_user:") {
+                    let handle = String(poolKey.dropFirst("x_user:".count))
+                    resp = await XAPI.userMedia(handle, after: poolCursor)
+                } else if poolKey.hasPrefix("ig_user:") {
+                    let handle = String(poolKey.dropFirst("ig_user:".count))
+                    resp = await InstagramAPI.userReels(handle, after: poolCursor)
+                } else {
+                    let raw = String(poolKey.dropFirst("of_creator:".count))
+                    let parts = raw.split(separator: "|", maxSplits: 1).map(String.init)
+                    let cid = parts.first ?? raw
+                    let chandle = parts.count > 1 ? parts[1] : cid
+                    resp = await OnlyFansAPI.shared.creatorFeed(id: cid, handle: chandle, sort: sort.rawValue, after: poolCursor)
+                }
+                if let next = resp.after, !next.isEmpty {
+                    followingCursors[poolKey] = next
+                }
+                collected.append(contentsOf: resp.posts)
             }
-            return GoonedFeedResponse(posts: resp.posts, after: "following_\(followingRoundRobin)")
+
+            return GoonedFeedResponse(posts: collected.shuffled(), after: "following_\(followingRoundRobin)")
         case .category(let name):
             let recentSeen = Array(store.data.seenIDs.suffix(120))
             let resp = try await api.category(
@@ -718,8 +680,202 @@ final class FeedModel: ObservableObject {
             )
         case .ofSearch(let query):
             return await OnlyFansAPI.shared.searchPosts(query, after: cursor)
+        case .longVideos(let site):
+            return await LongVideoAPI.shared.fetchFeed(site: site, sort: sort.rawValue, query: nil, after: cursor)
+        case .longSearch(let site, let query):
+            return await LongVideoAPI.shared.fetchFeed(site: site, sort: sort.rawValue, query: query, after: cursor)
+        case .multiSearch(let query):
+            return await fetchMultiSearch(query: query, after: cursor, api: api, store: store)
         case .list:
             return GoonedFeedResponse(posts: [], after: nil)
         }
+    }
+
+    // MARK: - Balanced Multi-Source General For You
+
+    private func fetchBalancedForYou(
+        api: GoonedAPI,
+        store: UserStore,
+        cursor: String?
+    ) async -> GoonedFeedResponse {
+        let taste = SmartTasteEngine.shared.state
+        let settings = taste.sourceSettings
+        let rawWeights = taste.sourceWeights
+
+        let wantReddit = settings.includeReddit
+        let wantOF = settings.includeOnlyFans
+        let wantX = settings.includeX && store.data.xSession.isConnected
+        let wantIG = settings.includeInstagram && store.data.igSession.isConnected
+
+        let curX = self.xMixAfterCursor
+        let curIG = self.igMixAfterCursor
+        let curOF = self.ofMixOffset
+
+        async let redditTask: GoonedFeedResponse? = wantReddit
+            ? (try? await api.forYou(sort: sort.rawValue, after: cursor, limit: 24))
+            : nil
+        async let ofTask: GoonedFeedResponse? = wantOF
+            ? await (curOF % 2 == 0
+                ? OnlyFansAPI.shared.trending(after: curOF == 0 ? nil : "\(curOF * 24)")
+                : OnlyFansAPI.shared.latest(after: "\(curOF * 24)"))
+            : nil
+        async let xTask: GoonedFeedResponse? = wantX
+            ? await XAPI.forYou(after: curX)
+            : nil
+        async let igTask: GoonedFeedResponse? = wantIG
+            ? await InstagramAPI.reels(after: curIG)
+            : nil
+
+        let (rResp, ofResp, xResp, igResp) = await (redditTask, ofTask, xTask, igTask)
+
+        if let xa = xResp?.after { self.xMixAfterCursor = xa }
+        if let ia = igResp?.after { self.igMixAfterCursor = ia }
+        if ofResp != nil { self.ofMixOffset += 1 }
+
+        func prep(_ posts: [Gif]?) -> [Gif] {
+            guard let posts else { return [] }
+            return posts
+                .filter { !store.isBlockedByAlgorithm($0) }
+                .sorted { store.scorePost($0) > store.scorePost($1) }
+        }
+
+        let rPosts = prep(rResp?.posts)
+        let ofPosts = prep(ofResp?.posts)
+        let xPosts = prep(xResp?.posts)
+        let igPosts = prep(igResp?.posts)
+
+        var rawActive: [(key: String, weight: Double, posts: [Gif])] = []
+        if !rPosts.isEmpty { rawActive.append(("reddit", max(0.20, rawWeights["reddit"] ?? 1.0), rPosts)) }
+        if !ofPosts.isEmpty { rawActive.append(("onlyfans", max(0.20, rawWeights["onlyfans"] ?? 1.0), ofPosts)) }
+        if !xPosts.isEmpty { rawActive.append(("x", max(0.20, rawWeights["x"] ?? 1.0), xPosts)) }
+        if !igPosts.isEmpty { rawActive.append(("instagram", max(0.15, rawWeights["instagram"] ?? 0.65), igPosts)) }
+
+        let totalW = max(0.1, rawActive.reduce(0.0) { $0 + $1.weight })
+        var buckets = rawActive.map { (key: $0.key, weight: $0.weight / totalW, posts: $0.posts, index: 0) }
+
+        // Deficit round-robin interleaving so every enabled source gets fair proportional visibility
+        var mixed: [Gif] = []
+        var credits = Array(repeating: 0.0, count: buckets.count)
+        var remaining = buckets.reduce(0) { $0 + $1.posts.count }
+        let targetCount = min(remaining, 36)
+
+        while mixed.count < targetCount && remaining > 0 {
+            var pickedAny = false
+            for i in buckets.indices {
+                guard buckets[i].index < buckets[i].posts.count else { continue }
+                credits[i] += buckets[i].weight
+                if credits[i] >= 0.24 {
+                    credits[i] -= 0.24
+                    mixed.append(buckets[i].posts[buckets[i].index])
+                    buckets[i].index += 1
+                    remaining -= 1
+                    pickedAny = true
+                    if mixed.count >= targetCount { break }
+                }
+            }
+            if !pickedAny {
+                for i in buckets.indices where buckets[i].index < buckets[i].posts.count {
+                    credits[i] += buckets[i].weight
+                }
+            }
+        }
+
+        let nextCursor = rResp?.after ?? GoonedAPI.randomForYouCursor(offset: Int.random(in: 1...8) * 25)
+        return GoonedFeedResponse(posts: mixed, after: nextCursor)
+    }
+
+    // MARK: - Unified Multi-Platform Search
+
+    private func fetchMultiSearch(
+        query: String,
+        after cursor: String?,
+        api: GoonedAPI,
+        store: UserStore
+    ) async -> GoonedFeedResponse {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            return GoonedFeedResponse(posts: [], after: nil)
+        }
+        let tokens = clean.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
+        let r34Tag = clean.lowercased().replacingOccurrences(of: " ", with: "_")
+        let pageNum = max(1, Int(cursor ?? "1") ?? 1)
+        let xConnected = store.data.xSession.isConnected
+        let r34Creds = store.data.r34Credentials
+        let categories = store.categories
+
+        // Fire all relevant platform searches in parallel
+        async let ofPostsTask = OnlyFansAPI.shared.searchPosts(clean, after: pageNum > 1 ? "\((pageNum - 1) * 20)" : nil)
+        async let r34PostsTask = Rule34API.shared.fetchFeed(tag: r34Tag, sort: sort.rawValue, after: pageNum > 1 ? "\(pageNum - 1)" : nil, credentials: r34Creds)
+        async let longPostsTask = LongVideoAPI.shared.fetchFeed(site: .all, sort: sort.rawValue, query: clean, after: "\(pageNum)")
+        async let xPostsTask: GoonedFeedResponse = xConnected
+            ? await XAPI.search(clean, sort: sort.rawValue, after: pageNum > 1 ? "\(pageNum)" : nil)
+            : GoonedFeedResponse(posts: [], after: nil)
+        async let redditSearchTask: [Gif] = {
+            var collected: [Gif] = []
+            if let sr = try? await api.search(clean) {
+                let topSubs = sr.subreddits.prefix(3).map(\.name)
+                await withTaskGroup(of: [Gif].self) { group in
+                    for sub in topSubs {
+                        group.addTask {
+                            (try? await api.subreddit(sub, sort: self.sort.rawValue, after: nil, limit: 10))?.posts ?? []
+                        }
+                    }
+                    for await batch in group { collected.append(contentsOf: batch) }
+                }
+            }
+            if collected.isEmpty {
+                let catMatch = categories.first {
+                    $0.name.localizedCaseInsensitiveContains(clean) || clean.localizedCaseInsensitiveContains($0.name)
+                }
+                if let cat = catMatch, let resp = try? await api.category(cat.name, sort: self.sort.rawValue, after: cursor, limit: 15) {
+                    collected = resp.posts
+                }
+            }
+            return collected
+        }()
+
+        let (ofResp, r34Resp, longResp, xResp, redditPosts) = await (
+            ofPostsTask, r34PostsTask, longPostsTask, xPostsTask, redditSearchTask
+        )
+
+        func relevanceScore(_ g: Gif) -> Double {
+            if store.isBlockedByAlgorithm(g) { return -9999 }
+            let hay = [
+                g.title ?? "",
+                g.subreddit ?? "",
+                g.author ?? "",
+                (g.tags ?? []).joined(separator: " "),
+                (g.categories ?? []).joined(separator: " ")
+            ].joined(separator: " ").lowercased()
+
+            var score = 0.0
+            if hay.contains(clean.lowercased()) { score += 12.0 }
+            for tok in tokens where hay.contains(tok) {
+                score += 4.5
+            }
+            score += store.scorePost(g) * 0.25
+            return score
+        }
+
+        let r34Ranked = r34Resp.posts.sorted { relevanceScore($0) > relevanceScore($1) }
+        let ofRanked = ofResp.posts.sorted { relevanceScore($0) > relevanceScore($1) }
+        let xRanked = xResp.posts.sorted { relevanceScore($0) > relevanceScore($1) }
+        let longRanked = longResp.posts.sorted { relevanceScore($0) > relevanceScore($1) }
+        let redditRanked = redditPosts.sorted { relevanceScore($0) > relevanceScore($1) }
+
+        var combined: [Gif] = []
+        let buckets = [xRanked, ofRanked, r34Ranked, redditRanked, longRanked]
+        let maxLen = buckets.map(\.count).max() ?? 0
+        for i in 0..<maxLen {
+            for b in buckets where i < b.count {
+                let item = b[i]
+                if relevanceScore(item) > -500 {
+                    combined.append(item)
+                }
+            }
+        }
+        return GoonedFeedResponse(posts: combined, after: combined.isEmpty ? nil : "\(pageNum + 1)")
     }
 }

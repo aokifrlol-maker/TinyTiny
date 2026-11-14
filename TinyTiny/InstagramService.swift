@@ -347,7 +347,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                 if (!body || body.length < 20) return;
                 if (body.indexOf('video_versions') === -1 && body.indexOf('video_url') === -1) return;
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.igBridge) {
-                    window.webkit.messageHandlers.igBridge.postMessage({ type: 'payload', url: url || '', body: body });
+                    window.webkit.messageHandlers.igBridge.postMessage({ type: 'payload', url: url || '', pageUrl: location.href, body: body });
                 }
             }
 
@@ -447,6 +447,20 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
               let jsonText = body["body"] as? String,
               let data = jsonText.data(using: .utf8) else { return }
 
+        let reqUrl = (body["url"] as? String ?? "").lowercased()
+        let pageUrl = (body["pageUrl"] as? String ?? "").lowercased()
+
+        // Strict route isolation: never let discovery Reels (/clips/home/) leak into Following or Saved
+        if activeRouteKey == "ig_following" {
+            if reqUrl.contains("clips/home") || (reqUrl == "ssr_script" && pageUrl.contains("/reels")) {
+                return
+            }
+        } else if activeRouteKey == "ig_saved" {
+            if reqUrl.contains("clips/home") || reqUrl.contains("feed/timeline") {
+                return
+            }
+        }
+
         if !activeRouteKey.isEmpty, let maxId = extractMaxId(from: data) {
             nextMaxIdByRoute[activeRouteKey] = maxId
         }
@@ -462,7 +476,11 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard !reels.isEmpty else { return }
 
         let store = UserStore.shared
-        let fresh = reels.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
+        let fresh = reels.filter {
+            !store.isSeen($0)
+            && !store.isBlockedByAlgorithm($0)
+            && seenIds.insert($0.canonicalDedupeKey).inserted
+        }
         guard !fresh.isEmpty else { return }
 
         dryPayloadCountByRoute[activeRouteKey] = 0
@@ -616,6 +634,59 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         }
     }
 
+    /// Follows or unfollows an Instagram creator directly on the user's real IG account.
+    @discardableResult
+    func followUser(_ username: String, unfollow: Bool) async -> Bool {
+        let session = UserStore.shared.data.igSession
+        guard session.isConnected else { return false }
+        let clean = username
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "@", with: "")
+        guard !clean.isEmpty,
+              let encoded = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let lookupURL = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(encoded)") else {
+            return false
+        }
+
+        var cookieParts = ["sessionid=\(session.sessionId)"]
+        if !session.csrfToken.isEmpty { cookieParts.append("csrftoken=\(session.csrfToken)") }
+        if !session.userId.isEmpty { cookieParts.append("ds_user_id=\(session.userId)") }
+        let cookieHeader = cookieParts.joined(separator: "; ")
+
+        var lookupReq = URLRequest(url: lookupURL)
+        lookupReq.timeoutInterval = 10
+        lookupReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
+        lookupReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
+        lookupReq.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        lookupReq.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+
+        guard let (data, _) = try? await URLSession.shared.data(for: lookupReq),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let user = ((json["data"] as? [String: Any])?["user"] as? [String: Any]),
+              let targetId = user["id"] as? String, !targetId.isEmpty,
+              let followURL = URL(string: "https://www.instagram.com/api/v1/web/friendships/\(targetId)/\(unfollow ? "unfollow" : "follow")/") else {
+            return false
+        }
+
+        var followReq = URLRequest(url: followURL)
+        followReq.httpMethod = "POST"
+        followReq.timeoutInterval = 10
+        followReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
+        followReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
+        followReq.setValue(session.csrfToken, forHTTPHeaderField: "X-CSRFToken")
+        followReq.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        followReq.setValue("https://www.instagram.com/\(clean)/", forHTTPHeaderField: "Referer")
+        followReq.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        followReq.httpBody = Data()
+
+        if let (_, resp) = try? await URLSession.shared.data(for: followReq),
+           let code = (resp as? HTTPURLResponse)?.statusCode,
+           (200..<300).contains(code) {
+            return true
+        }
+        return false
+    }
+
     func resetSession() async {
         pumpTask?.cancel()
         pumpTask = nil
@@ -711,8 +782,7 @@ enum InstagramAPI {
         let url = URL(string: "https://www.instagram.com/reels/")!
         let maxId = after != nil ? (InstagramWebEngine.shared.currentMaxId(for: "ig_saved") ?? "") : ""
         if after != nil && maxId.isEmpty {
-            // Once personal Saved pages are exhausted, continue seamlessly with Reels clips for infinite scroll
-            return await reels(after: after)
+            return GoonedFeedResponse(posts: [], after: nil)
         }
         let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
         let triggerSavedJS = """

@@ -52,13 +52,76 @@ struct Gif: Codable, Identifiable, Hashable {
             return "ig_pk_\(base)"
         }
         let media = muxedUrlHd ?? muxedUrl ?? mediaUrl ?? posterUrl
+        if let extraKey = MediaMetaRegistry.canonicalMediaFingerprint(for: self) {
+            return extraKey
+        }
         if let media, let u = URL(string: media), let host = u.host {
-            let path = u.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if !path.isEmpty {
-                return "media_\(host.lowercased())/\(path)"
+            let normalized = Self.normalizedMediaDedupeKey(host: host, path: u.path)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+        if let poster = posterUrl ?? thumbnailUrl, let u = URL(string: poster), let host = u.host {
+            let normalized = Self.normalizedMediaDedupeKey(host: host, path: u.path)
+            if !normalized.isEmpty {
+                return normalized
             }
         }
         return id.lowercased()
+    }
+
+    private static func normalizedMediaDedupeKey(host: String, path: String) -> String {
+        let lowerHost = host.lowercased()
+        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanPath.isEmpty else { return "" }
+
+        // Twitter/X CDN: group all bitrates/codecs/thumbnails sharing the same numeric asset ID
+        if lowerHost.contains("twimg.com") {
+            let parts = cleanPath.split(separator: "/").map(String.init)
+            if let tagIdx = parts.firstIndex(where: {
+                $0 == "ext_tw_video" || $0 == "ext_tw_video_thumb"
+                || $0 == "amplify_video" || $0 == "amplify_video_thumb"
+                || $0 == "tweet_video" || $0 == "tweet_video_thumb"
+            }), tagIdx + 1 < parts.count {
+                return "twvid_\(parts[tagIdx + 1])"
+            }
+        }
+
+        // Reddit v.redd.it: group all DASH bitrates under the clip ID
+        if lowerHost.contains("v.redd.it") {
+            if let firstSeg = cleanPath.split(separator: "/").first, !firstSeg.isEmpty {
+                return "vredd_\(firstSeg.lowercased())"
+            }
+        }
+
+        // RedGifs: strip quality suffixes (-mobile, -silent, -large) and subdomains
+        if lowerHost.contains("redgifs.com") {
+            let last = (cleanPath as NSString).lastPathComponent.lowercased()
+            let base = (last as NSString).deletingPathExtension
+                .replacingOccurrences(of: "-mobile", with: "")
+                .replacingOccurrences(of: "-silent", with: "")
+                .replacingOccurrences(of: "-large", with: "")
+            if !base.isEmpty {
+                return "redgifs_\(base)"
+            }
+        }
+
+        let noExt = (cleanPath as NSString).deletingPathExtension.lowercased()
+        return "media_\(lowerHost)/\(noExt)"
+    }
+
+    /// Secondary fuzzy key matching reposts with identical normalized caption + rounded duration.
+    var contentSimilarityKey: String? {
+        let cleanTitle = (title ?? "")
+            .lowercased()
+            .replacingOccurrences(of: #"https?://\S+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"@[A-Za-z0-9_]+"#, with: "", options: .regularExpression)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard cleanTitle.count >= 14 else { return nil }
+        let durBucket = duration.map { Int(($0 * 2.0).rounded()) } ?? -1
+        return "sim_\(durBucket)_\(cleanTitle.prefix(80))"
     }
 
     var isXPost: Bool {
@@ -77,6 +140,19 @@ struct Gif: Codable, Identifiable, Hashable {
         id.hasPrefix("of_") || (sourceUrl?.contains("cum.st") == true) || (permalink?.contains("cum.st") == true)
     }
 
+    var isLongVideoPost: Bool {
+        id.hasPrefix("lv_")
+    }
+
+    var longVideoSiteLabel: String? {
+        guard isLongVideoPost else { return nil }
+        if id.hasPrefix("lv_ep_") { return "Eporner" }
+        if id.hasPrefix("lv_ph_") { return "Pornhub" }
+        if id.hasPrefix("lv_xh_") { return "xHamster" }
+        if id.hasPrefix("lv_sb_") { return "SpankBang" }
+        return subreddit
+    }
+
     /// Extracts OnlyFans creator external ID from `https://cum.st/creators/onlyfans/{creatorId}/...`
     var onlyFansCreatorId: String? {
         guard isOnlyFansPost else { return nil }
@@ -92,11 +168,13 @@ struct Gif: Codable, Identifiable, Hashable {
 
     var isImage: Bool {
         if mediaType == "image" { return true }
+        if isLongVideoPost { return false }
         return remoteOrLocalVideoURLs(hd: true).isEmpty
     }
 
     var hasPlayableMedia: Bool {
-        !remoteOrLocalVideoURLs(hd: true).isEmpty || imageURL != nil
+        if isLongVideoPost { return true }
+        return !remoteOrLocalVideoURLs(hd: true).isEmpty || imageURL != nil
     }
 
     private static func isPlayableVideoURLString(_ s: String) -> Bool {
@@ -111,7 +189,7 @@ struct Gif: Codable, Identifiable, Hashable {
             return true
         }
         // Some CDN video URLs don't end in .mp4 (e.g. X/IG/Reddit v.redd.it without ext)
-        return lower.contains("video.twimg.com") || lower.contains("v.redd.it") || lower.contains("cdninstagram.com") || lower.contains("fbcdn.net")
+        return lower.contains("video.twimg.com") || lower.contains("v.redd.it") || lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") || lower.contains("eporner.com") || lower.contains("phncdn.com") || lower.contains("xhcdn.com") || lower.contains("sb-cd.com")
     }
 
     private static func isRenderableImageURLString(_ s: String) -> Bool {
@@ -144,9 +222,11 @@ struct Gif: Codable, Identifiable, Hashable {
             urls.append(local)
         }
         // 2. Remote stream candidates (validated so .gif/.jpg/HTML never enter AVPlayer)
-        let candidates: [String?] = hd
+        var candidates: [String?] = hd
             ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
             : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
+        let extra = MediaMetaRegistry.extraVideoURLs(for: id)
+        for u in extra { candidates.append(u) }
         var seen = Set<String>()
         for c in candidates {
             if let s = c, !s.isEmpty, Self.isPlayableVideoURLString(s), seen.insert(s).inserted, let u = URL(string: s) {
@@ -284,4 +364,34 @@ func shortCount(_ n: Int?) -> String {
     if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
     if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
     return "\(n)"
+}
+
+/// Thread-safe registry for auxiliary playback & fingerprinting metadata that avoids bloating persisted `Gif` JSON.
+enum MediaMetaRegistry {
+    private static let lock = NSLock()
+    private static var fingerprints: [String: String] = [:]
+    private static var extraVideos: [String: [String]] = [:]
+
+    static func register(postId: String, fingerprint: String? = nil, extraVideoURLs: [String] = []) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fingerprint, !fingerprint.isEmpty {
+            fingerprints[postId] = fingerprint
+        }
+        if !extraVideoURLs.isEmpty {
+            extraVideos[postId] = extraVideoURLs
+        }
+    }
+
+    static func canonicalMediaFingerprint(for gif: Gif) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return fingerprints[gif.id]
+    }
+
+    static func extraVideoURLs(for postId: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return extraVideos[postId] ?? []
+    }
 }

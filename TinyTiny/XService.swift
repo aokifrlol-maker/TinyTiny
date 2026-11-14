@@ -85,7 +85,7 @@ enum XTweetParser {
                 fallbackAuthor: currentAuthor,
                 fallbackBio: currentBio,
                 routeKey: routeKey
-            ), seen.insert(gif.id).inserted {
+            ), seen.insert(gif.canonicalDedupeKey).inserted, seen.insert(gif.id).inserted {
                 results.append(gif)
             }
 
@@ -183,7 +183,7 @@ enum XTweetParser {
                 continue
             }
 
-            // Collect MP4 variants sorted by bitrate descending
+            // Collect MP4 variants & sort by reliability + bitrate
             var mp4Variants: [(bitrate: Int, url: String)] = []
             var hlsVariant: String?
 
@@ -198,17 +198,31 @@ enum XTweetParser {
                 }
             }
 
+            // Sort high-to-low, while preferring fast-starting <=2.5Mbps AVC stream for SD/default and fallback chain
             mp4Variants.sort { $0.bitrate > $1.bitrate }
+            let fastStartMp4 = mp4Variants.first(where: { $0.bitrate > 0 && $0.bitrate <= 2_500_000 })?.url
+                ?? mp4Variants.last?.url
             guard let bestMp4 = mp4Variants.first?.url ?? hlsVariant else {
                 continue
             }
-            let sdMp4 = mp4Variants.dropFirst().first?.url ?? bestMp4
+            let sdMp4 = fastStartMp4 ?? mp4Variants.dropFirst().first?.url ?? bestMp4
 
             let rawTweetId = (dict["rest_id"] as? String)
                 ?? (legacy["id_str"] as? String)
                 ?? (media["source_status_id_str"] as? String)
                 ?? (media["id_str"] as? String)
                 ?? UUID().uuidString
+
+            let mediaFingerprint: String? = (media["media_key"] as? String)
+                ?? (media["source_status_id_str"] as? String).map { "xsrc_\($0)" }
+                ?? (media["id_str"] as? String).map { "xmed_\($0)" }
+
+            let allVariantURLs = mp4Variants.map(\.url) + (hlsVariant.map { [$0] } ?? [])
+            MediaMetaRegistry.register(
+                postId: "x_\(rawTweetId)",
+                fingerprint: mediaFingerprint,
+                extraVideoURLs: allVariantURLs
+            )
 
             let authorMeta = extractAuthorAndBio(from: dict)
             let author = authorMeta.screenName ?? fallbackAuthor ?? "x_user"
@@ -481,7 +495,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                         const clone = resp.clone();
                         clone.text().then(function(body) {
                             if (body && body.length > 10 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, body: body });
+                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: body });
                             }
                         }).catch(function(){});
                     }
@@ -502,7 +516,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                         const url = xhr.__goonedUrl || '';
                         if (shouldCapture(url) && xhr.responseText && xhr.responseText.length > 10) {
                             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, body: xhr.responseText });
+                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: xhr.responseText });
                             }
                         }
                     } catch (e) {}
@@ -614,10 +628,28 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             UserStore.shared.data.xSession.screenName = sn
         }
 
+        // Strict route isolation: never let X's "For you" HomeTimeline or Search payloads leak into Following/Bookmarks/User feeds
+        let pageUrl = (body["pageUrl"] as? String ?? "").lowercased()
+        if activeRouteKey == "x_following" {
+            let isForYouTimeline = url.contains("HomeTimeline") && !url.contains("HomeLatestTimeline")
+            let isSearchResult = url.contains("SearchTimeline") || pageUrl.contains("/search")
+            if isForYouTimeline || isSearchResult {
+                return
+            }
+        } else if activeRouteKey == "x_bookmarks" && !url.contains("Bookmarks") && !pageUrl.contains("/bookmarks") && url != "ssr_x" {
+            return
+        } else if activeRouteKey.hasPrefix("x_search_") && (url.contains("HomeTimeline") || url.contains("HomeLatestTimeline")) {
+            return
+        }
+
         let tweets = XTweetParser.parseTweets(from: data, routeKey: activeRouteKey)
         if !tweets.isEmpty {
             let store = UserStore.shared
-            let fresh = tweets.filter { !store.isSeen($0) && seenIds.insert($0.canonicalDedupeKey).inserted }
+            let fresh = tweets.filter {
+                !store.isSeen($0)
+                    && !store.isBlockedByAlgorithm($0)
+                    && seenIds.insert($0.canonicalDedupeKey).inserted
+            }
             if !fresh.isEmpty {
                 dryPayloadCount = 0
                 var buf = routeBuffers[activeRouteKey] ?? []
@@ -636,7 +668,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
         dryPayloadCount += 1
         let bufCount = routeBuffers[activeRouteKey]?.count ?? 0
-        let shouldSupplement = (activeRouteKey == "x_foryou" || activeRouteKey == "x_following" || activeRouteKey == "x_bookmarks" || activeRouteKey.hasPrefix("x_likes"))
+        // Only "For You" may fall back to adult search discovery; Following/Bookmarks/Search/User never mix in random tweets
+        let shouldSupplement = (activeRouteKey == "x_foryou")
         if shouldSupplement && bufCount == 0 && dryPayloadCount >= 1,
            let wv = webView,
            let supURL = nextAdultSupplementURL() {
@@ -647,6 +680,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                     _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
                     try? await Task.sleep(nanoseconds: 1_100_000_000)
                     guard let self,
+                          self.activeRouteKey == "x_foryou",
                           !self.waiters.filter({ $0.routeKey == self.activeRouteKey }).isEmpty,
                           (self.routeBuffers[self.activeRouteKey]?.isEmpty ?? true),
                           let nextSup = self.nextAdultSupplementURL() else { return }
@@ -656,19 +690,24 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         }
     }
 
-    private func nextAdultSupplementURL() -> URL? {
+    func nextAdultSupplementURL() -> URL? {
         let topTags = UserStore.shared.data.algorithm.tagWeights
             .filter { $0.value > 0 }
             .sorted { $0.value > $1.value }
             .prefix(4)
             .map(\.key)
-        var queries = topTags.map { "nsfw \($0) filter:videos" }
+        let blocked = Set(
+            UserStore.shared.data.algorithm.blockedTags.map { $0.lowercased() }
+            + SmartTasteEngine.shared.state.suppressedTags.map { $0.lowercased() }
+        )
+        let exclusions = blocked.prefix(4).map { "-\($0)" }.joined(separator: " ")
+        var queries = topTags.filter { !blocked.contains($0.lowercased()) }.map { "nsfw \($0) \(exclusions) filter:videos" }
         queries.append(contentsOf: [
-            "nsfw filter:videos",
-            "porn filter:videos",
-            "hentai filter:videos",
-            "nsfw gif filter:native_video",
-            "onlyfans filter:videos"
+            "nsfw \(exclusions) filter:videos",
+            "porn \(exclusions) filter:videos",
+            "hentai \(exclusions) filter:videos",
+            "nsfw gif \(exclusions) filter:native_video",
+            "onlyfans \(exclusions) filter:videos"
         ])
         let q = queries[adultSupplementIndex % queries.count]
         adultSupplementIndex += 1
@@ -794,6 +833,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             pumpTask?.cancel()
             pumpTask = nil
             activeRouteKey = routeKey
+            if isRefresh {
+                routeBuffers[routeKey] = []
+            }
             dryPayloadCount = 0
             pageCounter = 0
 
@@ -846,6 +888,113 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         scheduleBackgroundPump(for: routeKey, wv: wv)
         pageCounter += 1
         return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
+    }
+
+    /// Direct authenticated X Search via REST v2 (`adaptive.json`) — bypasses slow DOM navigation (~350ms).
+    /// Falls back cleanly to live WebView search if adaptive.json is blocked or returns 0 videos.
+    func searchFast(query: String, sort: String, after: String?) async -> GoonedFeedResponse {
+        let session = UserStore.shared.data.xSession
+        guard session.isConnected else { return GoonedFeedResponse(posts: [], after: nil) }
+
+        let cleaned = query
+            .replacingOccurrences(of: "x:", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseQuery = cleaned.isEmpty ? "nsfw" : cleaned
+
+        // Try direct authenticated adaptive JSON API first (very fast, zero WebView lock contention)
+        for qVariant in ["\(baseQuery) filter:videos", baseQuery] {
+            var comps = URLComponents(string: "https://x.com/i/api/2/search/adaptive.json")!
+            comps.queryItems = [
+                URLQueryItem(name: "q", value: qVariant),
+                URLQueryItem(name: "count", value: "40"),
+                URLQueryItem(name: "tweet_mode", value: "extended"),
+                URLQueryItem(name: "include_entities", value: "1"),
+                URLQueryItem(name: "include_ext_media_color", value: "true"),
+                URLQueryItem(name: "tweet_search_mode", value: sort == "Latest" ? "live" : "top")
+            ]
+            if let after, after.hasPrefix("cursor:"), !after.dropFirst(7).isEmpty {
+                comps.queryItems?.append(URLQueryItem(name: "cursor", value: String(after.dropFirst(7))))
+            }
+            if let url = comps.url {
+                var req = URLRequest(url: url)
+                req.timeoutInterval = 7
+                req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
+                req.setValue("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA", forHTTPHeaderField: "Authorization")
+                req.setValue(session.ct0, forHTTPHeaderField: "x-csrf-token")
+                req.setValue("auth_token=\(session.authToken); ct0=\(session.ct0)", forHTTPHeaderField: "Cookie")
+                req.setValue("https://x.com/search", forHTTPHeaderField: "Referer")
+                req.setValue("OAuth2Session", forHTTPHeaderField: "x-twitter-auth-type")
+                req.setValue("true", forHTTPHeaderField: "x-twitter-active-user")
+
+                if let (data, resp) = try? await URLSession.shared.data(for: req),
+                   (resp as? HTTPURLResponse)?.statusCode == 200 {
+                    let parsed = XTweetParser.parseTweets(from: data, routeKey: "x_search_fast")
+                    let store = UserStore.shared
+                    let filtered = parsed.filter {
+                        !store.isSeen($0)
+                        && !store.isBlockedByAlgorithm($0)
+                        && seenIds.insert($0.canonicalDedupeKey).inserted
+                    }
+                    let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
+                    if !filtered.isEmpty {
+                        return GoonedFeedResponse(posts: filtered, after: nextCursor)
+                    }
+                }
+            }
+        }
+
+        // WebView fallback: try unfiltered / filtered search on x.com/search
+        let encoded = "\(baseQuery) filter:videos".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
+        let tab = (sort == "Latest") ? "live" : "top"
+        let searchURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
+        let res = await fetchFeed(
+            routeKey: "x_search_\(cleaned.lowercased())_\(tab)",
+            targetURL: searchURL,
+            isRefresh: after == nil
+        )
+        if !res.posts.isEmpty { return res }
+
+        let broadEncoded = baseQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
+        let broadURL = URL(string: "https://x.com/search?q=\(broadEncoded)&src=typed_query&f=\(tab)")!
+        return await fetchFeed(
+            routeKey: "x_search_broad_\(cleaned.lowercased())_\(tab)",
+            targetURL: broadURL,
+            isRefresh: true
+        )
+    }
+
+    /// Follows or unfollows an account directly on the user's real X account using authenticated CSRF headers.
+    @discardableResult
+    func followUser(_ screenName: String, unfollow: Bool) async -> Bool {
+        let session = UserStore.shared.data.xSession
+        guard session.isConnected else { return false }
+        let handle = screenName.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "@", with: "")
+        guard !handle.isEmpty else { return false }
+
+        let endpoint = unfollow
+            ? "https://x.com/i/api/1.1/friendships/destroy.json"
+            : "https://x.com/i/api/1.1/friendships/create.json"
+        guard let url = URL(string: endpoint) else { return false }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 10
+        req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA", forHTTPHeaderField: "Authorization")
+        req.setValue(session.ct0, forHTTPHeaderField: "x-csrf-token")
+        req.setValue("auth_token=\(session.authToken); ct0=\(session.ct0)", forHTTPHeaderField: "Cookie")
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("OAuth2Session", forHTTPHeaderField: "x-twitter-auth-type")
+        req.setValue("https://x.com/\(handle)", forHTTPHeaderField: "Referer")
+        let enc = handle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? handle
+        req.httpBody = "screen_name=\(enc)&follow=true".data(using: .utf8)
+
+        if let (_, resp) = try? await URLSession.shared.data(for: req),
+           let code = (resp as? HTTPURLResponse)?.statusCode,
+           (200..<300).contains(code) {
+            return true
+        }
+        return false
     }
 
     func resetSession() async {
@@ -912,18 +1061,7 @@ enum XAPI {
     }
 
     static func search(_ query: String, sort: String = "Top", after: String? = nil) async -> GoonedFeedResponse {
-        let cleaned = query
-            .replacingOccurrences(of: "x:", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let q = cleaned.isEmpty ? "nsfw filter:videos" : "\(cleaned) filter:videos"
-        let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
-        let tab = (sort == "Latest") ? "live" : "top"
-        let url = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
-        return await XWebEngine.shared.fetchFeed(
-            routeKey: "x_search_\(cleaned.lowercased())_\(tab)",
-            targetURL: url,
-            isRefresh: after == nil
-        )
+        await XWebEngine.shared.searchFast(query: query, sort: sort, after: after)
     }
 
     static func userMedia(_ username: String, after: String? = nil) async -> GoonedFeedResponse {

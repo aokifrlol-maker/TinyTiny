@@ -205,7 +205,7 @@ actor Rule34API {
         }
     }
 
-    /// Fetches Rule34 videos & high-res posts for a tag query (space-separated tags = AND; underscores = single tag).
+    /// Fetches Rule34 videos & high-res posts strictly from Rule34 / Booru APIs (never falls back to Reddit!).
     func fetchFeed(
         tag: String?,
         sort: String,
@@ -214,15 +214,19 @@ actor Rule34API {
     ) async -> GoonedFeedResponse {
         let page = Int(after ?? "0") ?? 0
         let tags = Self.parseTags(tag ?? "")
+        let blocked = await MainActor.run {
+            Array(Set(UserStore.shared.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags))
+        }
         let cleanTagString = tags.joined(separator: " ")
 
         var combined: [Gif] = []
         var seen = Set<String>()
 
-        // 1. Direct api.rule34.xxx JSON API (if user connected their rule34.xxx user_id + api_key)
+        // 1. Direct api.rule34.xxx JSON API
         if credentials.isConnected {
             let directPosts = await fetchDirectRule34XXX(
                 tag: cleanTagString,
+                blockedTags: blocked,
                 sort: sort,
                 page: page,
                 credentials: credentials
@@ -232,16 +236,10 @@ actor Rule34API {
             }
         }
 
-        // 2. Always-on Zero-Auth Engine (Gooned R34/Hentai network + Booru JSON APIs) so Rule34 works 100% out of the box
+        // 2. Supplement ONLY from other explicit Booru engines (NEVER Reddit!), and if multi-tag AND returned 0 on page 0, relax to primary tag on boorus
         if combined.count < 12 {
-            let primaryTag = tags.first ?? ""
-            async let goonedR34Task = fetchGoonedRule34(tags: tags, sort: sort, page: page)
-            async let booruTask = fetchZeroAuthBooru(tag: cleanTagString.isEmpty ? primaryTag : cleanTagString, sort: sort, page: page)
-
-            let (goonedPosts, booruPosts) = await (goonedR34Task, booruTask)
-            for p in goonedPosts where seen.insert(p.id).inserted {
-                combined.append(p)
-            }
+            let effectiveQuery = (combined.isEmpty && tags.count > 1) ? (tags.first ?? "") : cleanTagString
+            let booruPosts = await fetchZeroAuthBooru(tag: effectiveQuery, sort: sort, page: page)
             for p in booruPosts where seen.insert(p.id).inserted {
                 combined.append(p)
             }
@@ -254,6 +252,7 @@ actor Rule34API {
 
     private func fetchDirectRule34XXX(
         tag: String,
+        blockedTags: [String] = [],
         sort: String,
         page: Int,
         credentials: Rule34Credentials
@@ -263,6 +262,9 @@ actor Rule34API {
         // Strictly explicit adult content only (-rating:safe -rating:questionable)
         tagParts.append("-rating:safe")
         tagParts.append("-rating:questionable")
+        for b in blockedTags.prefix(6) where !b.isEmpty && !tag.lowercased().contains(b.lowercased()) {
+            tagParts.append("-\(b.replacingOccurrences(of: " ", with: "_"))")
+        }
         if sort == "top" || sort == "hot" {
             tagParts.append("sort:score:desc")
         }
@@ -290,86 +292,59 @@ actor Rule34API {
         }
     }
 
-    // MARK: - Tier 2A: Gooned Rule34 / Hentai Subreddit Network
-
-    private func fetchGoonedRule34(tags: [String], sort: String, page: Int) async -> [Gif] {
-        let api = GoonedAPI.shared
-        let offsetCursor = page == 0 ? nil : GoonedAPI.randomForYouCursor(offset: page * 25)
-
-        if tags.isEmpty {
-            let catName = (page % 2 == 0) ? "Rule34" : "Hentai"
-            if let resp = try? await api.category(catName, sort: sort, after: offsetCursor, limit: 25) {
-                return resp.posts.map { markAsRule34($0, tag: "rule34") }
-            }
-            return []
-        }
-
-        // Search matching subreddits on gooned.app for each tag (e.g. "hentai femboy" -> searches both!)
-        var targetSubs: [String] = []
-        for tag in tags.prefix(3) {
-            let cleanSub = tag.replacingOccurrences(of: "_", with: "")
-            if let searchResp = try? await api.search(cleanSub) {
-                for s in searchResp.subreddits.prefix(2) where !targetSubs.contains(s.name) {
-                    targetSubs.append(s.name)
-                }
-            }
-        }
-        if targetSubs.isEmpty {
-            targetSubs = ["rule34", "HENTAI_GIF", "FutanariGifs", "Hentai__videos"]
-        }
-
-        let chosenSub = targetSubs[page % max(1, targetSubs.count)]
-        if let resp = try? await api.subreddit(chosenSub, sort: sort, after: offsetCursor, limit: 25) {
-            return resp.posts.map { markAsRule34($0, tag: tags.joined(separator: " ")) }
-        }
-        return []
-    }
-
-    private func markAsRule34(_ gif: Gif, tag: String) -> Gif {
-        var copy = gif
-        if copy.subreddit == nil || copy.subreddit?.isEmpty == true {
-            copy.subreddit = "rule34"
-        }
-        return copy
-    }
-
-    // MARK: - Tier 2B: Zero-Auth Booru JSON APIs (MP4 & High-Res Art)
+    // MARK: - Tier 2: Zero-Auth Explicit Booru JSON APIs (MP4 & High-Res Art, Parallel)
 
     private func fetchZeroAuthBooru(tag: String, sort: String, page: Int) async -> [Gif] {
-        var results: [Gif] = []
         let pageNum = page + 1
-
-        // 1. yande.re explicit high-res art/animations
-        var yandeComps = URLComponents(string: "https://yande.re/post.json")
         let yandeTags = tag.isEmpty ? "order:score rating:e" : "\(tag) rating:e"
-        yandeComps?.queryItems = [
-            URLQueryItem(name: "limit", value: "20"),
-            URLQueryItem(name: "page", value: "\(pageNum)"),
-            URLQueryItem(name: "tags", value: yandeTags)
-        ]
-        if let url = yandeComps?.url,
-           let (data, _) = try? await session.data(from: url) {
-            results.append(contentsOf: parseMoebooruJSON(data: data, sourcePrefix: "r34y"))
-        }
+        let gelTags = tag.isEmpty ? "-rating:safe -rating:questionable" : "\(tag) -rating:safe -rating:questionable"
 
-        // 2. hypnohub.net Gelbooru-compatible DAPI (explicit rating only)
-        var hypComps = URLComponents(string: "https://hypnohub.net/index.php")
-        let hypTags = tag.isEmpty ? "-rating:safe -rating:questionable" : "\(tag) -rating:safe -rating:questionable"
-        hypComps?.queryItems = [
-            URLQueryItem(name: "page", value: "dapi"),
-            URLQueryItem(name: "s", value: "post"),
-            URLQueryItem(name: "q", value: "index"),
-            URLQueryItem(name: "json", value: "1"),
-            URLQueryItem(name: "limit", value: "20"),
-            URLQueryItem(name: "pid", value: "\(page)"),
-            URLQueryItem(name: "tags", value: hypTags)
-        ]
-        if let url = hypComps?.url,
-           let (data, _) = try? await session.data(from: url) {
-            results.append(contentsOf: parseGelbooruStyleJSON(data: data, sourcePrefix: "r34h", basePermalink: "https://hypnohub.net/index.php?page=post&s=view&id="))
-        }
+        async let yandeTask: [Gif] = {
+            var comps = URLComponents(string: "https://yande.re/post.json")
+            comps?.queryItems = [
+                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "page", value: "\(pageNum)"),
+                URLQueryItem(name: "tags", value: yandeTags)
+            ]
+            guard let url = comps?.url,
+                  let (data, _) = try? await self.session.data(from: url) else { return [] }
+            return self.parseMoebooruJSON(data: data, sourcePrefix: "r34y")
+        }()
 
-        return results
+        async let hypTask: [Gif] = {
+            var comps = URLComponents(string: "https://hypnohub.net/index.php")
+            comps?.queryItems = [
+                URLQueryItem(name: "page", value: "dapi"),
+                URLQueryItem(name: "s", value: "post"),
+                URLQueryItem(name: "q", value: "index"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "pid", value: "\(page)"),
+                URLQueryItem(name: "tags", value: gelTags)
+            ]
+            guard let url = comps?.url,
+                  let (data, _) = try? await self.session.data(from: url) else { return [] }
+            return self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34h", basePermalink: "https://hypnohub.net/index.php?page=post&s=view&id=")
+        }()
+
+        async let realTask: [Gif] = {
+            var comps = URLComponents(string: "https://realbooru.com/index.php")
+            comps?.queryItems = [
+                URLQueryItem(name: "page", value: "dapi"),
+                URLQueryItem(name: "s", value: "post"),
+                URLQueryItem(name: "q", value: "index"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "pid", value: "\(page)"),
+                URLQueryItem(name: "tags", value: gelTags)
+            ]
+            guard let url = comps?.url,
+                  let (data, _) = try? await self.session.data(from: url) else { return [] }
+            return self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34b", basePermalink: "https://realbooru.com/index.php?page=post&s=view&id=")
+        }()
+
+        let (y, h, r) = await (yandeTask, hypTask, realTask)
+        return h + r + y
     }
 
     // MARK: - JSON Parsers (Filtering Out Unplayable .webm so iOS AVPlayer Never Fails)

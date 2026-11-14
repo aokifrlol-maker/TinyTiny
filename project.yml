@@ -26,9 +26,15 @@ targets:
           UIColorName: ""
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        CFBundleURLTypes:
+          - CFBundleURLName: com.tinytiny.calc.drop
+            CFBundleURLSchemes:
+              - tinytiny
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        UIRequiresFullScreen: true
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
         UIUserInterfaceStyle: Dark
         ITSAppUsesNonExemptEncryption: false
     settings:

@@ -183,23 +183,34 @@ final class UserStore: ObservableObject {
     }
 
     func isSeen(_ post: Gif) -> Bool {
-        seenSet.contains(post.id) || seenSet.contains(post.canonicalDedupeKey)
+        seenSet.contains(post.id)
+            || seenSet.contains(post.canonicalDedupeKey)
+            || SmartTasteEngine.shared.isSeenOrDuplicate(post)
     }
 
     func markSeen(_ post: Gif) {
         markSeen(post.id)
         markSeen(post.canonicalDedupeKey)
+        SmartTasteEngine.shared.markSeenSimilarity(post)
     }
 
     func markSeen(_ id: String) {
         guard !id.isEmpty, seenSet.insert(id).inserted else { return }
         data.seenIDs.append(id)
-        if data.seenIDs.count > 6000 {
-            let overflow = data.seenIDs.count - 5200
+        if data.seenIDs.count > 12_000 {
+            let overflow = data.seenIDs.count - 10_000
             let removed = data.seenIDs.prefix(overflow)
             for r in removed { seenSet.remove(r) }
             data.seenIDs.removeFirst(overflow)
         }
+    }
+
+    @discardableResult
+    func dislike(_ post: Gif) -> SmartTasteEngine.DislikeOutcome {
+        markSeen(post)
+        let outcome = SmartTasteEngine.shared.recordDislike(post, categories: categories)
+        recordAlgorithmSignal(for: post, weight: -8.0)
+        return outcome
     }
 
     func savedCursor(for key: String) -> String? {
@@ -343,6 +354,29 @@ final class UserStore: ObservableObject {
         }
     }
 
+    /// Toggles follow locally AND syncs Follow/Unfollow on the user's connected X or Instagram account.
+    func toggleFollowAndSync(for post: Gif) {
+        if post.isOnlyFansPost, let cid = post.onlyFansCreatorId {
+            toggleFollowOFCreator(id: cid, name: post.author ?? cid)
+        } else if post.isXPost, let u = post.author {
+            toggleFollowXUser(u)
+            let shouldUnfollow = !isFollowingXUser(u)
+            if data.xSession.isConnected {
+                Task { _ = await XWebEngine.shared.followUser(u, unfollow: shouldUnfollow) }
+            }
+        } else if post.isIGPost, let u = post.author {
+            toggleFollowIGUser(u)
+            let shouldUnfollow = !isFollowingIGUser(u)
+            if data.igSession.isConnected {
+                Task { _ = await InstagramWebEngine.shared.followUser(u, unfollow: shouldUnfollow) }
+            }
+        } else if let sub = post.subreddit {
+            toggleFollowSubreddit(sub)
+        } else if let u = post.author {
+            toggleFollowUser(u)
+        }
+    }
+
     func disconnectX() {
         data.xSession = XAccountSession()
         Task { await XWebEngine.shared.resetSession() }
@@ -421,6 +455,9 @@ final class UserStore: ObservableObject {
         let target: Double = post.isImage ? 0.0 : 1.0
         let alpha = weight > 0 ? 0.06 : 0.02
         data.algorithm.videoPreference = min(max(data.algorithm.videoPreference + (target - data.algorithm.videoPreference) * alpha, 0.1), 0.95)
+        if weight > 0 {
+            SmartTasteEngine.shared.recordPositivePlatformSignal(post, boost: min(0.25, weight * 0.03))
+        }
     }
 
     func recordDwellSignal(for post: Gif, secondsWatched: TimeInterval) {
@@ -510,15 +547,19 @@ final class UserStore: ObservableObject {
         if let up = post.upvotes, up > 0 {
             score += min(log10(Double(up)) * 0.55, 2.2)
         }
+        score += SmartTasteEngine.shared.scoreAdjustment(for: post, categories: categories)
         return score
     }
 
     func isBlockedByAlgorithm(_ post: Gif) -> Bool {
-        guard data.settings.algorithmEnabled, !data.algorithm.blockedTags.isEmpty else { return false }
+        if SmartTasteEngine.shared.isDisliked(post) { return true }
+        guard data.settings.algorithmEnabled else { return false }
+        if SmartTasteEngine.shared.isSuppressedInDiscovery(post, categories: categories) { return true }
+        guard !data.algorithm.blockedTags.isEmpty else { return false }
         let sub = post.subreddit?.lowercased() ?? ""
         let author = post.author?.lowercased() ?? ""
         let title = post.title?.lowercased() ?? ""
-        let postTags = PornTagCatalog.extractRecognizedTags(from: post, categories: categories)
+        let postTags = Set(SmartTasteEngine.extractExtendedTags(from: post, categories: categories))
         for blocked in data.algorithm.blockedTags {
             let b = blocked.lowercased()
             let canonicalBlocked = PornTagCatalog.normalize(b, categories: categories) ?? b
@@ -662,11 +703,13 @@ final class UserStore: ObservableObject {
 
     func resetAlgorithm() {
         data.algorithm = AlgorithmProfile()
+        SmartTasteEngine.shared.reset()
     }
 
     func eraseAll() {
         saveTask?.cancel()
         seenSet.removeAll()
+        SmartTasteEngine.shared.reset()
         OfflineManager.shared.clearAllDownloads()
         var fresh = UserData()
         fresh.r34Credentials.resetToDefault()

@@ -5,6 +5,7 @@ import SwiftUI
 struct GoonedBrowseOverlay: View {
     var onClose: () -> Void
     var onSelectFeed: (FeedSource) -> Void
+    var onOpenPost: (Gif) -> Void = { _ in }
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
     var onSetupR34Key: () -> Void
@@ -16,6 +17,7 @@ struct GoonedBrowseOverlay: View {
         case rule34 = "Rule34"
         case x = "𝕏"
         case ig = "IG"
+        case long = "Long"
     }
 
     @EnvironmentObject var store: UserStore
@@ -26,6 +28,7 @@ struct GoonedBrowseOverlay: View {
     @State private var ofCreators: [OFCreator] = []
     @State private var featuredOFCreators: [OFCreator] = []
     @State private var isSearching = false
+    @State private var showReceiveDrop = false
 
     struct GoonedSearchResponsePlaceholder {
         var subreddits: [GoonedSearchItem] = []
@@ -182,12 +185,47 @@ struct GoonedBrowseOverlay: View {
             ofCreators = ofRes
             isSearching = false
         }
+        .sheet(isPresented: $showReceiveDrop) {
+            ReceiveDropSheet { post in
+                showReceiveDrop = false
+                onOpenPost(post)
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     // MARK: - Default Browse Content
 
     private var defaultBrowseContent: some View {
         VStack(alignment: .leading, spacing: 18) {
+            // Encrypted Share Drop Quick Open
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                showReceiveDrop = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "lock.doc.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Receive Encrypted Share Drop")
+                            .font(.system(size: 14.5, weight: .bold))
+                        Text("Paste a drop link or code shared by a friend")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.65))
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .padding(13)
+                .liquidGlassCard(cornerRadius: 18)
+            }
+            .buttonStyle(ScalePressButtonStyle())
+            .padding(.horizontal, 16)
+
             // PICK UP WHERE YOU LEFT OFF
             VStack(alignment: .leading, spacing: 8) {
                 Text("PICK UP WHERE YOU LEFT OFF")
@@ -530,7 +568,11 @@ struct GoonedBrowseOverlay: View {
                 ForEach(azCategories) { cat in
                     Button {
                         store.recordSearchSignal(cat.name)
-                        onSelectFeed(.category(cat.name))
+                        if cat.name.caseInsensitiveCompare("Rule34") == .orderedSame {
+                            onSelectFeed(.rule34(""))
+                        } else {
+                            onSelectFeed(.category(cat.name))
+                        }
                     } label: {
                         Text(cat.displayName)
                             .font(.system(size: 14, weight: .semibold))
@@ -668,6 +710,8 @@ struct GoonedBrowseOverlay: View {
             onSelectFeed(.igUser(clean.replacingOccurrences(of: "@", with: "").replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
         case .reddit:
             onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "", options: .caseInsensitive).replacingOccurrences(of: " ", with: "")))
+        case .long:
+            onSelectFeed(.longSearch(.all, clean))
         case .all:
             if clean.lowercased().hasPrefix("of:") {
                 let q = clean.replacingOccurrences(of: "of:", with: "", options: .caseInsensitive).trimmingCharacters(in: .whitespaces)
@@ -676,18 +720,14 @@ struct GoonedBrowseOverlay: View {
                 } else {
                     onSelectFeed(.ofSearch(q))
                 }
-            } else if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") || clean.contains("_") {
+            } else if clean.lowercased().hasPrefix("r34:") || clean.lowercased().hasPrefix("#") {
                 onSelectFeed(.rule34(Rule34API.parseTags(clean).joined(separator: " ")))
             } else if clean.lowercased().hasPrefix("ig:") {
                 onSelectFeed(.igUser(clean.replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
             } else if clean.hasPrefix("@") {
                 onSelectFeed(.xUser(clean.replacingOccurrences(of: "@", with: "")))
-            } else if let cat = matchingCategories.first {
-                onSelectFeed(.category(cat.name))
-            } else if let firstSub = searchResults.subreddits.first {
-                onSelectFeed(.subreddit(firstSub.name))
             } else {
-                onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "").replacingOccurrences(of: " ", with: "")))
+                onSelectFeed(.multiSearch(clean))
             }
         }
     }
@@ -714,8 +754,37 @@ struct GoonedBrowseOverlay: View {
         let showR34 = (searchScope == .all || searchScope == .rule34)
         let showX = (searchScope == .all || searchScope == .x)
         let showIG = (searchScope == .all || searchScope == .ig)
+        let showLong = (searchScope == .all || searchScope == .long)
 
         return VStack(alignment: .leading, spacing: 14) {
+            if searchScope == .all && clean.count >= 2 {
+                Button {
+                    store.recordSearchSignal(clean)
+                    onSelectFeed(.multiSearch(clean))
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(Theme.accentBright)
+                            .frame(width: 34, height: 34)
+                            .liquidGlassCircle(tinted: true, active: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Search \"\(clean)\" Across All Sources")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("𝕏, OnlyFans, Rule34, Reddit & Long Videos combined")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.68))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                    .padding(13)
+                    .liquidGlassCard(cornerRadius: 18)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+            }
             if showOF && !ofCreators.isEmpty {
                 Text("ONLYFANS CREATORS")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -861,6 +930,33 @@ struct GoonedBrowseOverlay: View {
                                 Text("Search \"\(clean)\" on 𝕏")
                                     .font(.system(size: 15, weight: .bold))
                                 Text("18+ video posts")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+
+                if showLong && !clean.isEmpty {
+                    Button {
+                        store.recordSearchSignal(clean)
+                        onSelectFeed(.longSearch(.all, clean))
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(Color(red: 1.0, green: 0.62, blue: 0.16))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Search \"\(clean)\" in Long Videos")
+                                    .font(.system(size: 15, weight: .bold))
+                                Text("Eporner, Pornhub, xHamster & SpankBang")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -1081,6 +1177,7 @@ struct GoonedLikesView: View {
     @ObservedObject private var offline = OfflineManager.shared
     @State private var mode: String = "liked" // "liked" or "offline"
     @State private var filter: String = "all" // "all", "videos", "images"
+    @State private var shareTarget: Gif? = nil
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
     private var sourceItems: [Gif] {
@@ -1245,6 +1342,11 @@ struct GoonedLikesView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        shareTarget = post
+                                    } label: {
+                                        Label("Share Encrypted Drop", systemImage: "paperplane.fill")
+                                    }
                                     if offline.isDownloaded(post) {
                                         if let localURL = offline.localMediaURL(for: post) {
                                             ShareLink(item: localURL) {
@@ -1278,6 +1380,11 @@ struct GoonedLikesView: View {
                     }
                 }
             }
+        }
+        .sheet(item: $shareTarget) { post in
+            ShareItemSheet(gif: post)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 }
@@ -1691,9 +1798,13 @@ struct GoonedSettingsModal: View {
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
     @ObservedObject private var offline = OfflineManager.shared
+    @ObservedObject private var taste = SmartTasteEngine.shared
+    @ObservedObject private var license = LicenseManager.shared
     @State private var changingPasscode = false
+    @State private var settingPasscode = false
     @State private var confirmErase = false
     @State private var showAlgorithmEditor = false
+    @State private var syncStatusMessage: String? = nil
 
     private let delays = [3, 6, 10, 15]
 
@@ -1941,6 +2052,27 @@ struct GoonedSettingsModal: View {
                         .padding(16)
                         .liquidGlassCard(cornerRadius: 20)
 
+                        // GENERAL FOR YOU SOURCES
+                        sectionHeader("SOURCES IN GENERAL FOR YOU")
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Balanced split shaped by your likes and Not Interested feedback.")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.white.opacity(0.68))
+
+                            Toggle("Reddit", isOn: $taste.state.sourceSettings.includeReddit)
+                                .tint(Theme.accent)
+                            Toggle("𝕏 (When connected)", isOn: $taste.state.sourceSettings.includeX)
+                                .tint(Theme.accent)
+                            Toggle("OnlyFans", isOn: $taste.state.sourceSettings.includeOnlyFans)
+                                .tint(Theme.accent)
+                            Toggle("Instagram Reels (When connected)", isOn: $taste.state.sourceSettings.includeInstagram)
+                                .tint(Theme.accent)
+                        }
+                        .font(.system(size: 15, weight: .semibold))
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20)
+
                         // AUTOPLAY
                         sectionHeader("AUTOPLAY")
 
@@ -2124,7 +2256,67 @@ struct GoonedSettingsModal: View {
 
                             Divider().overlay(Color.white.opacity(0.14))
 
-                            if Biometrics.available {
+                            // License Key & Encrypted Cloud Sync
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("License Access")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("\(license.expirySummary) · \(license.status.licenseKey.isEmpty ? "Unbound" : license.status.licenseKey)")
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Button {
+                                        Task {
+                                            syncStatusMessage = "Syncing..."
+                                            await license.syncEncryptedBackupNow()
+                                            syncStatusMessage = "Backup encrypted & synced"
+                                        }
+                                    } label: {
+                                        Text("Sync Backup")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 11)
+                                            .padding(.vertical, 7)
+                                            .liquidGlassCapsule(active: true)
+                                    }
+                                }
+                                if let syncStatusMessage {
+                                    Text(syncStatusMessage)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.accentBright)
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Ask Passcode on Open")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text(app.hasPasscode
+                                         ? "Off by default so you never lose your Likes"
+                                         : "Optional extra lock screen")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                Toggle("", isOn: Binding(
+                                    get: { app.hasPasscode && app.requirePasscodeOnOpen },
+                                    set: { on in
+                                        if on && !app.hasPasscode {
+                                            settingPasscode = true
+                                        } else {
+                                            app.requirePasscodeOnOpen = on
+                                        }
+                                    }
+                                ))
+                                .labelsHidden()
+                                .tint(Theme.accent)
+                            }
+
+                            if Biometrics.available && app.hasPasscode && app.requirePasscodeOnOpen {
                                 HStack {
                                     Text("Face ID Unlock")
                                         .font(.system(size: 15, weight: .bold))
@@ -2145,8 +2337,12 @@ struct GoonedSettingsModal: View {
                             }
 
                             HStack(spacing: 10) {
-                                pillOption(title: "Change Passcode", active: false) {
-                                    changingPasscode = true
+                                pillOption(title: app.hasPasscode ? "Change Passcode" : "Set Passcode", active: false) {
+                                    if app.hasPasscode {
+                                        changingPasscode = true
+                                    } else {
+                                        settingPasscode = true
+                                    }
                                 }
                                 pillOption(title: "Reset App", active: false) {
                                     confirmErase = true
@@ -2174,6 +2370,9 @@ struct GoonedSettingsModal: View {
         }
         .sheet(isPresented: $changingPasscode) {
             PasscodeSetupView(mode: .change)
+        }
+        .sheet(isPresented: $settingPasscode) {
+            PasscodeSetupView(mode: .create)
         }
         .sheet(isPresented: $showAlgorithmEditor) {
             AlgorithmEditorSheet()
@@ -2221,6 +2420,7 @@ struct GoonedSettingsModal: View {
 
 struct AlgorithmEditorSheet: View {
     @EnvironmentObject var store: UserStore
+    @ObservedObject private var taste = SmartTasteEngine.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var boostInput = ""
@@ -2538,6 +2738,19 @@ struct AlgorithmEditorSheet: View {
                                 Text("No blocked #tags. Anything added here is automatically filtered out of For You, Search, Rule34, X, and IG.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.white.opacity(0.55))
+                            }
+
+                            if !taste.state.suppressedTags.isEmpty {
+                                Divider().overlay(Color.white.opacity(0.14))
+                                Text("AUTO-SUPPRESSED FROM DISLIKES (TAP × TO UNHIDE)")
+                                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.orange.opacity(0.9))
+                                editableTagGrid(
+                                    items: taste.state.suppressedTags.map { ("#\($0)", $0) },
+                                    tintActive: false
+                                ) { tag in
+                                    taste.unblockTag(tag)
+                                }
                             }
                         }
                         .padding(16)

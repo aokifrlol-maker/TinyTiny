@@ -1,0 +1,7 @@
+name = "tinytiny-license"
+main = "license-worker.js"
+compatibility_date = "2025-02-01"
+
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "dd45b67fc4794b1bb303b08a3147447f"

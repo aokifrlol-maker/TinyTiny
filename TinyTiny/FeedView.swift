@@ -28,11 +28,24 @@ final class PlayerUIView: UIView {
 struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
     let fill: Bool
+    var onReadyForDisplay: ((Bool) -> Void)? = nil
+
+    final class Coordinator {
+        var readyObservation: NSKeyValueObservation?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> PlayerUIView {
         let v = PlayerUIView()
         v.playerLayer.player = player
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        context.coordinator.readyObservation = v.playerLayer.observe(\.isReadyForDisplay, options: [.new, .initial]) { layer, _ in
+            let ready = layer.isReadyForDisplay
+            DispatchQueue.main.async {
+                onReadyForDisplay?(ready)
+            }
+        }
         return v
     }
 
@@ -58,6 +71,8 @@ enum MediaHeaders {
             h["Referer"] = "https://yande.re/"
         } else if host.contains("hypnohub") {
             h["Referer"] = "https://hypnohub.net/"
+        } else if host.contains("realbooru") {
+            h["Referer"] = "https://realbooru.com/"
         } else if host.contains("gelbooru") {
             h["Referer"] = "https://gelbooru.com/"
         } else if host.contains("rule34") {
@@ -66,6 +81,14 @@ enum MediaHeaders {
             h["Referer"] = "https://x.com/"
         } else if host.contains("cdninstagram.com") || host.contains("fbcdn.net") || host.contains("instagram.com") {
             h["Referer"] = "https://www.instagram.com/"
+        } else if host.contains("eporner") {
+            h["Referer"] = "https://www.eporner.com/"
+        } else if host.contains("pornhub") || host.contains("phncdn") {
+            h["Referer"] = "https://www.pornhub.com/"
+        } else if host.contains("xhamster") || host.contains("xhcdn") {
+            h["Referer"] = "https://xhamster.com/"
+        } else if host.contains("spankbang") || host.contains("sb-cd") {
+            h["Referer"] = "https://spankbang.com/"
         } else if host.contains("cum.st") {
             h["Referer"] = "https://cum.st/"
         } else {
@@ -255,21 +278,21 @@ final class VideoPreloader {
         }
     }
 
-    func asset(for url: URL) -> AVURLAsset {
-        if let existing = cachedAssets[url.absoluteString] {
-            return existing
-        }
+    func asset(for url: URL, includeReferer: Bool = true) -> AVURLAsset {
         if url.isFileURL {
             return AVURLAsset(url: url)
         }
+        if includeReferer, let existing = cachedAssets[url.absoluteString] {
+            return existing
+        }
         return AVURLAsset(
             url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url)]
+            options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url, includeReferer: includeReferer)]
         )
     }
 }
 
-// MARK: - Resilient PlayerModel (Auto-Fallback URLs + Buffering/Failure Recovery + Scrubbing)
+// MARK: - Resilient PlayerModel (Auto-Fallback URLs + Black-Screen/Stall Recovery + HLS Looper Fix)
 
 @MainActor
 final class PlayerModel: ObservableObject {
@@ -283,12 +306,17 @@ final class PlayerModel: ObservableObject {
     @Published var allFailed: Bool = false
 
     private var looper: AVPlayerLooper?
+    private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var sizeObservation: NSKeyValueObservation?
-    private var candidateURLs: [URL] = []
+    private var stallWatchdogTask: Task<Void, Never>?
+    private var candidateEntries: [(url: URL, includeReferer: Bool)] = []
     private var currentURLIndex: Int = 0
     private var prepared = false
+    private var wantsPlaying = false
+    private var hasValidVideoSize = false
+    private var layerReadyForDisplay = false
     var onClipEnded: (() -> Void)?
 
     func prepare(urls: [URL]) {
@@ -296,7 +324,9 @@ final class PlayerModel: ObservableObject {
         prepared = true
         allFailed = false
         isReady = false
-        candidateURLs = urls
+        hasValidVideoSize = false
+        layerReadyForDisplay = false
+        candidateEntries = Self.buildCandidateEntries(from: urls)
         currentURLIndex = 0
         loadCandidate(at: 0)
 
@@ -308,6 +338,9 @@ final class PlayerModel: ObservableObject {
                 let d = item.duration.seconds
                 guard d.isFinite, d > 0 else { return }
                 let cur = max(0, time.seconds)
+                if cur > 0.08 && self.hasValidVideoSize {
+                    self.promoteReadyIfRenderable()
+                }
                 let ratio = min(max(cur / d, 0), 1)
                 if ratio >= 0.97 && self.progress < 0.97 {
                     self.onClipEnded?()
@@ -319,33 +352,145 @@ final class PlayerModel: ObservableObject {
         }
     }
 
+    func updateCandidateURLs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let entries = Self.buildCandidateEntries(from: urls)
+        let wasPlaying = wantsPlaying
+        if !prepared {
+            prepare(urls: urls)
+            if wasPlaying { play() }
+            return
+        }
+        // Only hot-swap if the primary resolved stream is actually newer/better than our placeholder
+        let existingFirst = candidateEntries.first?.url
+        if existingFirst != entries.first?.url {
+            candidateEntries = entries
+            currentURLIndex = 0
+            allFailed = false
+            isReady = false
+            hasValidVideoSize = false
+            loadCandidate(at: 0)
+            if wasPlaying { play() }
+        }
+    }
+
+    func updateLayerReadyForDisplay(_ ready: Bool) {
+        layerReadyForDisplay = ready
+        if ready { promoteReadyIfRenderable() }
+    }
+
+    private func promoteReadyIfRenderable() {
+        guard !isReady else { return }
+        if hasValidVideoSize && (layerReadyForDisplay || currentSeconds > 0.08) {
+            isReady = true
+            allFailed = false
+            stallWatchdogTask?.cancel()
+            stallWatchdogTask = nil
+        }
+    }
+
+    private static func buildCandidateEntries(from urls: [URL]) -> [(url: URL, includeReferer: Bool)] {
+        var entries: [(URL, Bool)] = []
+        var seen = Set<String>()
+        for u in urls {
+            let k1 = "\(u.absoluteString)|ref1"
+            if seen.insert(k1).inserted {
+                entries.append((u, true))
+            }
+        }
+        // Append no-Referer fallback for CDNs/hosts that intermittently reject hotlink Referer headers
+        if let primary = urls.first, !primary.isFileURL {
+            let k0 = "\(primary.absoluteString)|ref0"
+            if seen.insert(k0).inserted {
+                entries.append((primary, false))
+            }
+        }
+        return entries
+    }
+
     func retry() {
-        let urls = candidateURLs
+        let urls = candidateEntries.filter { $0.includeReferer }.map(\.url)
+        let fallbackUrls = urls.isEmpty ? candidateEntries.map(\.url) : urls
+        let wasPlaying = wantsPlaying
         teardown()
-        prepare(urls: urls)
-        play()
+        prepare(urls: fallbackUrls)
+        if wasPlaying { play() }
+    }
+
+    private func advanceToNextCandidate() {
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = nil
+        if currentURLIndex + 1 < candidateEntries.count {
+            currentURLIndex += 1
+            isReady = false
+            hasValidVideoSize = false
+            loadCandidate(at: currentURLIndex)
+            if wantsPlaying { player.play() }
+        } else {
+            allFailed = true
+        }
+    }
+
+    private func scheduleStallWatchdog(forGeneration index: Int) {
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_800_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.wantsPlaying, !self.isReady, self.currentURLIndex == index else { return }
+            self.advanceToNextCandidate()
+        }
     }
 
     private func loadCandidate(at index: Int) {
-        guard index < candidateURLs.count else {
+        guard index < candidateEntries.count else {
             allFailed = true
             return
         }
-        let url = candidateURLs[index]
-        let asset = VideoPreloader.shared.asset(for: url)
+        let entry = candidateEntries[index]
+        let url = entry.url
+        let isHLS = url.absoluteString.lowercased().contains(".m3u8")
+        let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 1.5
-        player.automaticallyWaitsToMinimizeStalling = url.absoluteString.lowercased().contains(".m3u8")
+        item.preferredForwardBufferDuration = isHLS ? 2.5 : 1.5
+        player.automaticallyWaitsToMinimizeStalling = isHLS
 
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
         looper?.disableLooping()
+        looper = nil
         player.removeAllItems()
-        looper = AVPlayerLooper(player: player, templateItem: item)
+
+        if isHLS || url.isFileURL {
+            // AVPlayerLooper frequently freezes or black-frames on HLS (.m3u8); loop via end notification instead
+            player.insert(item, after: nil)
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.onClipEnded?()
+                    self.player.seek(to: .zero) { _ in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.wantsPlaying else { return }
+                            self.player.play()
+                        }
+                    }
+                }
+            }
+        } else {
+            looper = AVPlayerLooper(player: player, templateItem: item)
+        }
 
         sizeObservation = player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
             MainActor.assumeIsolated {
                 guard let self, let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 else { return }
                 self.detectedAspect = Double(sz.width / sz.height)
-                self.isReady = true
+                self.hasValidVideoSize = true
+                self.promoteReadyIfRenderable()
             }
         }
 
@@ -354,29 +499,38 @@ final class PlayerModel: ObservableObject {
                 guard let self else { return }
                 switch p.currentItem?.status {
                 case .readyToPlay:
-                    self.isReady = true
                     self.allFailed = false
-                case .failed:
-                    if self.currentURLIndex + 1 < self.candidateURLs.count {
-                        self.currentURLIndex += 1
-                        self.loadCandidate(at: self.currentURLIndex)
-                        self.player.play()
-                    } else {
-                        self.allFailed = true
+                    if let sz = p.currentItem?.presentationSize, sz.width > 0, sz.height > 0 {
+                        self.detectedAspect = Double(sz.width / sz.height)
+                        self.hasValidVideoSize = true
                     }
+                    self.promoteReadyIfRenderable()
+                case .failed:
+                    self.advanceToNextCandidate()
                 default:
                     break
                 }
             }
         }
+
+        if wantsPlaying {
+            scheduleStallWatchdog(forGeneration: index)
+        }
     }
 
     func play() {
+        wantsPlaying = true
         player.play()
         if is2xSpeed { player.rate = 2.0 }
+        if !isReady && !allFailed {
+            scheduleStallWatchdog(forGeneration: currentURLIndex)
+        }
     }
 
     func pause() {
+        wantsPlaying = false
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = nil
         player.pause()
     }
 
@@ -412,11 +566,20 @@ final class PlayerModel: ObservableObject {
     }
 
     func teardown() {
+        wantsPlaying = false
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = nil
         player.pause()
         is2xSpeed = false
         isReady = false
+        hasValidVideoSize = false
+        layerReadyForDisplay = false
         allFailed = false
         onClipEnded = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
         statusObservation?.invalidate()
         statusObservation = nil
         sizeObservation?.invalidate()
@@ -452,56 +615,106 @@ struct FeedView: View {
     @State private var onScreen = false
     @State private var autoScrollTask: Task<Void, Never>?
     @State private var currentItemShownAt: Date = Date()
+    @State private var shareTarget: Gif?
+    @State private var dislikeToast: (tag: String?, autoBlocked: Bool)?
+    @State private var dislikeToastTask: Task<Void, Never>?
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 0) {
-                ForEach(model.items) { gif in
-                    GoonedReelCell(
-                        gif: gif,
-                        isActive: onScreen && isVisible && currentID == gif.id,
-                        sort: model.sort,
-                        onSelectSort: { model.setSort($0) },
-                        onOpenCategories: onOpenCategories,
-                        onShuffle: {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            model.shuffleItems()
-                            currentID = model.items.first?.id
-                        },
-                        onSelectSubreddit: onSelectSubreddit,
-                        onSelectUser: onSelectUser,
-                        onSelectXUser: onSelectXUser,
-                        onSelectIGUser: onSelectIGUser,
-                        onSelectRule34Tag: onSelectRule34Tag,
-                        onSelectOFCreator: onSelectOFCreator,
-                        onClipFinished: {
-                            store.recordLoopSignal(for: gif)
-                            if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
-                                advanceToNext(from: gif.id)
+        ZStack(alignment: .top) {
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.items) { gif in
+                        GoonedReelCell(
+                            gif: gif,
+                            isActive: onScreen && isVisible && currentID == gif.id,
+                            sort: model.sort,
+                            onSelectSort: { model.setSort($0) },
+                            onOpenCategories: onOpenCategories,
+                            onShuffle: {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                model.shuffleItems()
+                                currentID = model.items.first?.id
+                            },
+                            onSelectSubreddit: onSelectSubreddit,
+                            onSelectUser: onSelectUser,
+                            onSelectXUser: onSelectXUser,
+                            onSelectIGUser: onSelectIGUser,
+                            onSelectRule34Tag: onSelectRule34Tag,
+                            onSelectOFCreator: onSelectOFCreator,
+                            onClipFinished: {
+                                store.recordLoopSignal(for: gif)
+                                if store.data.settings.autoScroll && store.data.settings.playVideosToEnd {
+                                    advanceToNext(from: gif.id)
+                                }
+                            },
+                            onDislike: {
+                                handleDislike(gif)
+                            },
+                            onShare: {
+                                shareTarget = gif
+                            }
+                        )
+                        .containerRelativeFrame([.horizontal, .vertical])
+                        .id(gif.id)
+                        .onAppear { model.onItemAppear(gif) }
+                    }
+
+                    if model.items.isEmpty || (!model.canLoadMore && !model.isLoading) {
+                        FeedStateView(
+                            model: model,
+                            onOpenCategories: onOpenCategories,
+                            onConnectX: onConnectX,
+                            onConnectIG: onConnectIG
+                        )
+                        .containerRelativeFrame([.horizontal, .vertical])
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $currentID)
+            .background(Color.black)
+            .ignoresSafeArea()
+
+            if let toast = dislikeToast {
+                HStack(spacing: 10) {
+                    Image(systemName: "hand.thumbsdown.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                    if let tag = toast.tag, toast.autoBlocked {
+                        Text("Auto-blocked #\(tag)")
+                            .font(.system(size: 13, weight: .semibold))
+                    } else {
+                        Text("Not interested · Showing less like this")
+                            .font(.system(size: 13, weight: .semibold))
+                        if let tag = toast.tag {
+                            Button {
+                                SmartTasteEngine.shared.blockDislikedTag(tag)
+                                dislikeToast = (tag: tag, autoBlocked: true)
+                            } label: {
+                                Text("Block #\(tag)")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(Theme.accentBright)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .liquidGlassCapsule(tinted: true, active: true)
                             }
                         }
-                    )
-                    .containerRelativeFrame([.horizontal, .vertical])
-                    .id(gif.id)
-                    .onAppear { model.onItemAppear(gif) }
+                    }
                 }
-
-                if model.items.isEmpty || (!model.canLoadMore && !model.isLoading) {
-                    FeedStateView(
-                        model: model,
-                        onOpenCategories: onOpenCategories,
-                        onConnectX: onConnectX,
-                        onConnectIG: onConnectIG
-                    )
-                    .containerRelativeFrame([.horizontal, .vertical])
-                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .liquidGlassCapsule(tinted: true)
+                .padding(.top, 114)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .scrollTargetLayout()
         }
-        .scrollTargetBehavior(.paging)
-        .scrollPosition(id: $currentID)
-        .background(Color.black)
-        .ignoresSafeArea()
+        .sheet(item: $shareTarget) { post in
+            ShareItemSheet(gif: post)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .onAppear {
             onScreen = true
             scheduleAutoScrollTimer()
@@ -555,6 +768,43 @@ struct FeedView: View {
               idx + 1 < model.items.count else { return }
         let upcoming = Array(model.items[(idx + 1)...].prefix(5))
         VideoPreloader.shared.preload(gifs: upcoming, hd: store.data.settings.hd)
+        for item in upcoming.prefix(3) where item.isLongVideoPost {
+            Task.detached(priority: .utility) {
+                _ = await LongVideoAPI.shared.resolvePlayableURLs(for: item)
+            }
+        }
+    }
+
+    private func handleDislike(_ gif: Gif) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let outcome = store.dislike(gif)
+        let currentIdx = model.items.firstIndex(where: { $0.id == gif.id })
+        withAnimation(.easeInOut(duration: 0.22)) {
+            model.removeDisliked(gif)
+            if let currentIdx, currentIdx < model.items.count {
+                currentID = model.items[currentIdx].id
+            } else {
+                currentID = model.items.first?.id
+            }
+        }
+        if model.items.count < 10 && model.canLoadMore {
+            Task { await model.loadMore() }
+        }
+        dislikeToastTask?.cancel()
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+            if let autoTag = outcome.autoSuppressedTag {
+                dislikeToast = (tag: autoTag, autoBlocked: true)
+            } else {
+                dislikeToast = (tag: outcome.primaryTag, autoBlocked: false)
+            }
+        }
+        dislikeToastTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_600_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                dislikeToast = nil
+            }
+        }
     }
 
     private func scheduleAutoScrollTimer() {
@@ -731,6 +981,8 @@ struct GoonedReelCell: View {
     var onSelectRule34Tag: (String) -> Void
     var onSelectOFCreator: (String, String) -> Void
     var onClipFinished: () -> Void
+    var onDislike: () -> Void = {}
+    var onShare: () -> Void = {}
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
@@ -776,6 +1028,7 @@ struct GoonedReelCell: View {
 
     var body: some View {
         GeometryReader { geo in
+            let isLandscape = geo.size.width > geo.size.height
             ZStack {
                 Color.black
                 mediaView(geo.size)
@@ -808,9 +1061,10 @@ struct GoonedReelCell: View {
                     HStack {
                         if skip > 0 { Spacer() }
                         VStack(spacing: 4) {
-                            Image(systemName: skip < 0 ? "gobackward.5" : "goforward.5")
+                            let stepMag = abs(skip)
+                            Image(systemName: skip < 0 ? (stepMag >= 10 ? "gobackward.10" : "gobackward.5") : (stepMag >= 10 ? "goforward.10" : "goforward.5"))
                                 .font(.system(size: 28, weight: .bold))
-                            Text(skip < 0 ? "-5s" : "+5s")
+                            Text(skip < 0 ? "-\(stepMag)s" : "+\(stepMag)s")
                                 .font(.caption.bold())
                         }
                         .foregroundStyle(.white)
@@ -901,15 +1155,53 @@ struct GoonedReelCell: View {
                         Spacer()
 
                         HStack(alignment: .bottom) {
-                            leftControlCluster
+                            VStack(alignment: .leading, spacing: 8) {
+                                if gif.isLongVideoPost {
+                                    HStack(spacing: 8) {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "play.rectangle.fill")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(Theme.accentBright)
+                                            Text(gif.longVideoSiteLabel ?? "LONG")
+                                                .font(.system(size: 11, weight: .black, design: .rounded))
+                                            let dur = gif.duration ?? (player.durationSeconds > 0 ? player.durationSeconds : nil)
+                                            if let dur, dur > 0 {
+                                                Text("· \(formatTime(dur))")
+                                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                    .foregroundStyle(.white.opacity(0.75))
+                                            }
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .liquidGlassCapsule(tinted: tinted)
+
+                                        Button {
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            toggleLongOrientation(currentlyLandscape: isLandscape)
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: isLandscape ? "iphone" : "iphone.landscape")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                Text(isLandscape ? "Portrait" : "Full Wide")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .liquidGlassCapsule(tinted: tinted)
+                                        }
+                                        .buttonStyle(ScalePressButtonStyle())
+                                    }
+                                }
+                                leftControlCluster
+                            }
                             Spacer()
                             rightActionStack
                         }
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, isLandscape ? 28 : 14)
 
                         scrubberBar(width: geo.size.width)
                     }
-                    .padding(.bottom, 84)
+                    .padding(.bottom, isLandscape ? 14 : 84)
                     .foregroundStyle(.white)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -942,6 +1234,14 @@ struct GoonedReelCell: View {
                 onSelectOFCreator: { cid, handle in
                     showMoreSheet = false
                     onSelectOFCreator(cid, handle)
+                },
+                onDislike: {
+                    showMoreSheet = false
+                    onDislike()
+                },
+                onShare: {
+                    showMoreSheet = false
+                    onShare()
                 }
             )
             .presentationDetents([.medium, .large])
@@ -951,7 +1251,22 @@ struct GoonedReelCell: View {
             player.onClipEnded = onClipFinished
             if !gif.isImage {
                 let urls = gif.allVideoURLs(hd: store.data.settings.hd)
-                player.prepare(urls: urls)
+                if !urls.isEmpty {
+                    player.prepare(urls: urls)
+                }
+                if gif.isLongVideoPost {
+                    Task {
+                        let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
+                        if !resolved.isEmpty {
+                            player.updateCandidateURLs(resolved)
+                            if shouldPlay { player.play() }
+                        } else if urls.isEmpty {
+                            player.allFailed = true
+                        }
+                    }
+                } else if urls.isEmpty {
+                    player.allFailed = true
+                }
             }
             player.setMuted(store.data.settings.muted)
             syncPlayback()
@@ -1055,17 +1370,7 @@ struct GoonedReelCell: View {
 
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
-                        store.toggleFollowOFCreator(id: cid, name: gif.author ?? cid)
-                    } else if gif.isXPost, let u = gif.author {
-                        store.toggleFollowXUser(u)
-                    } else if gif.isIGPost, let u = gif.author {
-                        store.toggleFollowIGUser(u)
-                    } else if let sub = gif.subreddit {
-                        store.toggleFollowSubreddit(sub)
-                    } else if let u = gif.author {
-                        store.toggleFollowUser(u)
-                    }
+                    store.toggleFollowAndSync(for: gif)
                 } label: {
                     Image(systemName: isFollowed ? "checkmark" : "plus")
                         .font(.system(size: 16, weight: .bold))
@@ -1077,10 +1382,10 @@ struct GoonedReelCell: View {
         }
     }
 
-    // MARK: - Right Action Stack (Source Badge `r/` / `𝕏` / `IG` / `34`, Heart, Mute, Offline Download, `•••`)
+    // MARK: - Right Action Stack (Source Badge, Heart, Dislike, Mute, Offline Download, Share, `•••`)
 
     private var rightActionStack: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 9) {
             // Source Badge Circle
             Button {
                 if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
@@ -1091,13 +1396,32 @@ struct GoonedReelCell: View {
                     onSelectIGUser(u)
                 } else if gif.isRule34Post {
                     onSelectRule34Tag("")
+                } else if gif.isLongVideoPost {
+                    showMoreSheet = true
                 } else if let sub = gif.subreddit {
                     onSelectSubreddit(sub)
                 } else if let u = gif.author {
                     onSelectUser(u)
                 }
             } label: {
-                if gif.isOnlyFansPost {
+                if gif.isLongVideoPost {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 1.0, green: 0.56, blue: 0.14), Color(red: 0.90, green: 0.24, blue: 0.44)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 40, height: 40)
+                            .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1))
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .offset(x: 1)
+                    }
+                } else if gif.isOnlyFansPost {
                     ZStack {
                         Circle()
                             .fill(
@@ -1107,20 +1431,20 @@ struct GoonedReelCell: View {
                                     endPoint: .bottomTrailing
                                 )
                             )
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1))
                         Text("OF")
-                            .font(.system(size: 14, weight: .black, design: .rounded))
+                            .font(.system(size: 13, weight: .black, design: .rounded))
                             .foregroundStyle(.white)
                     }
                 } else if gif.isXPost {
                     ZStack {
                         Circle()
                             .fill(LinearGradient(colors: [Color(white: 0.18), Color.black], startPoint: .top, endPoint: .bottom))
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
                         Text("𝕏")
-                            .font(.system(size: 18, weight: .black))
+                            .font(.system(size: 17, weight: .black))
                             .foregroundStyle(.white)
                     }
                 } else if gif.isIGPost {
@@ -1137,10 +1461,10 @@ struct GoonedReelCell: View {
                                     endPoint: .topTrailing
                                 )
                             )
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
                         Image(systemName: "camera.fill")
-                            .font(.system(size: 16, weight: .bold))
+                            .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
                     }
                 } else if gif.isRule34Post {
@@ -1153,10 +1477,10 @@ struct GoonedReelCell: View {
                                     endPoint: .bottom
                                 )
                             )
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .overlay(Circle().stroke(Color.white.opacity(0.42), lineWidth: 1))
                         Text("34")
-                            .font(.system(size: 15, weight: .black, design: .rounded))
+                            .font(.system(size: 14, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.08, green: 0.24, blue: 0.08))
                     }
                 } else {
@@ -1169,10 +1493,10 @@ struct GoonedReelCell: View {
                                     endPoint: .bottom
                                 )
                             )
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
                         Text("r/")
-                            .font(.system(size: 15, weight: .black, design: .rounded))
+                            .font(.system(size: 14, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.45, green: 0.12, blue: 0.22))
                     }
                 }
@@ -1180,79 +1504,98 @@ struct GoonedReelCell: View {
             .buttonStyle(ScalePressButtonStyle())
 
             // Heart Circle + Upvote Count
-            VStack(spacing: 3) {
+            VStack(spacing: 2) {
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     store.toggleLike(gif)
                 } label: {
                     Image(systemName: "heart.fill")
-                        .font(.system(size: 19, weight: .semibold))
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(liked ? Theme.accent : .white)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 40, height: 40)
                         .liquidGlassCircle(tinted: tinted)
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
                 Text(shortCount((gif.upvotes ?? 0) + (liked ? 1 : 0)))
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
             }
 
+            // Dislike / Not Interested Circle
+            Button {
+                onDislike()
+            } label: {
+                Image(systemName: "hand.thumbsdown.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .frame(width: 40, height: 40)
+                    .liquidGlassCircle(tinted: tinted)
+            }
+            .buttonStyle(ScalePressButtonStyle())
+
             // Mute Circle + Label
-            VStack(spacing: 3) {
+            VStack(spacing: 2) {
                 Button {
                     store.data.settings.muted.toggle()
                     UserStore.configureAudioSession(muted: store.data.settings.muted)
                 } label: {
                     Image(systemName: store.data.settings.muted ? "speaker.slash" : "speaker.wave.2")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 44, height: 44)
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 40, height: 40)
                         .liquidGlassCircle(tinted: tinted)
                 }
                 .buttonStyle(ScalePressButtonStyle())
 
                 Text(store.data.settings.muted ? "Muted" : "Sound")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
             }
 
-            // Offline Download Circle + Label
-            VStack(spacing: 3) {
-                Button {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    offline.toggleDownload(gif)
-                } label: {
-                    ZStack {
-                        if let prog = downloadProgress {
-                            Circle()
-                                .stroke(Color.white.opacity(0.25), lineWidth: 2.5)
-                                .frame(width: 38, height: 38)
-                            Circle()
-                                .trim(from: 0, to: prog)
-                                .stroke(Theme.accentBright, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 13, weight: .bold))
-                        } else {
-                            Image(systemName: downloaded ? "checkmark" : "arrow.down.to.line")
-                                .font(.system(size: 16, weight: .bold))
-                        }
+            // Offline Download Circle
+            Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                offline.toggleDownload(gif)
+            } label: {
+                ZStack {
+                    if let prog = downloadProgress {
+                        Circle()
+                            .stroke(Color.white.opacity(0.25), lineWidth: 2.5)
+                            .frame(width: 34, height: 34)
+                        Circle()
+                            .trim(from: 0, to: prog)
+                            .stroke(Theme.accentBright, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 34, height: 34)
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 12, weight: .bold))
+                    } else {
+                        Image(systemName: downloaded ? "checkmark" : "arrow.down.to.line")
+                            .font(.system(size: 15, weight: .bold))
                     }
-                    .frame(width: 44, height: 44)
-                    .liquidGlassCircle(tinted: tinted, active: downloaded)
                 }
-                .buttonStyle(ScalePressButtonStyle())
-
-                Text(downloaded ? "Saved" : (downloadProgress != nil ? "Saving" : "Save"))
-                    .font(.system(size: 11, weight: .semibold))
+                .frame(width: 40, height: 40)
+                .liquidGlassCircle(tinted: tinted, active: downloaded)
             }
+            .buttonStyle(ScalePressButtonStyle())
+
+            // Share / Encrypted Drop Circle
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onShare()
+            } label: {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 40, height: 40)
+                    .liquidGlassCircle(tinted: tinted)
+            }
+            .buttonStyle(ScalePressButtonStyle())
 
             // More (`•••`) Circle
             Button {
                 showMoreSheet = true
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 17, weight: .bold))
-                    .frame(width: 44, height: 44)
+                    .font(.system(size: 16, weight: .bold))
+                    .frame(width: 40, height: 40)
                     .liquidGlassCircle(tinted: tinted)
             }
             .buttonStyle(ScalePressButtonStyle())
@@ -1341,10 +1684,11 @@ struct GoonedReelCell: View {
     // MARK: - Gesture Zones
 
     private func gestureZones(size: CGSize) -> some View {
-        HStack(spacing: 0) {
-            zone(width: size.width * 0.30) { triggerSkip(-5) }
+        let step = gif.isLongVideoPost ? 10 : 5
+        return HStack(spacing: 0) {
+            zone(width: size.width * 0.30) { triggerSkip(-step) }
             zone(width: size.width * 0.40) { triggerDoubleTapLike() }
-            zone(width: size.width * 0.30) { triggerSkip(5) }
+            zone(width: size.width * 0.30) { triggerSkip(step) }
         }
         .frame(width: size.width, height: size.height)
         .onLongPressGesture(minimumDuration: 0.22, maximumDistance: 45, pressing: { pressing in
@@ -1360,6 +1704,12 @@ struct GoonedReelCell: View {
                 player.setFastForward(true)
             }
         })
+    }
+
+    private func toggleLongOrientation(currentlyLandscape: Bool) {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        let mask: UIInterfaceOrientationMask = currentlyLandscape ? .portrait : .landscapeRight
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
     }
 
     private func zone(width: CGFloat, onDoubleTap: @escaping () -> Void) -> some View {
@@ -1424,10 +1774,16 @@ struct GoonedReelCell: View {
                     .clipped()
                 }
 
-                PlayerLayerView(player: player.player, fill: fill)
-                    .frame(width: size.width, height: size.height)
-                    .clipped()
-                    .opacity(player.isReady ? 1 : 0)
+                PlayerLayerView(
+                    player: player.player,
+                    fill: fill,
+                    onReadyForDisplay: { ready in
+                        player.updateLayerReadyForDisplay(ready)
+                    }
+                )
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .opacity(player.isReady ? 1 : 0)
 
                 if !player.isReady && !player.allFailed {
                     ProgressView()
@@ -1507,6 +1863,8 @@ struct PostMoreSheet: View {
     var onSelectIGUser: (String) -> Void
     var onSelectRule34Tag: (String) -> Void
     var onSelectOFCreator: (String, String) -> Void
+    var onDislike: () -> Void = {}
+    var onShare: () -> Void = {}
     @EnvironmentObject var store: UserStore
     @ObservedObject private var offline = OfflineManager.shared
     @Environment(\.dismiss) private var dismiss
@@ -1656,15 +2014,7 @@ struct PostMoreSheet: View {
                             }
                             Spacer()
                             Button {
-                                if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
-                                    store.toggleFollowOFCreator(id: cid, name: u)
-                                } else if gif.isXPost {
-                                    store.toggleFollowXUser(u)
-                                } else if gif.isIGPost {
-                                    store.toggleFollowIGUser(u)
-                                } else {
-                                    store.toggleFollowUser(u)
-                                }
+                                store.toggleFollowAndSync(for: gif)
                             } label: {
                                 let following = gif.isOnlyFansPost
                                     ? store.isFollowingOFCreator(id: gif.onlyFansCreatorId, handle: u)
@@ -1681,6 +2031,43 @@ struct PostMoreSheet: View {
                         .padding(14)
                         .liquidGlassCard(cornerRadius: 16)
                     }
+
+                    Button {
+                        onShare()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "paperplane.fill")
+                                .foregroundStyle(Theme.accentBright)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Share Encrypted Drop")
+                                    .font(.subheadline.bold())
+                                Text("AES-256-GCM end-to-end encrypted link or code")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+
+                    Button {
+                        onDislike()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "hand.thumbsdown.fill")
+                                .foregroundStyle(.orange)
+                            Text("Not Interested · Show Less Like This")
+                                .font(.subheadline.bold())
+                            Spacer()
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 16)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
 
                     ShareLink(item: gif.webURL) {
                         HStack {
