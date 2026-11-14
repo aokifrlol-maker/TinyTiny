@@ -2740,16 +2740,26 @@ struct AlgorithmEditorSheet: View {
                                     .foregroundStyle(.white.opacity(0.55))
                             }
 
-                            if !taste.state.suppressedTags.isEmpty {
+                            if !taste.state.suppressedTags.isEmpty || !taste.state.hiddenOFGenders.isEmpty {
                                 Divider().overlay(Color.white.opacity(0.14))
                                 Text("AUTO-SUPPRESSED FROM DISLIKES (TAP × TO UNHIDE)")
                                     .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                                     .foregroundStyle(.orange.opacity(0.9))
-                                editableTagGrid(
-                                    items: taste.state.suppressedTags.map { ("#\($0)", $0) },
-                                    tintActive: false
-                                ) { tag in
-                                    taste.unblockTag(tag)
+                                if !taste.state.hiddenOFGenders.isEmpty {
+                                    editableTagGrid(
+                                        items: taste.state.hiddenOFGenders.map { ("gender:\($0)", $0) },
+                                        tintActive: false
+                                    ) { g in
+                                        taste.unhideOFGender(g)
+                                    }
+                                }
+                                if !taste.state.suppressedTags.isEmpty {
+                                    editableTagGrid(
+                                        items: taste.state.suppressedTags.map { ("#\($0)", $0) },
+                                        tintActive: false
+                                    ) { tag in
+                                        taste.unblockTag(tag)
+                                    }
                                 }
                             }
                         }

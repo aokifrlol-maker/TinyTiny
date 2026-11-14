@@ -371,8 +371,20 @@ enum MediaMetaRegistry {
     private static let lock = NSLock()
     private static var fingerprints: [String: String] = [:]
     private static var extraVideos: [String: [String]] = [:]
+    private static var postTags: [String: [String]] = [:]
+    private static var postCreatorGender: [String: String] = [:]
+    private static var postCreatorIds: [String: String] = [:]
+    private static var creatorGenderByKey: [String: String] = [:]
 
-    static func register(postId: String, fingerprint: String? = nil, extraVideoURLs: [String] = []) {
+    static func register(
+        postId: String,
+        fingerprint: String? = nil,
+        extraVideoURLs: [String] = [],
+        tags: [String] = [],
+        creatorGender: String? = nil,
+        creatorId: String? = nil,
+        creatorName: String? = nil
+    ) {
         lock.lock()
         defer { lock.unlock() }
         if let fingerprint, !fingerprint.isEmpty {
@@ -380,6 +392,38 @@ enum MediaMetaRegistry {
         }
         if !extraVideoURLs.isEmpty {
             extraVideos[postId] = extraVideoURLs
+        }
+        let cleanedTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        if !cleanedTags.isEmpty {
+            var merged = Set(postTags[postId] ?? [])
+            for t in cleanedTags { merged.insert(t) }
+            postTags[postId] = Array(merged)
+        }
+        if let creatorId, !creatorId.isEmpty {
+            postCreatorIds[postId] = creatorId
+        }
+        if let creatorGender, !creatorGender.isEmpty {
+            let norm = creatorGender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            postCreatorGender[postId] = norm
+            if let creatorId, !creatorId.isEmpty {
+                creatorGenderByKey["id:\(creatorId.lowercased())"] = norm
+            }
+            if let creatorName, !creatorName.isEmpty {
+                creatorGenderByKey["name:\(creatorName.lowercased())"] = norm
+            }
+        }
+    }
+
+    static func registerCreatorGender(creatorId: String?, creatorName: String?, gender: String?) {
+        guard let gender, !gender.isEmpty else { return }
+        let norm = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        lock.lock()
+        defer { lock.unlock() }
+        if let creatorId, !creatorId.isEmpty {
+            creatorGenderByKey["id:\(creatorId.lowercased())"] = norm
+        }
+        if let creatorName, !creatorName.isEmpty {
+            creatorGenderByKey["name:\(creatorName.lowercased())"] = norm
         }
     }
 
@@ -393,5 +437,30 @@ enum MediaMetaRegistry {
         lock.lock()
         defer { lock.unlock() }
         return extraVideos[postId] ?? []
+    }
+
+    static func tags(for postId: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return postTags[postId] ?? []
+    }
+
+    static func creatorId(for postId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return postCreatorIds[postId]
+    }
+
+    static func creatorGender(for postId: String, author: String? = nil) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let direct = postCreatorGender[postId] { return direct }
+        if let cid = postCreatorIds[postId], let g = creatorGenderByKey["id:\(cid.lowercased())"] {
+            return g
+        }
+        if let author, !author.isEmpty, let g = creatorGenderByKey["name:\(author.lowercased())"] {
+            return g
+        }
+        return nil
     }
 }

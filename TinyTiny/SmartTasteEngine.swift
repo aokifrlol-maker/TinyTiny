@@ -38,6 +38,7 @@ struct TasteV2Data: Codable {
     var tagDislikeCounts: [String: Int] = [:]
     var suppressedTags: [String] = []
     var suppressedCreators: [String] = []
+    var hiddenOFGenders: [String] = []
     var tagPenalties: [String: Double] = [:]
     var sourceWeights: [String: Double] = [
         "reddit": 1.0,
@@ -46,6 +47,25 @@ struct TasteV2Data: Codable {
         "instagram": 0.65
     ]
     var sourceSettings: ForYouSourceSettings = ForYouSourceSettings()
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dislikedIDs = (try? c.decodeIfPresent([String].self, forKey: .dislikedIDs)) ?? []
+        dislikedMediaKeys = (try? c.decodeIfPresent([String].self, forKey: .dislikedMediaKeys)) ?? []
+        dislikedSimilarityKeys = (try? c.decodeIfPresent([String].self, forKey: .dislikedSimilarityKeys)) ?? []
+        seenSimilarityKeys = (try? c.decodeIfPresent([String].self, forKey: .seenSimilarityKeys)) ?? []
+        tagDislikeCounts = (try? c.decodeIfPresent([String: Int].self, forKey: .tagDislikeCounts)) ?? [:]
+        suppressedTags = (try? c.decodeIfPresent([String].self, forKey: .suppressedTags)) ?? []
+        suppressedCreators = (try? c.decodeIfPresent([String].self, forKey: .suppressedCreators)) ?? []
+        hiddenOFGenders = (try? c.decodeIfPresent([String].self, forKey: .hiddenOFGenders)) ?? []
+        tagPenalties = (try? c.decodeIfPresent([String: Double].self, forKey: .tagPenalties)) ?? [:]
+        sourceWeights = (try? c.decodeIfPresent([String: Double].self, forKey: .sourceWeights)) ?? [
+            "reddit": 1.0, "x": 1.0, "onlyfans": 1.0, "instagram": 0.65
+        ]
+        sourceSettings = (try? c.decodeIfPresent(ForYouSourceSettings.self, forKey: .sourceSettings)) ?? ForYouSourceSettings()
+    }
 }
 
 /// Manages explicit Dislike / "Not Interested" suppression, cross-account similarity deduping,
@@ -58,12 +78,24 @@ final class SmartTasteEngine: ObservableObject {
         didSet { scheduleSave() }
     }
 
+    private static let hiddenOFGendersDefaultsKey = "tinytiny.of.hidden_genders.v1"
+
+    nonisolated static var currentHiddenOFGenders: [String] {
+        UserDefaults.standard.stringArray(forKey: hiddenOFGendersDefaultsKey) ?? []
+    }
+
+    nonisolated static var currentHiddenOFGendersCSV: String? {
+        let list = currentHiddenOFGenders
+        return list.isEmpty ? nil : list.joined(separator: ",")
+    }
+
     private var dislikedIDSet = Set<String>()
     private var dislikedMediaSet = Set<String>()
     private var dislikedSimSet = Set<String>()
     private var seenSimSet = Set<String>()
     private var suppressedTagSet = Set<String>()
     private var suppressedCreatorSet = Set<String>()
+    private var hiddenOFGenderSet = Set<String>()
     private var saveTask: Task<Void, Never>?
 
     private static var fileURL: URL {
@@ -88,6 +120,9 @@ final class SmartTasteEngine: ObservableObject {
         seenSimSet = Set(state.seenSimilarityKeys)
         suppressedTagSet = Set(state.suppressedTags.map { $0.lowercased() })
         suppressedCreatorSet = Set(state.suppressedCreators.map { $0.lowercased() })
+        let normGenders = Array(Set(state.hiddenOFGenders.map { $0.lowercased() })).sorted()
+        hiddenOFGenderSet = Set(normGenders)
+        UserDefaults.standard.set(normGenders, forKey: Self.hiddenOFGendersDefaultsKey)
     }
 
     private func scheduleSave() {
@@ -152,6 +187,10 @@ final class SmartTasteEngine: ObservableObject {
            suppressedCreatorSet.contains(author) {
             return true
         }
+        if let gender = MediaMetaRegistry.creatorGender(for: post.id, author: post.author),
+           hiddenOFGenderSet.contains(gender.lowercased()) {
+            return true
+        }
         let tags = Self.extractExtendedTags(from: post, categories: categories)
         for tag in tags where suppressedTagSet.contains(tag.lowercased()) {
             return true
@@ -162,7 +201,17 @@ final class SmartTasteEngine: ObservableObject {
     struct DislikeOutcome {
         let primaryTag: String?
         let autoSuppressedTag: String?
+        let newlyHiddenGenders: [String]
     }
+
+    private static let immediateCategoryTags: Set<String> = [
+        "gay", "men", "bara", "yaoi", "trans", "trans_man", "trans_woman",
+        "nonbinary", "femboy", "futanari", "lesbian"
+    ]
+
+    private static let immediateMaleCategoryTags: Set<String> = [
+        "gay", "men", "bara", "yaoi", "trans_man", "gaymen", "gaytwt", "gayporn"
+    ]
 
     @discardableResult
     func recordDislike(_ post: Gif, categories: [GoonedCategory]) -> DislikeOutcome {
@@ -190,19 +239,40 @@ final class SmartTasteEngine: ObservableObject {
         state.sourceWeights[plat] = max(0.25, curSourceW * 0.90)
 
         let tags = Self.extractExtendedTags(from: post, categories: categories)
+        let knownGender = MediaMetaRegistry.creatorGender(for: post.id, author: post.author)
+
         var newlySuppressed: String? = nil
+        var newlyHiddenGenders: [String] = []
+
+        // 1. If we already know the creator's gender or saw a clear orientation/gender tag,
+        //    suppress that entire category IMMEDIATELY on first dislike.
+        if let gender = knownGender {
+            let gRes = applyGenderSuppressionRules(gender: gender, extraTags: tags)
+            newlyHiddenGenders.append(contentsOf: gRes.newlyHiddenGenders)
+            if newlySuppressed == nil { newlySuppressed = gRes.autoTag }
+        }
 
         for tag in tags {
             let lower = tag.lowercased()
             let curPen = state.tagPenalties[lower] ?? 0
-            state.tagPenalties[lower] = max(-45.0, curPen - 14.0)
+            state.tagPenalties[lower] = max(-45.0, curPen - 16.0)
 
             let nextCount = (state.tagDislikeCounts[lower] ?? 0) + 1
             state.tagDislikeCounts[lower] = nextCount
-            // Automatically suppress any category/orientation tag after 2 explicit dislikes
-            if nextCount >= 2 && suppressedTagSet.insert(lower).inserted {
+
+            let isImmediate = Self.immediateCategoryTags.contains(lower)
+            if (isImmediate || nextCount >= 2) && suppressedTagSet.insert(lower).inserted {
                 state.suppressedTags.append(lower)
                 if newlySuppressed == nil { newlySuppressed = lower }
+            } else if isImmediate && newlySuppressed == nil {
+                newlySuppressed = lower
+            }
+
+            if Self.immediateMaleCategoryTags.contains(lower) {
+                for g in ["man", "trans_man"] where !hiddenOFGenderSet.contains(g) {
+                    hideOFGender(g)
+                    newlyHiddenGenders.append(g)
+                }
             }
         }
 
@@ -212,15 +282,128 @@ final class SmartTasteEngine: ObservableObject {
             dislikedIDSet = Set(state.dislikedIDs)
         }
 
-        return DislikeOutcome(primaryTag: tags.first, autoSuppressedTag: newlySuppressed)
+        // Prefer orientation/gender or explicit creator tags for toast label over generic caption words
+        let explicitTags = MediaMetaRegistry.tags(for: post.id)
+        let preferredPrimary = tags.first(where: { Self.immediateCategoryTags.contains($0.lowercased()) })
+            ?? explicitTags.first
+            ?? tags.first
+
+        return DislikeOutcome(
+            primaryTag: preferredPrimary,
+            autoSuppressedTag: newlySuppressed,
+            newlyHiddenGenders: newlyHiddenGenders
+        )
     }
 
-    func blockDislikedTag(_ tag: String) {
+    /// Called right after resolving creator metadata on cum.st for an OnlyFans post
+    /// so male / gay / other disliked gender categories get hidden immediately.
+    @discardableResult
+    func applyCreatorDislikeResolution(
+        for post: Gif,
+        gender: String?,
+        creatorTags: [String],
+        categories: [GoonedCategory]
+    ) -> DislikeOutcome {
+        let lowerTags = creatorTags.map { $0.lowercased() }
+        var newlySuppressed: String? = nil
+        var newlyHiddenGenders: [String] = []
+
+        if let gender, !gender.isEmpty {
+            let res = applyGenderSuppressionRules(gender: gender, extraTags: lowerTags)
+            newlyHiddenGenders.append(contentsOf: res.newlyHiddenGenders)
+            if newlySuppressed == nil { newlySuppressed = res.autoTag }
+        }
+
+        for t in lowerTags {
+            let curPen = state.tagPenalties[t] ?? 0
+            state.tagPenalties[t] = max(-45.0, curPen - 16.0)
+            if Self.immediateCategoryTags.contains(t) && suppressedTagSet.insert(t).inserted {
+                state.suppressedTags.append(t)
+                if newlySuppressed == nil { newlySuppressed = t }
+            }
+            if Self.immediateMaleCategoryTags.contains(t) {
+                for g in ["man", "trans_man"] where !hiddenOFGenderSet.contains(g) {
+                    hideOFGender(g)
+                    newlyHiddenGenders.append(g)
+                }
+            }
+        }
+
+        let primary = newlySuppressed
+            ?? lowerTags.first(where: { Self.immediateCategoryTags.contains($0) })
+            ?? lowerTags.first
+        return DislikeOutcome(
+            primaryTag: primary,
+            autoSuppressedTag: newlySuppressed,
+            newlyHiddenGenders: newlyHiddenGenders
+        )
+    }
+
+    private func applyGenderSuppressionRules(gender: String, extraTags: [String]) -> (autoTag: String?, newlyHiddenGenders: [String]) {
+        let g = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var newlyHidden: [String] = []
+        var autoTag: String? = nil
+
+        switch g {
+        case "man", "trans_man":
+            for target in ["man", "trans_man"] where !hiddenOFGenderSet.contains(target) {
+                hideOFGender(target)
+                newlyHidden.append(target)
+            }
+            for t in ["gay", "men"] {
+                _ = blockDislikedTag(t)
+            }
+            autoTag = "gay"
+        case "trans_woman":
+            if !hiddenOFGenderSet.contains("trans_woman") {
+                hideOFGender("trans_woman")
+                newlyHidden.append("trans_woman")
+            }
+            _ = blockDislikedTag("trans")
+            autoTag = "trans_woman"
+        case "nonbinary":
+            if !hiddenOFGenderSet.contains("nonbinary") {
+                hideOFGender("nonbinary")
+                newlyHidden.append("nonbinary")
+            }
+            _ = blockDislikedTag("nonbinary")
+            autoTag = "nonbinary"
+        default:
+            break
+        }
+        return (autoTag, newlyHidden)
+    }
+
+    func hideOFGender(_ gender: String) {
+        let norm = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !norm.isEmpty else { return }
+        if hiddenOFGenderSet.insert(norm).inserted {
+            state.hiddenOFGenders.append(norm)
+            let sorted = Array(hiddenOFGenderSet).sorted()
+            UserDefaults.standard.set(sorted, forKey: Self.hiddenOFGendersDefaultsKey)
+        }
+    }
+
+    func unhideOFGender(_ gender: String) {
+        let norm = gender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        hiddenOFGenderSet.remove(norm)
+        state.hiddenOFGenders.removeAll { $0.lowercased() == norm }
+        let sorted = Array(hiddenOFGenderSet).sorted()
+        UserDefaults.standard.set(sorted, forKey: Self.hiddenOFGendersDefaultsKey)
+        if norm == "man" || norm == "trans_man" {
+            unblockTag("gay")
+            unblockTag("men")
+        }
+    }
+
+    @discardableResult
+    func blockDislikedTag(_ tag: String) -> String {
         let lower = tag.lowercased()
         if suppressedTagSet.insert(lower).inserted {
             state.suppressedTags.append(lower)
         }
         state.tagPenalties[lower] = -45.0
+        return lower
     }
 
     func unblockTag(_ tag: String) {
@@ -274,8 +457,9 @@ final class SmartTasteEngine: ObservableObject {
     // MARK: - Richer Tag Detection (Including Gay / Niche Keywords in Captions & Bios)
 
     private static let extraOrientationAndNicheRules: [(canonical: String, keywords: [String])] = [
-        ("gay", ["gay", "gayporn", "gaytwt", "gaysex", "gaycouple", "menfuckingmen", "dudeondu", "cockonco", "boyonboy", "gaybros", "twink", "twinks", "bara", "yaoi", "daddybear", "hunk", "gaymer", "gaynsfw"]),
-        ("trans", ["trans", "tgirl", "shemale", "ladyboy", "ts", "transwoman", "transgirl"]),
+        ("gay", ["gay", "gayporn", "gaytwt", "gaysex", "gaycouple", "gaymen", "menonly", "menfuckingmen", "dudeondude", "cockoncock", "boyonboy", "gaybros", "twink", "twinks", "bara", "yaoi", "daddybear", "hunk", "gaymer", "gaynsfw", "dilf", "gayonlyfans", "malecreator"]),
+        ("trans", ["trans", "tgirl", "shemale", "ladyboy", "ts", "transwoman", "transgirl", "trans_woman"]),
+        ("trans_man", ["trans_man", "transman", "ftm", "transguy"]),
         ("femboy", ["femboy", "sissy", "trap", "boypussy", "bussy"]),
         ("lesbian", ["lesbian", "wlw", "girlsonly", "scissoring", "girlkissing"]),
         ("ebony", ["ebony", "blackgirl", "darkskin", "chocolate"]),
@@ -290,8 +474,34 @@ final class SmartTasteEngine: ObservableObject {
     ]
 
     nonisolated static func extractExtendedTags(from post: Gif, categories: [GoonedCategory]) -> [String] {
-        var tags = Set(PornTagCatalog.extractRecognizedTags(from: post, categories: categories))
-        let blob = "\(post.title ?? "") \(post.subreddit ?? "") \(post.author ?? "")"
+        var tags: [String] = []
+        var seen = Set<String>()
+        func add(_ raw: String) {
+            let norm = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !norm.isEmpty else { return }
+            if seen.insert(norm).inserted { tags.append(norm) }
+        }
+
+        // 1. Prioritize known creator gender + explicit post/creator tags first
+        if let g = MediaMetaRegistry.creatorGender(for: post.id, author: post.author)?.lowercased() {
+            switch g {
+            case "man":
+                add("gay"); add("men")
+            case "trans_man":
+                add("gay"); add("trans_man"); add("men")
+            case "trans_woman":
+                add("trans"); add("trans_woman")
+            case "nonbinary":
+                add("nonbinary")
+            default:
+                break
+            }
+        }
+        let registryTags = MediaMetaRegistry.tags(for: post.id)
+        for t in registryTags { add(t) }
+
+        let tagStr = registryTags.joined(separator: " ")
+        let blob = "\(post.title ?? "") \(post.subreddit ?? "") \(post.author ?? "") \(tagStr)"
             .lowercased()
             .replacingOccurrences(of: "#", with: " ")
         let words = Set(
@@ -301,11 +511,15 @@ final class SmartTasteEngine: ObservableObject {
         for rule in extraOrientationAndNicheRules {
             for kw in rule.keywords {
                 if words.contains(kw) || (kw.count >= 5 && blob.contains(kw)) {
-                    tags.insert(rule.canonical)
+                    add(rule.canonical)
                     break
                 }
             }
         }
-        return Array(tags)
+
+        for t in PornTagCatalog.extractRecognizedTags(from: post, categories: categories) {
+            add(t)
+        }
+        return tags
     }
 }

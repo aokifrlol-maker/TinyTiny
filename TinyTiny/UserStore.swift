@@ -213,6 +213,16 @@ final class UserStore: ObservableObject {
         return outcome
     }
 
+    @discardableResult
+    func applyCreatorDislikeResolution(for post: Gif, gender: String?, creatorTags: [String]) -> SmartTasteEngine.DislikeOutcome {
+        SmartTasteEngine.shared.applyCreatorDislikeResolution(
+            for: post,
+            gender: gender,
+            creatorTags: creatorTags,
+            categories: categories
+        )
+    }
+
     func savedCursor(for key: String) -> String? {
         data.savedCursors[key]
     }

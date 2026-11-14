@@ -682,7 +682,7 @@ struct FeedView: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(Theme.accentBright)
                     if let tag = toast.tag, toast.autoBlocked {
-                        Text("Auto-blocked #\(tag)")
+                        Text(Self.blockedCategoryLabel(for: tag))
                             .font(.system(size: 13, weight: .semibold))
                     } else {
                         Text("Not interested · Showing less like this")
@@ -690,9 +690,10 @@ struct FeedView: View {
                         if let tag = toast.tag {
                             Button {
                                 SmartTasteEngine.shared.blockDislikedTag(tag)
+                                model.purgeSuppressedItems(afterCurrentID: currentID, purgeUpcomingOF: tag == "gay" || tag == "men" || tag == "trans_man")
                                 dislikeToast = (tag: tag, autoBlocked: true)
                             } label: {
-                                Text("Block #\(tag)")
+                                Text("Hide #\(tag)")
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(Theme.accentBright)
                                     .padding(.horizontal, 10)
@@ -775,12 +776,28 @@ struct FeedView: View {
         }
     }
 
+    private static func blockedCategoryLabel(for tag: String) -> String {
+        switch tag.lowercased() {
+        case "gay", "men", "man":
+            return "Blocked Men / Gay from feeds"
+        case "trans_man":
+            return "Blocked Trans Men from feeds"
+        case "trans_woman":
+            return "Blocked Trans Women from feeds"
+        case "nonbinary":
+            return "Blocked Nonbinary from feeds"
+        default:
+            return "Blocked #\(tag) from feeds"
+        }
+    }
+
     private func handleDislike(_ gif: Gif) {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let outcome = store.dislike(gif)
+        let purgeUpcomingOF = !outcome.newlyHiddenGenders.isEmpty
         let currentIdx = model.items.firstIndex(where: { $0.id == gif.id })
         withAnimation(.easeInOut(duration: 0.22)) {
-            model.removeDisliked(gif)
+            model.removeDisliked(gif, purgeUpcomingOF: purgeUpcomingOF)
             if let currentIdx, currentIdx < model.items.count {
                 currentID = model.items[currentIdx].id
             } else {
@@ -798,6 +815,63 @@ struct FeedView: View {
                 dislikeToast = (tag: outcome.primaryTag, autoBlocked: false)
             }
         }
+
+        // For OnlyFans posts (where cum.st omits creator gender from /posts), resolve creator gender live
+        // so male / gay / other categories are hidden immediately and purged from the upcoming queue.
+        if gif.isOnlyFansPost {
+            Task {
+                if let creator = await OnlyFansAPI.shared.lookupCreator(
+                    creatorId: MediaMetaRegistry.creatorId(for: gif.id),
+                    creatorName: gif.author
+                ) {
+                    let res = store.applyCreatorDislikeResolution(
+                        for: gif,
+                        gender: creator.gender,
+                        creatorTags: creator.creatorTags ?? []
+                    )
+                    let newlyHidGender = !res.newlyHiddenGenders.isEmpty
+                    if newlyHidGender || res.autoSuppressedTag != nil {
+                        if newlyHidGender,
+                           let cur = currentID,
+                           let curItem = model.items.first(where: { $0.id == cur }),
+                           curItem.isOnlyFansPost {
+                            if let curCreator = await OnlyFansAPI.shared.lookupCreator(
+                                creatorId: MediaMetaRegistry.creatorId(for: curItem.id),
+                                creatorName: curItem.author
+                            ) {
+                                MediaMetaRegistry.register(
+                                    postId: curItem.id,
+                                    tags: curCreator.creatorTags ?? [],
+                                    creatorGender: curCreator.gender,
+                                    creatorId: curCreator.id,
+                                    creatorName: curCreator.name
+                                )
+                            }
+                        }
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            let curIdxBefore = currentID.flatMap { id in model.items.firstIndex(where: { $0.id == id }) }
+                            model.purgeSuppressedItems(afterCurrentID: currentID, purgeUpcomingOF: newlyHidGender)
+                            if let cur = currentID, !model.items.contains(where: { $0.id == cur }) {
+                                if let curIdxBefore, curIdxBefore < model.items.count {
+                                    currentID = model.items[curIdxBefore].id
+                                } else {
+                                    currentID = model.items.last?.id ?? model.items.first?.id
+                                }
+                            }
+                        }
+                        if model.items.count < 10 && model.canLoadMore {
+                            await model.loadMore()
+                        }
+                        if let autoTag = res.autoSuppressedTag {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                                dislikeToast = (tag: autoTag, autoBlocked: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         dislikeToastTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_600_000_000)
             guard !Task.isCancelled else { return }

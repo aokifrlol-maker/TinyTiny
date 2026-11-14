@@ -129,6 +129,45 @@ actor OnlyFansAPI {
     private var cachedTopCreators: [OFCreator] = []
     private var topCreatorsFetchedAt: Date? = nil
     private var creatorSearchCache: [String: [OFCreator]] = [:]
+    private var creatorById: [String: OFCreator] = [:]
+    private var creatorByName: [String: OFCreator] = [:]
+
+    private func cacheCreators(_ creators: [OFCreator]) {
+        for c in creators {
+            creatorById[c.id] = c
+            creatorByName[c.name.lowercased()] = c
+            MediaMetaRegistry.registerCreatorGender(creatorId: c.id, creatorName: c.name, gender: c.gender)
+        }
+    }
+
+    private func withHiddenGenders(_ params: [String: String]) -> [String: String] {
+        var out = params
+        if let hg = SmartTasteEngine.currentHiddenOFGendersCSV {
+            out["hide_gender"] = hg
+        }
+        return out
+    }
+
+    /// Resolves a creator's `gender` and community `creatorTags` from cache or `cum.st` `/creators`.
+    func lookupCreator(creatorId: String?, creatorName: String?) async -> OFCreator? {
+        if let cid = creatorId, let hit = creatorById[cid] { return hit }
+        let cleanName = creatorName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanName.isEmpty, let hit = creatorByName[cleanName.lowercased()] { return hit }
+        guard !cleanName.isEmpty,
+              let resp: OFCreatorsResponse = try? await get("/creators", [
+                  "service": "onlyfans",
+                  "q": cleanName,
+                  "n": "10"
+              ]) else {
+            return nil
+        }
+        cacheCreators(resp.creators)
+        if let cid = creatorId, let exactId = resp.creators.first(where: { $0.id == cid }) {
+            return exactId
+        }
+        return resp.creators.first(where: { $0.name.caseInsensitiveCompare(cleanName) == .orderedSame })
+            ?? resp.creators.first
+    }
 
     // MARK: - Low-Level HTTP
 
@@ -279,10 +318,16 @@ actor OnlyFansAPI {
         fallbackCreatorName: String? = nil,
         videosOnly: Bool = true
     ) -> [Gif] {
+        let hiddenGenders = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         var out: [Gif] = []
         for row in rows {
             let cid = row.creatorId ?? fallbackCreatorId ?? "0"
             let cname = row.creatorName ?? fallbackCreatorName ?? "creator"
+            let cachedCreator = creatorById[cid] ?? creatorByName[cname.lowercased()]
+            let resolvedGender = cachedCreator?.gender?.lowercased()
+            if let g = resolvedGender, hiddenGenders.contains(g) { continue }
+
+            let mergedTags = (row.tags ?? []) + (row.creatorTags ?? []) + (cachedCreator?.creatorTags ?? [])
             let text = (row.captionText?.isEmpty == false) ? row.captionText : row.title
             let candidates = videosOnly
                 ? row.attachments.filter { $0.kind.lowercased() == "video" }
@@ -298,6 +343,13 @@ actor OnlyFansAPI {
                     published: row.published ?? row.added,
                     prefix: ""
                 ) {
+                    MediaMetaRegistry.register(
+                        postId: g.id,
+                        tags: mergedTags,
+                        creatorGender: resolvedGender,
+                        creatorId: cid,
+                        creatorName: cname
+                    )
                     out.append(g)
                 }
             }
@@ -311,10 +363,16 @@ actor OnlyFansAPI {
         fallbackCreatorName: String? = nil,
         videosOnly: Bool = true
     ) -> [Gif] {
+        let hiddenGenders = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         var out: [Gif] = []
         for row in rows {
             let cid = row.creatorId ?? fallbackCreatorId ?? "0"
             let cname = row.creatorName ?? fallbackCreatorName ?? "creator"
+            let cachedCreator = creatorById[cid] ?? creatorByName[cname.lowercased()]
+            let resolvedGender = cachedCreator?.gender?.lowercased()
+            if let g = resolvedGender, hiddenGenders.contains(g) { continue }
+
+            let mergedTags = (row.creatorTags ?? []) + (cachedCreator?.creatorTags ?? [])
             let candidates = videosOnly
                 ? row.attachments.filter { $0.kind.lowercased() == "video" }
                 : row.attachments
@@ -329,6 +387,13 @@ actor OnlyFansAPI {
                     published: nil,
                     prefix: "dm_"
                 ) {
+                    MediaMetaRegistry.register(
+                        postId: g.id,
+                        tags: mergedTags,
+                        creatorGender: resolvedGender,
+                        creatorId: cid,
+                        creatorName: cname
+                    )
                     out.append(g)
                 }
             }
@@ -345,13 +410,13 @@ actor OnlyFansAPI {
 
         if mode == "recent" {
             let o = (cur?["o"] as? Int) ?? 0
-            if let resp: OFPostsResponse = try? await get("/posts", [
+            if let resp: OFPostsResponse = try? await get("/posts", withHiddenGenders([
                 "service": "onlyfans",
                 "type": "videos",
                 "sort": "recent",
                 "o": "\(o)",
                 "n": "40"
-            ]) {
+            ])) {
                 let gifs = mapPosts(resp.posts, videosOnly: true)
                 let nextCursor = encodeCursor(["mode": "recent", "o": o + 40])
                 return GoonedFeedResponse(posts: gifs, after: nextCursor)
@@ -364,14 +429,14 @@ actor OnlyFansAPI {
         let o = (cur?["o"] as? Int) ?? 0
         let dateStr = Self.utcDateString(daysAgo: daysAgo)
 
-        if let resp: OFPostsResponse = try? await get("/posts/popular", [
+        if let resp: OFPostsResponse = try? await get("/posts/popular", withHiddenGenders([
             "service": "onlyfans",
             "type": "videos",
             "period": period,
             "date": dateStr,
             "o": "\(o)",
             "n": "50"
-        ]) {
+        ])) {
             let gifs = mapPosts(resp.posts, videosOnly: true)
             let nextOffset = o + resp.posts.count
             let maxCap = min(resp.total ?? 500, 500)
@@ -396,13 +461,13 @@ actor OnlyFansAPI {
     func latest(after: String?) async -> GoonedFeedResponse {
         let cur = decodeCursor(after)
         let o = (cur?["o"] as? Int) ?? (Int(after ?? "0") ?? 0)
-        guard let resp: OFPostsResponse = try? await get("/posts", [
+        guard let resp: OFPostsResponse = try? await get("/posts", withHiddenGenders([
             "service": "onlyfans",
             "type": "videos",
             "sort": "recent",
             "o": "\(o)",
             "n": "40"
-        ]) else {
+        ])) else {
             return GoonedFeedResponse(posts: [], after: after)
         }
         let gifs = mapPosts(resp.posts, videosOnly: true)
@@ -417,13 +482,13 @@ actor OnlyFansAPI {
 
         if mode == "recent" {
             let o = (cur?["o"] as? Int) ?? 0
-            guard let resp: OFDmsResponse = try? await get("/dms", [
+            guard let resp: OFDmsResponse = try? await get("/dms", withHiddenGenders([
                 "service": "onlyfans",
                 "type": "videos",
                 "sort": "recent",
                 "o": "\(o)",
                 "n": "40"
-            ]) else {
+            ])) else {
                 return GoonedFeedResponse(posts: [], after: after)
             }
             let gifs = mapDms(resp.dms, videosOnly: true)
@@ -436,14 +501,14 @@ actor OnlyFansAPI {
         let o = (cur?["o"] as? Int) ?? 0
         let dateStr = Self.utcDateString(daysAgo: daysAgo)
 
-        if let resp: OFDmsResponse = try? await get("/dms/popular", [
+        if let resp: OFDmsResponse = try? await get("/dms/popular", withHiddenGenders([
             "service": "onlyfans",
             "type": "videos",
             "period": period,
             "date": dateStr,
             "o": "\(o)",
             "n": "50"
-        ]) {
+        ])) {
             let gifs = mapDms(resp.dms, videosOnly: true)
             let nextOffset = o + resp.dms.count
             let maxCap = min(resp.total ?? 500, 500)
@@ -557,26 +622,27 @@ actor OnlyFansAPI {
     // MARK: - Search (Creators + Posts)
 
     func topCreators(limit: Int = 50) async -> [OFCreator] {
+        let hidden = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         if let fetchedAt = topCreatorsFetchedAt,
            Date().timeIntervalSince(fetchedAt) < 300,
            !cachedTopCreators.isEmpty {
-            return Array(cachedTopCreators.prefix(limit))
+            return Array(cachedTopCreators.filter { !hidden.contains(($0.gender ?? "").lowercased()) }.prefix(limit))
         }
 
-        async let p1: OFCreatorsResponse? = try? await get("/creators", [
+        async let p1: OFCreatorsResponse? = try? await get("/creators", withHiddenGenders([
             "service": "onlyfans",
             "sort": "bookmarked",
             "content": "imported",
             "o": "0",
             "n": "50"
-        ])
-        async let p2: OFCreatorsResponse? = try? await get("/creators", [
+        ]))
+        async let p2: OFCreatorsResponse? = try? await get("/creators", withHiddenGenders([
             "service": "onlyfans",
             "sort": "bookmarked",
             "content": "imported",
             "o": "50",
             "n": "50"
-        ])
+        ]))
 
         let (r1, r2) = await (p1, p2)
         var merged: [OFCreator] = []
@@ -587,19 +653,21 @@ actor OnlyFansAPI {
             }
         }
         if !merged.isEmpty {
+            cacheCreators(merged)
             cachedTopCreators = merged
             topCreatorsFetchedAt = Date()
         }
-        return Array(cachedTopCreators.prefix(limit))
+        return Array(cachedTopCreators.filter { !hidden.contains(($0.gender ?? "").lowercased()) }.prefix(limit))
     }
 
     func searchCreators(_ query: String, limit: Int = 30) async -> [OFCreator] {
+        let hidden = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
             .replacingOccurrences(of: "of:", with: "", options: .caseInsensitive)
         guard !q.isEmpty else { return await topCreators(limit: limit) }
 
-        let cacheKey = q.lowercased()
+        let cacheKey = "\(q.lowercased())|\(hidden.sorted().joined(separator: ","))"
         if let cached = creatorSearchCache[cacheKey] {
             return Array(cached.prefix(limit))
         }
@@ -608,24 +676,29 @@ actor OnlyFansAPI {
         // for 1-2 character queries, filter our cached top 100 bookmarked creators locally in 0ms.
         let topPool = await topCreators(limit: 100)
         let localMatches = topPool.filter {
-            $0.name.localizedCaseInsensitiveContains(q) ||
-            ($0.displayName?.localizedCaseInsensitiveContains(q) == true)
+            !hidden.contains(($0.gender ?? "").lowercased()) && (
+                $0.name.localizedCaseInsensitiveContains(q) ||
+                ($0.displayName?.localizedCaseInsensitiveContains(q) == true)
+            )
         }
         guard q.count >= 3 else {
             return Array(localMatches.prefix(limit))
         }
 
-        if let resp: OFCreatorsResponse = try? await get("/creators", [
+        if let resp: OFCreatorsResponse = try? await get("/creators", withHiddenGenders([
             "service": "onlyfans",
             "q": q,
             "sort": "bookmarked",
             "o": "0",
             "n": "\(min(max(limit, 1), 50))"
-        ]) {
+        ])) {
+            cacheCreators(resp.creators)
             var merged: [OFCreator] = []
             var seen = Set<String>()
             // Prioritize creators with actual imported videos first
-            let apiSorted = resp.creators.sorted { ($0.videoCount ?? 0) > ($1.videoCount ?? 0) }
+            let apiSorted = resp.creators
+                .filter { !hidden.contains(($0.gender ?? "").lowercased()) }
+                .sorted { ($0.videoCount ?? 0) > ($1.videoCount ?? 0) }
             for c in apiSorted + localMatches {
                 if seen.insert(c.id).inserted {
                     merged.append(c)
@@ -652,14 +725,14 @@ actor OnlyFansAPI {
         var totalNextOffset = o
 
         if q.count >= 3,
-           let resp: OFPostsResponse = try? await get("/posts", [
+           let resp: OFPostsResponse = try? await get("/posts", withHiddenGenders([
                "service": "onlyfans",
                "q": q,
                "type": "videos",
                "sort": "relevance",
                "o": "\(o)",
                "n": "40"
-           ]) {
+           ])) {
             results.append(contentsOf: mapPosts(resp.posts, videosOnly: true))
             totalNextOffset = o + resp.posts.count
         }

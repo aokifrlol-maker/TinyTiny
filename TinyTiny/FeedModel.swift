@@ -352,17 +352,45 @@ final class FeedModel: ObservableObject {
         isSwitching = false
     }
 
-    func removeDisliked(_ post: Gif) {
+    func removeDisliked(_ post: Gif, purgeUpcomingOF: Bool = false) {
         let dedupe = post.canonicalDedupeKey
         let sim = post.contentSimilarityKey
-        items.removeAll { item in
-            if item.id == post.id || item.canonicalDedupeKey == dedupe { return true }
-            if let sim, let itemSim = item.contentSimilarityKey, sim == itemSim { return true }
-            return false
+        let curIdx = items.firstIndex(where: { $0.id == post.id }) ?? -1
+        let store = UserStore.shared
+        var nextItems: [Gif] = []
+        nextItems.reserveCapacity(items.count)
+        for (i, item) in items.enumerated() {
+            if item.id == post.id || item.canonicalDedupeKey == dedupe { continue }
+            if let sim, let itemSim = item.contentSimilarityKey, sim == itemSim { continue }
+            if store.isBlockedByAlgorithm(item) { continue }
+            if purgeUpcomingOF && i > curIdx && item.isOnlyFansPost {
+                ids.remove(item.id)
+                mediaKeys.remove(item.canonicalDedupeKey)
+                continue
+            }
+            nextItems.append(item)
         }
+        items = nextItems
         ids.insert(post.id)
         mediaKeys.insert(dedupe)
         if let sim { seenSimKeys.insert(sim) }
+    }
+
+    func purgeSuppressedItems(afterCurrentID currentID: String?, purgeUpcomingOF: Bool) {
+        let curIdx = currentID.flatMap { id in items.firstIndex(where: { $0.id == id }) } ?? -1
+        let store = UserStore.shared
+        var nextItems: [Gif] = []
+        nextItems.reserveCapacity(items.count)
+        for (i, item) in items.enumerated() {
+            if store.isBlockedByAlgorithm(item) { continue }
+            if purgeUpcomingOF && i > curIdx && item.isOnlyFansPost {
+                ids.remove(item.id)
+                mediaKeys.remove(item.canonicalDedupeKey)
+                continue
+            }
+            nextItems.append(item)
+        }
+        items = nextItems
     }
 
     func loadMore() async {
