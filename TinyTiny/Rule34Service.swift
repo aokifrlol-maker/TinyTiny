@@ -308,7 +308,7 @@ actor Rule34API {
             ]
             guard let url = comps?.url,
                   let (data, _) = try? await self.session.data(from: url) else { return [] }
-            return self.parseMoebooruJSON(data: data, sourcePrefix: "r34y")
+            return await self.parseMoebooruJSON(data: data, sourcePrefix: "r34y")
         }()
 
         async let hypTask: [Gif] = {
@@ -324,7 +324,7 @@ actor Rule34API {
             ]
             guard let url = comps?.url,
                   let (data, _) = try? await self.session.data(from: url) else { return [] }
-            return self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34h", basePermalink: "https://hypnohub.net/index.php?page=post&s=view&id=")
+            return await self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34h", basePermalink: "https://hypnohub.net/index.php?page=post&s=view&id=")
         }()
 
         async let realTask: [Gif] = {
@@ -340,7 +340,7 @@ actor Rule34API {
             ]
             guard let url = comps?.url,
                   let (data, _) = try? await self.session.data(from: url) else { return [] }
-            return self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34b", basePermalink: "https://realbooru.com/index.php?page=post&s=view&id=")
+            return await self.parseGelbooruStyleJSON(data: data, sourcePrefix: "r34b", basePermalink: "https://realbooru.com/index.php?page=post&s=view&id=")
         }()
 
         let (y, h, r) = await (yandeTask, hypTask, realTask)

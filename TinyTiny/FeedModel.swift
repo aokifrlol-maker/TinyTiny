@@ -846,8 +846,7 @@ final class FeedModel: ObservableObject {
                 g.title ?? "",
                 g.subreddit ?? "",
                 g.author ?? "",
-                (g.tags ?? []).joined(separator: " "),
-                (g.categories ?? []).joined(separator: " ")
+                g.permalink ?? ""
             ].joined(separator: " ").lowercased()
 
             var score = 0.0
