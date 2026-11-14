@@ -213,12 +213,13 @@ struct GoonedMainShell: View {
             .opacity(activeTab == .home ? 1 : 0)
             .allowsHitTesting(activeTab == .home)
 
-            // 2. Top Bar on Home
-            if activeTab == .home {
+            // 2. Top Bar on Home (auto-hides alongside bottom dock when controls are collapsed)
+            if activeTab == .home && !store.data.settings.controlsCollapsed {
                 VStack {
                     homeTopBar
                     Spacer()
                 }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             // 3. Likes & Offline Vault Overlay
@@ -606,11 +607,11 @@ struct GoonedMainShell: View {
         }
     }
 
-    // MARK: - Home Top Bar (`🔍` | `Following · For You · 𝕏 · R34 · IG` | `⚙️`)
+    // MARK: - Home Top Bar (`🔍` | Auto-Centered Channel Rail | `⚙️`)
 
     private var homeTopBar: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 // Left: Search Circle Button
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -625,100 +626,13 @@ struct GoonedMainShell: View {
                 .buttonStyle(ScalePressButtonStyle())
                 .fixedSize()
 
-                Spacer(minLength: 2)
-
                 if activeChannel == .custom {
+                    Spacer(minLength: 4)
                     customFeedTitlePill
+                    Spacer(minLength: 4)
                 } else {
-                    HStack(spacing: 10) {
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            if activeChannel == .following {
-                                selectFeed(.following, forceReload: true)
-                            } else {
-                                selectFeed(.following)
-                            }
-                        } label: {
-                            Text("Following")
-                                .font(.system(size: 13.5, weight: isFollowingFeed ? .bold : .medium))
-                                .foregroundStyle(isFollowingFeed ? .white : .white.opacity(0.60))
-                                .fixedSize()
-                        }
-
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            if activeChannel == .forYou {
-                                selectFeed(.forYou, forceReload: true)
-                            } else {
-                                selectFeed(.forYou)
-                            }
-                        } label: {
-                            let isForYou = activeChannel == .forYou
-                            Text("For You")
-                                .font(.system(size: 13.5, weight: isForYou ? .bold : .medium))
-                                .foregroundStyle(isForYou ? .white : .white.opacity(0.60))
-                                .fixedSize()
-                        }
-
-                        // Compact Brand Logos: 𝕏 · R34 · Instagram
-                        HStack(spacing: 6) {
-                            Button {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if isXChannel {
-                                    selectFeed(activeModel.source, forceReload: true)
-                                } else {
-                                    let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : .xForYou)
-                                    selectXFeedOrLogin(target)
-                                }
-                            } label: {
-                                BrandLogoX(active: isXChannel, connected: store.data.xSession.isConnected)
-                            }
-                            .buttonStyle(ScalePressButtonStyle())
-
-                            Button {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if activeChannel == .rule34 {
-                                    selectFeed(.rule34(""), forceReload: true)
-                                } else {
-                                    selectFeed(.rule34(""))
-                                }
-                            } label: {
-                                BrandLogoRule34(active: activeChannel == .rule34)
-                            }
-                            .buttonStyle(ScalePressButtonStyle())
-
-                            Button {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if isIGChannel {
-                                    selectFeed(activeModel.source, forceReload: true)
-                                } else {
-                                    let target: FeedSource = lastIGChannel == .igFollowing ? .igFollowing : (lastIGChannel == .igSaved ? .igSaved : .igReels)
-                                    selectIGFeedOrLogin(target)
-                                }
-                            } label: {
-                                BrandLogoInstagram(active: isIGChannel, connected: store.data.igSession.isConnected)
-                            }
-                            .buttonStyle(ScalePressButtonStyle())
-
-                            Button {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                if isOFChannel {
-                                    selectFeed(activeModel.source, forceReload: true)
-                                } else {
-                                    let target: FeedSource = lastOFChannel == .ofLatest ? .ofLatest : (lastOFChannel == .ofDMs ? .ofDMs : .ofTrending)
-                                    selectFeed(target)
-                                }
-                            } label: {
-                                BrandLogoOnlyFans(active: isOFChannel)
-                            }
-                            .buttonStyle(ScalePressButtonStyle())
-                        }
-                        .fixedSize()
-                    }
-                    .shadow(color: .black.opacity(0.55), radius: 4)
+                    channelRail
                 }
-
-                Spacer(minLength: 2)
 
                 // Right: Gear Settings Circle Button
                 Button {
@@ -737,72 +651,185 @@ struct GoonedMainShell: View {
             .padding(.horizontal, 14)
             .padding(.top, 8)
 
-            // Secondary sub-feed switcher when inside X or IG (0ms instant switch across persistent models)
+            // Secondary sub-feed switcher directly beneath the centered channel
             if isXChannel {
-                HStack(spacing: 12) {
-                    ForEach([
-                        (FeedSource.xForYou, "For You", HomeChannel.xForYou),
-                        (FeedSource.xFollowing, "Following", HomeChannel.xFollowing),
-                        (FeedSource.xBookmarks, "Bookmarks", HomeChannel.xBookmarks)
-                    ], id: \.1) { src, label, chan in
-                        let active = activeChannel == chan
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectXFeedOrLogin(src)
-                        } label: {
-                            Text(label)
-                                .font(.system(size: 12, weight: active ? .bold : .medium))
-                                .foregroundStyle(active ? .white : .white.opacity(0.6))
-                        }
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 5)
-                .liquidGlassCapsule(tinted: tinted)
+                subChannelBar([
+                    (.xForYou, "For You", .xForYou),
+                    (.xFollowing, "Following", .xFollowing),
+                    (.xBookmarks, "Bookmarks", .xBookmarks)
+                ]) { selectXFeedOrLogin($0) }
             } else if isIGChannel {
-                HStack(spacing: 12) {
-                    ForEach([
-                        (FeedSource.igReels, "Reels", HomeChannel.igReels),
-                        (FeedSource.igFollowing, "Following", HomeChannel.igFollowing),
-                        (FeedSource.igSaved, "Saved", HomeChannel.igSaved)
-                    ], id: \.1) { src, label, chan in
-                        let active = activeChannel == chan
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectIGFeedOrLogin(src)
-                        } label: {
-                            Text(label)
-                                .font(.system(size: 12, weight: active ? .bold : .medium))
-                                .foregroundStyle(active ? .white : .white.opacity(0.6))
-                        }
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 5)
-                .liquidGlassCapsule(tinted: tinted)
+                subChannelBar([
+                    (.igReels, "Reels", .igReels),
+                    (.igFollowing, "Following", .igFollowing),
+                    (.igSaved, "Saved", .igSaved)
+                ]) { selectIGFeedOrLogin($0) }
             } else if isOFChannel {
-                HStack(spacing: 12) {
-                    ForEach([
-                        (FeedSource.ofTrending, "Trending", HomeChannel.ofTrending),
-                        (FeedSource.ofLatest, "Latest", HomeChannel.ofLatest),
-                        (FeedSource.ofDMs, "DMs", HomeChannel.ofDMs)
-                    ], id: \.1) { src, label, chan in
-                        let active = activeChannel == chan
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectFeed(src)
-                        } label: {
-                            Text(label)
-                                .font(.system(size: 12, weight: active ? .bold : .medium))
-                                .foregroundStyle(active ? .white : .white.opacity(0.6))
-                        }
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 5)
-                .liquidGlassCapsule(tinted: tinted)
+                subChannelBar([
+                    (.ofTrending, "Trending", .ofTrending),
+                    (.ofLatest, "Latest", .ofLatest),
+                    (.ofDMs, "DMs", .ofDMs)
+                ]) { selectFeed($0) }
             }
         }
+    }
+
+    /// Horizontally scrollable channel rail that smoothly glides the active channel to center.
+    private var channelRail: some View {
+        GeometryReader { geo in
+            let edgePad = max(12, (geo.size.width - 72) / 2)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        Color.clear.frame(width: edgePad, height: 1)
+
+                        textChannelButton(
+                            id: 0,
+                            title: "Following",
+                            active: isFollowingFeed
+                        ) {
+                            selectFeed(.following, forceReload: activeChannel == .following)
+                        }
+
+                        textChannelButton(
+                            id: 1,
+                            title: "For You",
+                            active: activeChannel == .forYou
+                        ) {
+                            selectFeed(.forYou, forceReload: activeChannel == .forYou)
+                        }
+
+                        brandChannelButton(id: 2, active: isXChannel) {
+                            if isXChannel {
+                                selectFeed(activeModel.source, forceReload: true)
+                            } else {
+                                let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : .xForYou)
+                                selectXFeedOrLogin(target)
+                            }
+                        } label: {
+                            BrandLogoX(active: isXChannel, connected: store.data.xSession.isConnected)
+                        }
+
+                        brandChannelButton(id: 3, active: activeChannel == .rule34) {
+                            selectFeed(.rule34(""), forceReload: activeChannel == .rule34)
+                        } label: {
+                            BrandLogoRule34(active: activeChannel == .rule34)
+                        }
+
+                        brandChannelButton(id: 4, active: isIGChannel) {
+                            if isIGChannel {
+                                selectFeed(activeModel.source, forceReload: true)
+                            } else {
+                                let target: FeedSource = lastIGChannel == .igFollowing ? .igFollowing : (lastIGChannel == .igSaved ? .igSaved : .igReels)
+                                selectIGFeedOrLogin(target)
+                            }
+                        } label: {
+                            BrandLogoInstagram(active: isIGChannel, connected: store.data.igSession.isConnected)
+                        }
+
+                        brandChannelButton(id: 5, active: isOFChannel) {
+                            if isOFChannel {
+                                selectFeed(activeModel.source, forceReload: true)
+                            } else {
+                                let target: FeedSource = lastOFChannel == .ofLatest ? .ofLatest : (lastOFChannel == .ofDMs ? .ofDMs : .ofTrending)
+                                selectFeed(target)
+                            }
+                        } label: {
+                            BrandLogoOnlyFans(active: isOFChannel)
+                        }
+
+                        Color.clear.frame(width: edgePad, height: 1)
+                    }
+                    .frame(minHeight: 38)
+                    .shadow(color: .black.opacity(0.6), radius: 4)
+                }
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .black, location: 0.09),
+                            .init(color: .black, location: 0.91),
+                            .init(color: .clear, location: 1.0)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .onAppear {
+                    proxy.scrollTo(homeChannelIndex, anchor: .center)
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(homeChannelIndex, anchor: .center)
+                    }
+                }
+                .onChange(of: activeChannel) { _, _ in
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        proxy.scrollTo(homeChannelIndex, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(height: 38)
+    }
+
+    private func textChannelButton(id: Int, title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.system(size: active ? 15 : 13.5, weight: active ? .bold : .medium))
+                    .foregroundStyle(active ? .white : .white.opacity(0.60))
+                    .fixedSize()
+                Capsule()
+                    .fill(active ? Color.white : Color.clear)
+                    .frame(width: 16, height: 2.5)
+            }
+            .padding(.horizontal, 2)
+        }
+        .buttonStyle(ScalePressButtonStyle())
+        .id(id)
+    }
+
+    private func brandChannelButton<Content: View>(
+        id: Int,
+        active: Bool,
+        action: @escaping () -> Void,
+        @ViewBuilder label: () -> Content
+    ) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
+            label()
+                .scaleEffect(active ? 1.08 : 0.90)
+                .opacity(active ? 1.0 : 0.70)
+                .animation(.easeOut(duration: 0.16), value: active)
+        }
+        .buttonStyle(ScalePressButtonStyle())
+        .id(id)
+    }
+
+    private func subChannelBar(
+        _ items: [(FeedSource, String, HomeChannel)],
+        onSelect: @escaping (FeedSource) -> Void
+    ) -> some View {
+        HStack(spacing: 14) {
+            ForEach(items, id: \.1) { src, label, chan in
+                let active = activeChannel == chan
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    onSelect(src)
+                } label: {
+                    Text(label)
+                        .font(.system(size: 12, weight: active ? .bold : .medium))
+                        .foregroundStyle(active ? .white : .white.opacity(0.60))
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 5)
+        .liquidGlassCapsule(tinted: tinted)
     }
 
     private var customFeedTitlePill: some View {
