@@ -114,6 +114,8 @@ final class AppState: ObservableObject {
     func eraseEverything() {
         Passcode.delete()
         UserStore.shared.eraseAll()
+        LicenseManager.shared.clearLicense()
+        licenseActivated = false
         ageConfirmed = false
         onboardingCompleted = false
         hasPasscode = false
@@ -320,27 +322,7 @@ struct PasscodePad: View {
                     .font(.system(size: 12, weight: .medium, design: .serif))
                     .italic()
                     .tracking(0.8)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.white.opacity(0.62), Color(red: 1.0, green: 0.72, blue: 0.85).opacity(0.52)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(
-                                LinearGradient(
-                                    colors: [.white.opacity(0.24), .white.opacity(0.06)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.7
-                            )
-                    )
+                    .foregroundStyle(.white.opacity(0.24))
                     .padding(.trailing, 22)
                     .padding(.bottom, 16)
             }
@@ -620,23 +602,16 @@ struct WelcomeOnboardingView: View {
                     .offset(y: heroEntered ? 0 : 18)
                     .opacity(heroEntered ? 1 : 0)
 
-                HStack(spacing: 6) {
-                    Image(systemName: "wand.and.stars")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Theme.accent)
-                    Text("Created by Bella")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(Color.white.opacity(0.10), in: Capsule())
-                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 0.8))
-                .scaleEffect(heroEntered ? 1 : 0.88)
-                .opacity(heroEntered ? 1 : 0)
+                Text("by bella")
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .italic()
+                    .tracking(1.0)
+                    .foregroundStyle(.white.opacity(0.36))
+                    .scaleEffect(heroEntered ? 1 : 0.92)
+                    .opacity(heroEntered ? 1 : 0)
 
-                Text("Private, ultra-smooth multi-platform video feed engineered for speed, taste, and privacy.")
-                    .font(.system(size: 14.5))
+                Text("Every feed you actually want, all in one fast private app.")
+                    .font(.system(size: 15))
                     .foregroundStyle(.white.opacity(0.68))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
@@ -650,7 +625,7 @@ struct WelcomeOnboardingView: View {
                 withAnimation { page = 1 }
             } label: {
                 HStack(spacing: 8) {
-                    Text("Swipe or Tap to Explore")
+                    Text("Swipe to see what's inside")
                         .font(.system(size: 15, weight: .bold))
                     Image(systemName: "chevron.right")
                         .font(.system(size: 13, weight: .bold))
@@ -671,31 +646,31 @@ struct WelcomeOnboardingView: View {
             Spacer()
 
             VStack(spacing: 6) {
-                Text("Built-In Superpowers")
+                Text("All you need")
                     .font(.system(size: 28, weight: .heavy, design: .rounded))
-                Text("Everything unified in one zero-clutter reel")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.65))
+                Text("to goon your brains out")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
             }
 
             VStack(spacing: 12) {
                 onboardingCard(
                     icon: "square.stack.3d.up.fill",
                     accent: Color(red: 0.96, green: 0.28, blue: 0.56),
-                    title: "6 Channels, 1 Feed",
-                    detail: "Switch seamlessly between X, Instagram, OnlyFans, Reddit, Rule34, and Long Videos."
+                    title: "6 Sites, 1 Spot",
+                    detail: "X, Instagram, OnlyFans, Reddit, Rule34, and Long Videos — all right here."
                 )
                 onboardingCard(
                     icon: "brain.head.profile",
                     accent: Color(red: 0.56, green: 0.36, blue: 0.98),
-                    title: "Smart Taste Engine",
-                    detail: "Learns what you like—even on untagged clips—while keeping niches strictly separated."
+                    title: "Learns Your Type",
+                    detail: "Picks up on what you actually like, even on untagged videos, without mixing up your niches."
                 )
                 onboardingCard(
                     icon: "lock.shield.fill",
                     accent: Color(red: 0.20, green: 0.82, blue: 0.68),
-                    title: "Encrypted tinytiny://drop/ Sharing",
-                    detail: "Select multiple Liked videos and share an AES-256 encrypted drop link."
+                    title: "Send Drops Privately",
+                    detail: "Select a bunch of liked vids and send an encrypted tinytiny://drop/ link."
                 )
             }
             .padding(.horizontal, 20)
@@ -706,7 +681,7 @@ struct WelcomeOnboardingView: View {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 withAnimation { page = 2 }
             } label: {
-                Text("Next: Controls & Settings")
+                Text("How it works")
                     .font(.system(size: 15.5, weight: .bold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
@@ -722,32 +697,32 @@ struct WelcomeOnboardingView: View {
             Spacer()
 
             VStack(spacing: 6) {
-                Text("How Settings & Controls Work")
+                Text("Quick rundown")
                     .font(.system(size: 26, weight: .heavy, design: .rounded))
                     .multilineTextAlignment(.center)
-                Text("Quick gestures + full control in the Gear ⚙️ menu")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.65))
+                Text("Everything lives in the ⚙️ Gear menu")
+                    .font(.system(size: 14.5))
+                    .foregroundStyle(.white.opacity(0.68))
             }
 
             VStack(spacing: 12) {
                 onboardingCard(
                     icon: "hand.tap.fill",
                     accent: Color(red: 0.98, green: 0.62, blue: 0.22),
-                    title: "Gestures & Full Wide",
-                    detail: "Double-tap to Like, hold anywhere for 2x speed, or tap Full Wide to rotate into clean landscape."
+                    title: "Tap & Hold",
+                    detail: "Double-tap to like, hold anywhere for 2x speed, or hit Full Wide to flip sideways."
                 )
                 onboardingCard(
                     icon: "slider.horizontal.3",
                     accent: Color(red: 0.28, green: 0.72, blue: 0.98),
-                    title: "Algorithm & Guardrails",
-                    detail: "Tap Gear ⚙️ → Smart Algorithm to pin tags, block niches, or toggle Archetype Guardrails."
+                    title: "Tune Your Feed",
+                    detail: "Open ⚙️ → Smart Algorithm to boost tags, block stuff you hate, or lock in guardrails."
                 )
                 onboardingCard(
                     icon: "key.icloud.fill",
                     accent: Color(red: 0.78, green: 0.36, blue: 0.96),
-                    title: "Sessions, Auto-Scroll & Vault",
-                    detail: "Connect X/Instagram cookies, enable hands-free Auto-Scroll, and lock with a 4-digit Passcode."
+                    title: "Accounts & Lock",
+                    detail: "Sign into X/IG, turn on Auto-Scroll, or set a 4-digit passcode whenever you want."
                 )
             }
             .padding(.horizontal, 20)
@@ -758,7 +733,7 @@ struct WelcomeOnboardingView: View {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 withAnimation { page = 3 }
             } label: {
-                Text("Next: Activate & Lock")
+                Text("Almost done")
                     .font(.system(size: 15.5, weight: .bold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
@@ -790,14 +765,14 @@ struct WelcomeOnboardingView: View {
             }
 
             VStack(spacing: 8) {
-                Text("You're Almost In")
+                Text("One last thing")
                     .font(.system(size: 30, weight: .black, design: .rounded))
-                Text("Two quick steps next:\n1. Enter your License Key\n2. Set your optional Passcode & enjoy")
+                Text("Drop in your license key, set a passcode if you want one, and you're in.")
                     .font(.system(size: 15))
                     .foregroundStyle(.white.opacity(0.75))
                     .multilineTextAlignment(.center)
                     .lineSpacing(4)
-                    .padding(.horizontal, 26)
+                    .padding(.horizontal, 28)
             }
 
             Spacer()
@@ -880,7 +855,7 @@ struct PasscodeSetupView: View {
     private var subtitle: String? {
         if let message { return message }
         if mode == .create && step == .enter {
-            return "Optional — skip below to stay unlocked across launches."
+            return "Optional — skip below to stay unlocked"
         }
         return nil
     }
@@ -895,7 +870,7 @@ struct PasscodeSetupView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack(alignment: .bottom) {
             PasscodePad(
                 title: title,
                 subtitle: subtitle,
@@ -908,22 +883,17 @@ struct PasscodeSetupView: View {
             }
 
             if mode == .create {
-                HStack {
-                    Spacer()
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        app.skipPasscodeOnOnboarding()
-                    } label: {
-                        Text("Skip Passcode")
-                            .font(.system(size: 13.5, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .liquidGlassCapsule()
-                    }
-                    .padding(.top, 54)
-                    .padding(.trailing, 18)
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    app.skipPasscodeOnOnboarding()
+                } label: {
+                    Text("Skip Passcode")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
                 }
+                .padding(.bottom, 10)
             }
         }
         .alert("Enable Face ID Unlock?", isPresented: $askFaceID) {

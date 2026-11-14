@@ -96,6 +96,16 @@ final class LicenseManager: ObservableObject {
 
     // MARK: - Activation & Verification
 
+    func clearLicense() {
+        status = LicenseStatus()
+        errorMessage = nil
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: Self.statusKeychainAccount
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+
     func activate(rawKey: String) async -> Bool {
         let cleanKey = rawKey
             .trimmingCharacters(in: .whitespacesAndNewlines)
