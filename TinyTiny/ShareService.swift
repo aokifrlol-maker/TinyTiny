@@ -151,7 +151,7 @@ final class ShareService: ObservableObject {
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let shareId = json["id"] as? String {
                 let code = "TTDROP:\(shareId).\(encodedKey)"
-                let link = "\(base)/s/\(shareId)#k=\(encodedKey)"
+                let link = "tinytiny://drop/\(shareId)#k=\(encodedKey)"
                 return (link, code)
             }
         }

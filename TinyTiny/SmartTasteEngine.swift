@@ -199,6 +199,8 @@ final class SmartTasteEngine: ObservableObject {
     private var visualScoreMirror: [String: Double] = [:]
     private var sessionContextTags: [String: Double] = [:] // Rolling co-visitation vector for tagless videos
     private var saveTask: Task<Void, Never>?
+    nonisolated(unsafe) private static var cachedWordEmbedding: NLEmbedding?
+    nonisolated(unsafe) private static var didWarmWordEmbedding = false
 
     /// Broad anatomical / generic descriptors that can shift ranking weight slightly
     /// but must NEVER be auto-blocked by pressing Dislike on a video.
@@ -281,8 +283,12 @@ final class SmartTasteEngine: ObservableObject {
     }
 
     func saveNow() {
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: Self.fileURL, options: [.atomic, .completeFileProtection])
+        let snapshot = state
+        let url = Self.fileURL
+        Task.detached(priority: .utility) {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url, options: [.atomic, .completeFileProtection])
+            }
         }
     }
 
@@ -405,20 +411,26 @@ final class SmartTasteEngine: ObservableObject {
     /// Pre-evaluates visual feature-print similarity for a batch of candidate posts in background.
     func precomputeVisualSimilarity(for posts: [Gif]) {
         guard !state.positiveVisualPrints.isEmpty || !state.negativeVisualPrints.isEmpty else { return }
-        for post in posts.prefix(16) {
+        let candidates: [(String, URL)] = posts.prefix(6).compactMap { post in
             guard visualScoreMirror[post.id] == nil,
-                  let thumbURL = post.thumbURL ?? post.posterURL else { continue }
-            let pid = post.id
-            Task {
+                  let thumbURL = post.thumbURL ?? post.posterURL else { return nil }
+            return (post.id, thumbURL)
+        }
+        guard !candidates.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for (pid, thumbURL) in candidates {
                 let img: UIImage?
-                if let cached = MediaImageLoader.shared.cached(thumbURL) {
+                if let cached = await MediaImageLoader.shared.cached(thumbURL) {
                     img = cached
                 } else {
                     img = await MediaImageLoader.shared.load(thumbURL)
                 }
-                guard let img else { return }
+                guard let img else { continue }
                 let s = await VisualTasteAnalyzer.shared.evaluateCandidate(postId: pid, image: img)
-                self.visualScoreMirror[pid] = s
+                await MainActor.run {
+                    self.visualScoreMirror[pid] = s
+                }
+                await Task.yield()
             }
         }
     }
@@ -917,15 +929,21 @@ final class SmartTasteEngine: ObservableObject {
             add(t)
         }
 
-        // 3. NaturalLanguage Semantic Word Embedding Fallback for Tagless Natural-Language Captions
+        // 3. NaturalLanguage Semantic Word Embedding Fallback (never load model synchronously on MainActor)
+        if !didWarmWordEmbedding {
+            didWarmWordEmbedding = true
+            Task.detached(priority: .utility) {
+                Self.cachedWordEmbedding = NLEmbedding.wordEmbedding(for: .english)
+            }
+        }
         if tags.isEmpty, let title = post.title, title.count >= 6,
-           let embedding = NLEmbedding.wordEmbedding(for: .english) {
+           let embedding = Self.cachedWordEmbedding {
             let candidateSeeds: [(word: String, canonical: String)] = [
                 ("goth", "goth"), ("latina", "latina"), ("asian", "asian"), ("ebony", "ebony"),
                 ("femboy", "femboy"), ("transgender", "trans_woman"), ("cosplay", "cosplay"),
                 ("milf", "milf"), ("lesbian", "lesbian"), ("bondage", "bdsm"), ("anime", "hentai")
             ]
-            for token in words where token.count >= 4 && !MediaMetaRegistry.isStopTag(token) {
+            for token in words.prefix(12) where token.count >= 4 && !MediaMetaRegistry.isStopTag(token) {
                 for seed in candidateSeeds {
                     let dist = embedding.distance(between: token, and: seed.word)
                     if dist < 0.68 {

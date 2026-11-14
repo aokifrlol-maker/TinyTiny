@@ -71,6 +71,9 @@ final class AppState: ObservableObject {
     @Published var ageConfirmed: Bool = UserDefaults.standard.bool(forKey: "ageConfirmed") {
         didSet { UserDefaults.standard.set(ageConfirmed, forKey: "ageConfirmed") }
     }
+    @Published var onboardingCompleted: Bool = UserDefaults.standard.bool(forKey: "tt.onboardingCompleted") || LicenseManager.shared.isValidAccess {
+        didSet { UserDefaults.standard.set(onboardingCompleted, forKey: "tt.onboardingCompleted") }
+    }
     @Published var licenseActivated: Bool = LicenseManager.shared.isValidAccess
     @Published var passcodeChoiceCompleted: Bool = UserDefaults.standard.bool(forKey: "tt.passcodeChoiceCompleted") || Passcode.exists {
         didSet { UserDefaults.standard.set(passcodeChoiceCompleted, forKey: "tt.passcodeChoiceCompleted") }
@@ -112,6 +115,7 @@ final class AppState: ObservableObject {
         Passcode.delete()
         UserStore.shared.eraseAll()
         ageConfirmed = false
+        onboardingCompleted = false
         hasPasscode = false
         passcodeChoiceCompleted = false
         isLocked = false
@@ -498,6 +502,349 @@ struct AgeGateView: View {
         } message: {
             Text("You must be at least 18 years old to use Gooned.")
         }
+    }
+}
+
+struct WelcomeOnboardingView: View {
+    var onContinue: () -> Void
+
+    @State private var page = 0
+    @State private var heroEntered = false
+    @State private var pulseRing = false
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+
+            // Animated ambient motion-graphics aura
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
+                let t = tl.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 0.88, green: 0.16, blue: 0.48).opacity(0.28))
+                        .frame(width: 340, height: 340)
+                        .blur(radius: 75)
+                        .offset(
+                            x: CGFloat(cos(t * 0.55) * 60) - 40,
+                            y: CGFloat(sin(t * 0.42) * 50) - 180
+                        )
+                    Circle()
+                        .fill(Color(red: 0.42, green: 0.18, blue: 0.88).opacity(0.24))
+                        .frame(width: 300, height: 300)
+                        .blur(radius: 70)
+                        .offset(
+                            x: CGFloat(sin(t * 0.48) * 65) + 70,
+                            y: CGFloat(cos(t * 0.37) * 55) + 190
+                        )
+                }
+            }
+            .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack {
+                    HStack(spacing: 6) {
+                        ForEach(0..<4, id: \.self) { idx in
+                            Capsule()
+                                .fill(idx == page ? Color.white : Color.white.opacity(0.24))
+                                .frame(width: idx == page ? 24 : 7, height: 7)
+                                .animation(.spring(response: 0.35, dampingFraction: 0.8), value: page)
+                        }
+                    }
+                    Spacer()
+                    if page < 3 {
+                        Button("Skip") {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            onContinue()
+                        }
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.65))
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+
+                TabView(selection: $page) {
+                    heroPage.tag(0)
+                    featuresPage.tag(1)
+                    settingsGuidePage.tag(2)
+                    readyPage.tag(3)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .animation(.spring(response: 0.45, dampingFraction: 0.85), value: page)
+            }
+        }
+        .foregroundStyle(.white)
+        .onAppear {
+            withAnimation(.spring(response: 0.75, dampingFraction: 0.82)) {
+                heroEntered = true
+            }
+            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
+                pulseRing = true
+            }
+        }
+    }
+
+    private var heroPage: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .stroke(Theme.ringGradient, lineWidth: 2.5)
+                    .frame(width: pulseRing ? 132 : 116, height: pulseRing ? 132 : 116)
+                    .opacity(pulseRing ? 0.35 : 0.85)
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 96, height: 96)
+                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                    .overlay(
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundStyle(Theme.ringGradient)
+                    )
+            }
+            .scaleEffect(heroEntered ? 1 : 0.72)
+            .opacity(heroEntered ? 1 : 0)
+
+            VStack(spacing: 12) {
+                Text("Welcome to Gooned")
+                    .font(.system(size: 34, weight: .black, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.white, Color(red: 1.0, green: 0.72, blue: 0.88)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .offset(y: heroEntered ? 0 : 18)
+                    .opacity(heroEntered ? 1 : 0)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text("Created by Bella")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.10), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 0.8))
+                .scaleEffect(heroEntered ? 1 : 0.88)
+                .opacity(heroEntered ? 1 : 0)
+
+                Text("Private, ultra-smooth multi-platform video feed engineered for speed, taste, and privacy.")
+                    .font(.system(size: 14.5))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+                    .padding(.top, 4)
+            }
+
+            Spacer()
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation { page = 1 }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("Swipe or Tap to Explore")
+                        .font(.system(size: 15, weight: .bold))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.10), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 0.9))
+            }
+            .padding(.bottom, 34)
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var featuresPage: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            VStack(spacing: 6) {
+                Text("Built-In Superpowers")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                Text("Everything unified in one zero-clutter reel")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+
+            VStack(spacing: 12) {
+                onboardingCard(
+                    icon: "square.stack.3d.up.fill",
+                    accent: Color(red: 0.96, green: 0.28, blue: 0.56),
+                    title: "6 Channels, 1 Feed",
+                    detail: "Switch seamlessly between X, Instagram, OnlyFans, Reddit, Rule34, and Long Videos."
+                )
+                onboardingCard(
+                    icon: "brain.head.profile",
+                    accent: Color(red: 0.56, green: 0.36, blue: 0.98),
+                    title: "Smart Taste Engine",
+                    detail: "Learns what you like—even on untagged clips—while keeping niches strictly separated."
+                )
+                onboardingCard(
+                    icon: "lock.shield.fill",
+                    accent: Color(red: 0.20, green: 0.82, blue: 0.68),
+                    title: "Encrypted tinytiny://drop/ Sharing",
+                    detail: "Select multiple Liked videos and share an AES-256 encrypted drop link."
+                )
+            }
+            .padding(.horizontal, 20)
+
+            Spacer()
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation { page = 2 }
+            } label: {
+                Text("Next: Controls & Settings")
+                    .font(.system(size: 15.5, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 30)
+        }
+    }
+
+    private var settingsGuidePage: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            VStack(spacing: 6) {
+                Text("How Settings & Controls Work")
+                    .font(.system(size: 26, weight: .heavy, design: .rounded))
+                    .multilineTextAlignment(.center)
+                Text("Quick gestures + full control in the Gear ⚙️ menu")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+
+            VStack(spacing: 12) {
+                onboardingCard(
+                    icon: "hand.tap.fill",
+                    accent: Color(red: 0.98, green: 0.62, blue: 0.22),
+                    title: "Gestures & Full Wide",
+                    detail: "Double-tap to Like, hold anywhere for 2x speed, or tap Full Wide to rotate into clean landscape."
+                )
+                onboardingCard(
+                    icon: "slider.horizontal.3",
+                    accent: Color(red: 0.28, green: 0.72, blue: 0.98),
+                    title: "Algorithm & Guardrails",
+                    detail: "Tap Gear ⚙️ → Smart Algorithm to pin tags, block niches, or toggle Archetype Guardrails."
+                )
+                onboardingCard(
+                    icon: "key.icloud.fill",
+                    accent: Color(red: 0.78, green: 0.36, blue: 0.96),
+                    title: "Sessions, Auto-Scroll & Vault",
+                    detail: "Connect X/Instagram cookies, enable hands-free Auto-Scroll, and lock with a 4-digit Passcode."
+                )
+            }
+            .padding(.horizontal, 20)
+
+            Spacer()
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation { page = 3 }
+            } label: {
+                Text("Next: Activate & Lock")
+                    .font(.system(size: 15.5, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 30)
+        }
+    }
+
+    private var readyPage: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .fill(Theme.accent.opacity(0.22))
+                    .frame(width: 96, height: 96)
+                    .blur(radius: 18)
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 82, height: 82)
+                    .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                    .overlay(
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 34, weight: .bold))
+                            .foregroundStyle(Theme.ringGradient)
+                    )
+            }
+
+            VStack(spacing: 8) {
+                Text("You're Almost In")
+                    .font(.system(size: 30, weight: .black, design: .rounded))
+                Text("Two quick steps next:\n1. Enter your License Key\n2. Set your optional Passcode & enjoy")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .padding(.horizontal, 26)
+            }
+
+            Spacer()
+
+            Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                onContinue()
+            } label: {
+                Text("Enter License Key")
+                    .font(.system(size: 16.5, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(ScalePressButtonStyle())
+            .padding(.horizontal, 24)
+            .padding(.bottom, 32)
+        }
+    }
+
+    private func onboardingCard(icon: String, accent: Color, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(accent.opacity(0.20))
+                    .frame(width: 42, height: 42)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(accent)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 15.5, weight: .bold, design: .rounded))
+                Text(detail)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
+        )
     }
 }
 

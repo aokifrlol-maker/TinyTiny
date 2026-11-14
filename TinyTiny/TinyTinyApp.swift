@@ -65,6 +65,10 @@ struct RootView: View {
             Theme.bg.ignoresSafeArea()
             if !app.ageConfirmed {
                 AgeGateView()
+            } else if !app.onboardingCompleted {
+                WelcomeOnboardingView {
+                    app.onboardingCompleted = true
+                }
             } else if !app.licenseActivated {
                 LicenseGateView {
                     app.licenseActivated = true
@@ -1014,9 +1018,9 @@ struct GoonedMainShell: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 5)
         }
-        .fixedSize(horizontal: items.count <= 3, vertical: true)
+        .fixedSize(horizontal: items.count <= 4, vertical: true)
         .liquidGlassCapsule(tinted: tinted)
-        .padding(.horizontal, items.count > 3 ? 16 : 0)
+        .padding(.horizontal, items.count > 4 ? 16 : 0)
     }
 
     private var customFeedTitlePill: some View {

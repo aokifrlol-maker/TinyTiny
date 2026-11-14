@@ -171,8 +171,12 @@ final class UserStore: ObservableObject {
     }
 
     func saveNow() {
-        if let raw = try? JSONEncoder().encode(data) {
-            try? raw.write(to: Self.fileURL, options: [.atomic, .completeFileProtection])
+        let snapshot = data
+        let url = Self.fileURL
+        Task.detached(priority: .utility) {
+            if let raw = try? JSONEncoder().encode(snapshot) {
+                try? raw.write(to: url, options: [.atomic, .completeFileProtection])
+            }
         }
     }
 
