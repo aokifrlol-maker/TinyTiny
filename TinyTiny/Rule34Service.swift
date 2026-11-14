@@ -218,12 +218,12 @@ actor Rule34API {
             let algo = UserStore.shared.data.algorithm
             let engine = SmartTasteEngine.shared
             var combinedBlocked = Set(algo.blockedTags.map { $0.lowercased() }).union(engine.state.suppressedTags)
-            let pinnedLower = Set(algo.pinnedTags.map { $0.lowercased() })
+            let pinnedLower = Set(algo.boostedTags.map { $0.lowercased() })
             if (combinedBlocked.contains("gay") || combinedBlocked.contains("men") || combinedBlocked.contains("yaoi"))
                 && !pinnedLower.contains("gay") && !pinnedLower.contains("yaoi") {
                 combinedBlocked.formUnion(["gay", "yaoi", "bara", "male_only", "males_only"])
             }
-            let activeTaste = algo.enabled ? engine.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6) : []
+            let activeTaste = engine.activeQueryTags(pinned: algo.boostedTags, blocked: algo.blockedTags, count: 6)
             return (Array(combinedBlocked), activeTaste)
         }
         let cleanTagString = tags.joined(separator: " ")
@@ -449,7 +449,7 @@ actor Rule34API {
                 .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
             let postId = "\(sourcePrefix)_\(idVal)"
             if !splitTags.isEmpty {
-                MediaMetaRegistry.register(postId: postId, categories: Array(splitTags.prefix(18)), author: owner)
+                MediaMetaRegistry.register(postId: postId, tags: Array(splitTags.prefix(18)), creatorName: owner)
             }
             let topTags = splitTags
                 .prefix(8)
@@ -525,7 +525,7 @@ actor Rule34API {
                 .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
             let postId = "\(sourcePrefix)_\(idVal)"
             if !splitTags.isEmpty {
-                MediaMetaRegistry.register(postId: postId, categories: Array(splitTags.prefix(18)), author: author)
+                MediaMetaRegistry.register(postId: postId, tags: Array(splitTags.prefix(18)), creatorName: author)
             }
             let topTags = splitTags.prefix(8).map { "#\($0)" }.joined(separator: " ")
 

@@ -704,13 +704,11 @@ final class FeedModel: ObservableObject {
             for s in SmartTasteEngine.shared.topOnlyFansSeedHandles(limit: 8) where !seeds.contains(s) {
                 seeds.append(s)
             }
-            let tasteTags = store.data.algorithm.enabled
-                ? SmartTasteEngine.shared.activeQueryTags(
-                    pinned: store.data.algorithm.pinnedTags,
-                    blocked: store.data.algorithm.blockedTags,
-                    count: 6
-                )
-                : []
+            let tasteTags = SmartTasteEngine.shared.activeQueryTags(
+                pinned: store.data.algorithm.boostedTags,
+                blocked: store.data.algorithm.blockedTags,
+                count: 6
+            )
             return await OnlyFansAPI.shared.forYou(
                 after: cursor,
                 seedCreatorIds: seeds,
@@ -764,10 +762,12 @@ final class FeedModel: ObservableObject {
         let curOF = self.ofMixOffset
 
         let algo = store.data.algorithm
-        let activeTasteTags = algo.enabled
-            ? SmartTasteEngine.shared.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6)
-            : []
-        let topLearnedSubs = algo.enabled ? store.topAlgorithmSubreddits(limit: 4) : []
+        let activeTasteTags = SmartTasteEngine.shared.activeQueryTags(
+            pinned: algo.boostedTags,
+            blocked: algo.blockedTags,
+            count: 6
+        )
+        let topLearnedSubs = Array(store.topAlgorithmSubreddits.prefix(4))
         var ofSeeds: [String] = []
         for ofc in store.data.followedOFCreators {
             if !ofc.name.isEmpty { ofSeeds.append(ofc.name) }

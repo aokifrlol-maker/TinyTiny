@@ -140,7 +140,7 @@ actor OnlyFansAPI {
         }
     }
 
-    private func withHiddenGenders(_ params: [String: String]) -> [String: String] {
+    nonisolated private func withHiddenGenders(_ params: [String: String]) -> [String: String] {
         var out = params
         if let hg = SmartTasteEngine.currentHiddenOFGendersCSV {
             out["hide_gender"] = hg
@@ -186,12 +186,12 @@ actor OnlyFansAPI {
 
     // MARK: - Cursor Helpers
 
-    private func encodeCursor(_ dict: [String: Any]) -> String? {
+    nonisolated private func encodeCursor(_ dict: [String: Any]) -> String? {
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []) else { return nil }
         return data.base64EncodedString()
     }
 
-    private func decodeCursor(_ cursor: String?) -> [String: Any]? {
+    nonisolated private func decodeCursor(_ cursor: String?) -> [String: Any]? {
         guard let cursor, !cursor.isEmpty,
               let data = Data(base64Encoded: cursor),
               let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {

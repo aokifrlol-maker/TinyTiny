@@ -73,9 +73,9 @@ actor LongVideoAPI {
         let (tasteTags, suppressGay) = await MainActor.run { () -> ([String], Bool) in
             let algo = UserStore.shared.data.algorithm
             let engine = SmartTasteEngine.shared
-            let tags = algo.enabled ? engine.activeQueryTags(pinned: algo.pinnedTags, blocked: algo.blockedTags, count: 6) : []
+            let tags = engine.activeQueryTags(pinned: algo.boostedTags, blocked: algo.blockedTags, count: 6)
             let blockedLower = Set(algo.blockedTags.map { $0.lowercased() }).union(engine.state.suppressedTags)
-            let pinnedLower = Set(algo.pinnedTags.map { $0.lowercased() })
+            let pinnedLower = Set(algo.boostedTags.map { $0.lowercased() })
             let noGay = (blockedLower.contains("gay") || blockedLower.contains("men") || blockedLower.contains("yaoi"))
                 && !pinnedLower.contains("gay")
             return (tags, noGay)
@@ -200,7 +200,7 @@ actor LongVideoAPI {
             return []
         }
 
-        return videos.compactMap { v in
+        return videos.compactMap { v -> Gif? in
             guard let id = v["id"] as? String, !id.isEmpty,
                   let title = v["title"] as? String else { return nil }
             let lengthSec = v["length_sec"] as? Int ?? 0
@@ -219,7 +219,7 @@ actor LongVideoAPI {
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: " ", with: "_") }
                     .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
                 if !kwList.isEmpty {
-                    MediaMetaRegistry.register(postId: postId, categories: Array(kwList.prefix(14)), author: "Eporner")
+                    MediaMetaRegistry.register(postId: postId, tags: Array(kwList.prefix(14)), creatorName: "Eporner")
                 }
             }
 
@@ -468,7 +468,7 @@ actor LongVideoAPI {
             return []
         }
 
-        return videos.compactMap { v in
+        return videos.compactMap { v -> Gif? in
             guard let vid = v["video_id"] as? String, !vid.isEmpty,
                   let title = v["title"] as? String else { return nil }
             let durStr = (v["duration"] as? String) ?? "0:00"
@@ -496,7 +496,7 @@ actor LongVideoAPI {
                 }
             }
             if !metaTags.isEmpty {
-                MediaMetaRegistry.register(postId: postId, categories: Array(metaTags.prefix(14)), author: "Pornhub")
+                MediaMetaRegistry.register(postId: postId, tags: Array(metaTags.prefix(14)), creatorName: "Pornhub")
             }
 
             return Gif(

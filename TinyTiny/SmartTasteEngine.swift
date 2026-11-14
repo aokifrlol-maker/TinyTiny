@@ -966,4 +966,70 @@ final class SmartTasteEngine: ObservableObject {
 
         return tags
     }
+
+    func activeQueryTags(pinned: [String], blocked: [String], count: Int = 6) -> [String] {
+        let blockedLower = Set(blocked.map { $0.lowercased() }).union(suppressedTagSet)
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func appendIfValid(_ raw: String) {
+            let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .replacingOccurrences(of: " ", with: "_")
+            guard !clean.isEmpty,
+                  !seen.contains(clean),
+                  !blockedLower.contains(clean),
+                  !MediaMetaRegistry.isStopTag(clean) else { return }
+            seen.insert(clean)
+            result.append(clean)
+        }
+
+        for p in pinned {
+            appendIfValid(p)
+            if result.count >= count { return result }
+        }
+
+        let weighted = UserStore.shared.data.algorithm.tagWeights
+            .filter { $0.value > 0.35 }
+            .sorted { $0.value > $1.value }
+            .map(\.key)
+        for t in weighted {
+            appendIfValid(t)
+            if result.count >= count { return result }
+        }
+
+        let sessionSorted = sessionContextTags
+            .filter { $0.value > 0.25 }
+            .sorted { $0.value > $1.value }
+            .map(\.key)
+        for t in sessionSorted {
+            appendIfValid(t)
+            if result.count >= count { return result }
+        }
+
+        return result
+    }
+
+    func topOnlyFansSeedHandles(limit: Int = 8) -> [String] {
+        var scores: [String: Double] = [:]
+        for (raw, w) in state.creatorWatchStats where w > 0.3 {
+            let lower = raw.lowercased()
+            if lower.hasPrefix("r/") || lower.hasPrefix("x:") || lower.hasPrefix("ig:") { continue }
+            let clean = lower.hasPrefix("of:") ? String(lower.dropFirst(3)) : raw
+            let trimmed = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !suppressedCreatorSet.contains(trimmed.lowercased()) else { continue }
+            scores[trimmed, default: 0] += w
+        }
+        for (raw, w) in UserStore.shared.data.algorithm.creatorWeights where w > 0.5 {
+            let lower = raw.lowercased()
+            if lower.hasPrefix("r/") || lower.hasPrefix("x:") || lower.hasPrefix("ig:") { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !suppressedCreatorSet.contains(trimmed.lowercased()) else { continue }
+            scores[trimmed, default: 0] += w
+        }
+        return scores
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .map(\.key)
+    }
 }
