@@ -414,7 +414,7 @@ actor LongVideoAPI {
                 }
                 .filter { !$0.isEmpty && !MediaMetaRegistry.isStopTag($0) }
             if !extracted.isEmpty {
-                MediaMetaRegistry.register(postId: postId, categories: Array(extracted.prefix(16)))
+                MediaMetaRegistry.register(postId: postId, tags: Array(extracted.prefix(16)))
             }
         }
 
