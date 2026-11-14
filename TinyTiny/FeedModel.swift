@@ -872,6 +872,23 @@ final class FeedModel: ObservableObject {
 
     // MARK: - Unified Multi-Platform Search
 
+    private func withSearchTimeout<T: Sendable>(
+        seconds: Double = 3.5,
+        fallback: T,
+        operation: @escaping @Sendable () async -> T
+    ) async -> T {
+        await withTaskGroup(of: T.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return fallback
+            }
+            let first = await group.next() ?? fallback
+            group.cancelAll()
+            return first
+        }
+    }
+
     private func fetchMultiSearch(
         query: String,
         after cursor: String?,
@@ -890,22 +907,31 @@ final class FeedModel: ObservableObject {
         let xConnected = store.data.xSession.isConnected
         let r34Creds = store.data.r34Credentials
         let categories = store.categories
+        let sortVal = sort.rawValue
 
-        // Fire all relevant platform searches in parallel
-        async let ofPostsTask = OnlyFansAPI.shared.searchPosts(clean, after: pageNum > 1 ? "\((pageNum - 1) * 20)" : nil)
-        async let r34PostsTask = Rule34API.shared.fetchFeed(tag: r34Tag, sort: sort.rawValue, after: pageNum > 1 ? "\(pageNum - 1)" : nil, credentials: r34Creds)
-        async let longPostsTask = LongVideoAPI.shared.fetchFeed(site: .all, sort: sort.rawValue, query: clean, after: "\(pageNum)")
+        // Fire all platform searches in parallel with a strict 3.5s per-source timeout so slow scrapers never stall All-search
+        async let ofPostsTask = withSearchTimeout(seconds: 3.5, fallback: GoonedFeedResponse(posts: [], after: nil)) {
+            await OnlyFansAPI.shared.searchPosts(clean, after: pageNum > 1 ? "\((pageNum - 1) * 20)" : nil)
+        }
+        async let r34PostsTask = withSearchTimeout(seconds: 3.5, fallback: GoonedFeedResponse(posts: [], after: nil)) {
+            await Rule34API.shared.fetchFeed(tag: r34Tag, sort: sortVal, after: pageNum > 1 ? "\(pageNum - 1)" : nil, credentials: r34Creds)
+        }
+        async let longPostsTask = withSearchTimeout(seconds: 3.5, fallback: GoonedFeedResponse(posts: [], after: nil)) {
+            await LongVideoAPI.shared.fetchFeed(site: .all, sort: sortVal, query: clean, after: "\(pageNum)")
+        }
         async let xPostsTask: GoonedFeedResponse = xConnected
-            ? await XAPI.search(clean, sort: sort.rawValue, after: pageNum > 1 ? "\(pageNum)" : nil)
+            ? await withSearchTimeout(seconds: 3.5, fallback: GoonedFeedResponse(posts: [], after: nil)) {
+                await XAPI.search(clean, sort: sortVal, after: pageNum > 1 ? "\(pageNum)" : nil)
+            }
             : GoonedFeedResponse(posts: [], after: nil)
-        async let redditSearchTask: [Gif] = {
+        async let redditSearchTask: [Gif] = withSearchTimeout(seconds: 3.5, fallback: [Gif]()) {
             var collected: [Gif] = []
             if let sr = try? await api.search(clean) {
                 let topSubs = sr.subreddits.prefix(3).map(\.name)
                 await withTaskGroup(of: [Gif].self) { group in
                     for sub in topSubs {
                         group.addTask {
-                            (try? await api.subreddit(sub, sort: self.sort.rawValue, after: nil, limit: 10))?.posts ?? []
+                            (try? await api.subreddit(sub, sort: sortVal, after: nil, limit: 10))?.posts ?? []
                         }
                     }
                     for await batch in group { collected.append(contentsOf: batch) }
@@ -915,33 +941,42 @@ final class FeedModel: ObservableObject {
                 let catMatch = categories.first {
                     $0.name.localizedCaseInsensitiveContains(clean) || clean.localizedCaseInsensitiveContains($0.name)
                 }
-                if let cat = catMatch, let resp = try? await api.category(cat.name, sort: self.sort.rawValue, after: cursor, limit: 15) {
+                if let cat = catMatch, let resp = try? await api.category(cat.name, sort: sortVal, after: cursor, limit: 15) {
                     collected = resp.posts
                 }
             }
             return collected
-        }()
+        }
 
         let (ofResp, r34Resp, longResp, xResp, redditPosts) = await (
             ofPostsTask, r34PostsTask, longPostsTask, xPostsTask, redditSearchTask
         )
 
+        var scoreCache: [String: Double] = [:]
+        let cleanLower = clean.lowercased()
         func relevanceScore(_ g: Gif) -> Double {
-            if store.isBlockedByAlgorithm(g) { return -9999 }
-            let hay = [
-                g.title ?? "",
-                g.subreddit ?? "",
-                g.author ?? "",
-                g.permalink ?? ""
-            ].joined(separator: " ").lowercased()
+            if let cached = scoreCache[g.id] { return cached }
+            let val: Double
+            if store.isBlockedByAlgorithm(g) {
+                val = -9999
+            } else {
+                let hay = [
+                    g.title ?? "",
+                    g.subreddit ?? "",
+                    g.author ?? "",
+                    g.permalink ?? ""
+                ].joined(separator: " ").lowercased()
 
-            var score = 0.0
-            if hay.contains(clean.lowercased()) { score += 12.0 }
-            for tok in tokens where hay.contains(tok) {
-                score += 4.5
+                var score = 0.0
+                if hay.contains(cleanLower) { score += 12.0 }
+                for tok in tokens where hay.contains(tok) {
+                    score += 4.5
+                }
+                score += store.scorePost(g) * 0.25
+                val = score
             }
-            score += store.scorePost(g) * 0.25
-            return score
+            scoreCache[g.id] = val
+            return val
         }
 
         let r34Ranked = r34Resp.posts.sorted { relevanceScore($0) > relevanceScore($1) }
@@ -956,7 +991,7 @@ final class FeedModel: ObservableObject {
         for i in 0..<maxLen {
             for b in buckets where i < b.count {
                 let item = b[i]
-                if relevanceScore(item) > -500 {
+                if (scoreCache[item.id] ?? relevanceScore(item)) > -500 {
                     combined.append(item)
                 }
             }

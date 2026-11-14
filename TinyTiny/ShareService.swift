@@ -408,36 +408,6 @@ struct ShareItemSheet: View {
                                 }
                             }
                         }
-
-                        if OfflineManager.localMediaURL(forId: gif.id) == nil,
-                           let remote = gif.videoURL(hd: false) ?? gif.imageURL,
-                           !remote.absoluteString.lowercased().contains(".m3u8") {
-                            Button {
-                                Task {
-                                    isCreatingDrop = true
-                                    statusNote = "Encrypting & uploading media copy..."
-                                    if let res = await ShareService.shared.createEncryptedRemoteMediaShareLink(for: gif) {
-                                        generatedLink = res.link
-                                        generatedCode = res.code
-                                        statusNote = "Encrypted video copy uploaded & linked!"
-                                        UINotificationFeedbackGenerator().notificationOccurred(.success)
-                                    } else {
-                                        statusNote = "Could not encrypt & upload this clip."
-                                    }
-                                    isCreatingDrop = false
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "lock.doc.fill")
-                                    Text("Encrypt & Host Video Copy (Up to 90 MB)")
-                                }
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 9)
-                                .liquidGlassCapsule()
-                            }
-                            .disabled(isCreatingDrop)
-                        }
                     }
                     .padding(14)
                     .liquidGlassCard(cornerRadius: 18)

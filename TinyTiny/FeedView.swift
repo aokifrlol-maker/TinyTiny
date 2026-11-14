@@ -1074,6 +1074,7 @@ struct GoonedReelCell: View {
     @State private var showHeart = false
     @State private var skipIndicator: Int? = nil // -5 or +5
     @State private var isHolding = false
+    @State private var speedLocked2x = false
     @State private var showMoreSheet = false
     @State private var isScrubbing = false
     @State private var localFitOverride: Bool? = nil
@@ -1157,6 +1158,25 @@ struct GoonedReelCell: View {
                     }
                     .transition(.scale.combined(with: .opacity))
                     .allowsHitTesting(false)
+                }
+
+                if speedLocked2x && !gif.isImage && !isHolding {
+                    VStack {
+                        HStack(spacing: 6) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("2x Locked · Tap to Unlock")
+                                .font(.system(size: 12.5, weight: .bold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .liquidGlassCapsule(tinted: true, active: true)
+                        .padding(.top, 112)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
                 }
 
                 if isHolding {
@@ -1384,9 +1404,13 @@ struct GoonedReelCell: View {
             player.teardown()
             userPaused = false
             isHolding = false
+            speedLocked2x = false
             localFitOverride = nil
         }
-        .onChange(of: shouldPlay) { _, _ in syncPlayback() }
+        .onChange(of: shouldPlay) { _, _ in
+            if !isActive { speedLocked2x = false }
+            syncPlayback()
+        }
         .onChange(of: store.data.settings.muted) { _, m in
             player.setMuted(m)
             UserStore.configureAudioSession(muted: m)
@@ -1716,9 +1740,9 @@ struct GoonedReelCell: View {
     private var holdDetailsHUD: some View {
         VStack {
             HStack(spacing: 6) {
-                Image(systemName: "forward.fill")
+                Image(systemName: speedLocked2x ? "lock.fill" : "forward.fill")
                     .font(.system(size: 11, weight: .bold))
-                Text(gif.isImage ? "Post Details" : "2x Speed")
+                Text(gif.isImage ? "Post Details" : (speedLocked2x ? "2x Locked" : "2x Speed · Pull down to lock"))
                     .font(.system(size: 13, weight: .bold))
             }
             .foregroundStyle(.white)
@@ -1800,10 +1824,12 @@ struct GoonedReelCell: View {
             zone(width: size.width * 0.30) { triggerSkip(step) }
         }
         .frame(width: size.width, height: size.height)
-        .onLongPressGesture(minimumDuration: 0.22, maximumDistance: 45, pressing: { pressing in
+        .onLongPressGesture(minimumDuration: 0.22, maximumDistance: 120, pressing: { pressing in
             if !pressing && isHolding {
                 withAnimation(.easeOut(duration: 0.14)) { isHolding = false }
-                player.setFastForward(false)
+                if !speedLocked2x {
+                    player.setFastForward(false)
+                }
             }
         }, perform: {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -1813,6 +1839,17 @@ struct GoonedReelCell: View {
                 player.setFastForward(true)
             }
         })
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 14, coordinateSpace: .local)
+                .onChanged { val in
+                    if isHolding && !gif.isImage && !speedLocked2x && val.translation.height > 28 {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                            speedLocked2x = true
+                        }
+                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                    }
+                }
+        )
     }
 
     private func toggleLongOrientation(currentlyLandscape: Bool) {
@@ -1836,6 +1873,12 @@ struct GoonedReelCell: View {
             .contentShape(Rectangle())
             .onTapGesture(count: 2, perform: onDoubleTap)
             .onTapGesture(count: 1) {
+                if speedLocked2x {
+                    withAnimation(.easeOut(duration: 0.15)) { speedLocked2x = false }
+                    player.setFastForward(false)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    return
+                }
                 if !isHolding { userPaused.toggle() }
             }
     }
