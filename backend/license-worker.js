@@ -1180,6 +1180,74 @@ export default {
       });
     }
 
+    // 9. PWA CORS + Referer Media/API Proxy
+    if ((request.method === "GET" || request.method === "HEAD") && path === "/v1/proxy") {
+      const targetRaw = url.searchParams.get("url") || "";
+      let target;
+      try {
+        target = new URL(targetRaw);
+      } catch {
+        return json({ error: "Invalid url" }, 400);
+      }
+      if (target.protocol !== "https:") return json({ error: "HTTPS only" }, 400);
+
+      const allowed = [
+        "gooned.app",
+        "cum.st",
+        "rule34.xxx",
+        "eporner.com",
+        "redgifs.com",
+        "redd.it",
+        "imgur.com",
+        "xvideos.com",
+        "xvideos-cdn.com",
+      ];
+      const host = target.hostname.toLowerCase();
+      if (!allowed.some((d) => host === d || host.endsWith("." + d))) {
+        return json({ error: "Host not allowed" }, 403);
+      }
+
+      const hdrs = new Headers({
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+      });
+      if (host.includes("gooned.app")) {
+        hdrs.set("Origin", "https://gooned.app");
+        hdrs.set("Referer", "https://gooned.app/");
+        hdrs.set("Accept", "application/json");
+      } else if (host.includes("cum.st")) {
+        hdrs.set("Origin", "https://cum.st");
+        hdrs.set("Referer", "https://cum.st/");
+      } else if (host.includes("xvideos")) {
+        hdrs.set("Referer", "https://www.xvideos.com/");
+      } else if (host.includes("redgifs.com")) {
+        hdrs.set("Referer", "https://www.redgifs.com/");
+      } else if (host.includes("rule34.xxx")) {
+        hdrs.set("Referer", "https://rule34.xxx/");
+      }
+
+      const range = request.headers.get("Range");
+      if (range) hdrs.set("Range", range);
+
+      const upstream = await fetch(target.toString(), {
+        method: request.method,
+        headers: hdrs,
+        redirect: "follow",
+      });
+
+      const outHeaders = new Headers();
+      for (const h of ["content-type", "content-length", "content-range", "accept-ranges", "cache-control"]) {
+        const v = upstream.headers.get(h);
+        if (v) outHeaders.set(h, v);
+      }
+      outHeaders.set("Access-Control-Allow-Origin", "*");
+      outHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges");
+
+      return new Response(request.method === "HEAD" ? null : upstream.body, {
+        status: upstream.status,
+        headers: outHeaders,
+      });
+    }
+
     return json({ ok: true, service: "tinytiny-license" });
   },
 
