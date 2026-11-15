@@ -311,6 +311,20 @@ async function handleTelegramUpdate(env, update) {
     return new Response("ok");
   }
 
+  if (cmd === "/watchit") {
+    const res = await syncWatchitFolder(env, getPublicBaseUrl(env), true);
+    if (!res.ok) {
+      await sendTelegram(env, chatId, `Watchit sync error: ${res.error}`);
+    } else if (res.sent === 0) {
+      await sendTelegram(
+        env,
+        chatId,
+        `Seedr <code>/Watchit/</code> is ready (${res.total} video${res.total === 1 ? "" : "s"} tracked, no new uploads).`
+      );
+    }
+    return new Response("ok");
+  }
+
   return new Response("ok");
 }
 
@@ -1101,6 +1115,248 @@ export default {
       return new Response(bodyStream, { status: isRange ? 206 : 200, headers });
     }
 
+    // 8. Seedr "Watchit" Folder -> Public Watch + Direct Download URLs
+    if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/w/")) {
+      const parts = path.slice(3).split("/").filter(Boolean);
+      const id = (parts[0] || "").replace(/[^a-z0-9]/gi, "");
+      const sub = parts[1] || "";
+      if (!id) return new Response("Not found", { status: 404 });
+
+      const metaRaw = await env.LICENSES.get(`watchit:${id}`);
+      if (!metaRaw) return new Response("Video not found or removed", { status: 404 });
+      const meta = JSON.parse(metaRaw);
+
+      if (!sub) {
+        return new Response(renderWatchitHTML(id, meta), {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      if (sub !== "video" && sub !== "download") {
+        return new Response("Not found", { status: 404 });
+      }
+
+      const auth = seedrAuthHeader(env);
+      if (!auth) return new Response("Seedr credentials not configured", { status: 500 });
+
+      const encodedPath = meta.davPath
+        .split("/")
+        .filter(Boolean)
+        .map((s) => encodeURIComponent(s))
+        .join("/");
+      const seedrUrl = `${SEEDR_DAV_BASE}/${encodedPath}`;
+      const reqHeaders = { Authorization: auth };
+      const rangeHeader = request.headers.get("Range");
+      if (rangeHeader) reqHeaders["Range"] = rangeHeader;
+
+      const upstream = await fetch(seedrUrl, {
+        method: request.method,
+        headers: reqHeaders,
+      });
+      if (!upstream.ok && upstream.status !== 206) {
+        return new Response("Video unavailable on Seedr", { status: upstream.status === 404 ? 404 : 502 });
+      }
+
+      const disp = sub === "download" ? "attachment" : "inline";
+      const safeFile = sanitizeFilename(meta.filename);
+      const outHeaders = new Headers({
+        "Content-Type": meta.contentType || upstream.headers.get("Content-Type") || "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": `${disp}; filename="${safeFile}"`,
+        "Cache-Control": "private, max-age=300",
+        "Access-Control-Allow-Origin": "*",
+      });
+      const cl = upstream.headers.get("Content-Length");
+      if (cl) outHeaders.set("Content-Length", cl);
+      const cr = upstream.headers.get("Content-Range");
+      if (cr) outHeaders.set("Content-Range", cr);
+
+      return new Response(request.method === "HEAD" ? null : upstream.body, {
+        status: upstream.status,
+        headers: outHeaders,
+      });
+    }
+
     return json({ ok: true, service: "tinytiny-license" });
   },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(syncWatchitFolder(env, getPublicBaseUrl(env), false));
+  },
 };
+
+// MARK: - Seedr "Watchit" Folder Auto-Link + Telegram Notifier
+
+const WATCHIT_FOLDER = "Watchit";
+const WATCHIT_EXT_MIME = {
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".m4v": "video/x-m4v",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".avi": "video/x-msvideo",
+};
+
+function getPublicBaseUrl(env) {
+  return String(env.PUBLIC_URL || "https://tinytiny-license.aokifrlol.workers.dev").replace(/\/+$/, "");
+}
+
+function guessVideoMime(filename) {
+  const lower = String(filename || "").toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  if (dot === -1) return null;
+  return WATCHIT_EXT_MIME[lower.slice(dot)] || null;
+}
+
+function decodeXmlEntities(str) {
+  return String(str || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+async function seedrEnsureWatchitFolder(auth) {
+  const folderUrl = `${SEEDR_DAV_BASE}/${WATCHIT_FOLDER}/`;
+  await fetch(folderUrl, { method: "MKCOL", headers: { Authorization: auth } }).catch(() => null);
+}
+
+async function seedrListWatchitVideos(auth) {
+  const folderUrl = `${SEEDR_DAV_BASE}/${WATCHIT_FOLDER}/`;
+  const resp = await fetch(folderUrl, {
+    method: "PROPFIND",
+    headers: {
+      Authorization: auth,
+      Depth: "1",
+      "Content-Type": "application/xml",
+    },
+  });
+  if (!resp.ok) {
+    return { ok: false, error: `Seedr PROPFIND ${resp.status}`, files: [] };
+  }
+
+  const xml = await resp.text();
+  const files = [];
+  const respMatches = xml.matchAll(/<[^:>]*:?response\b[^>]*>([\s\S]*?)<\/[^:>]*:?response>/gi);
+  for (const m of respMatches) {
+    const block = m[1];
+    const hrefMatch = block.match(/<[^:>]*:?href\b[^>]*>([\s\S]*?)<\/[^:>]*:?href>/i);
+    if (!hrefMatch) continue;
+    const rawHref = decodeXmlEntities(hrefMatch[1].trim());
+    let decodedPath = rawHref;
+    try {
+      decodedPath = decodeURIComponent(rawHref.replace(/^https?:\/\/[^/]+/i, ""));
+    } catch {}
+    decodedPath = decodedPath.replace(/^\/+/, "");
+    if (!decodedPath || decodedPath.endsWith("/")) continue;
+    if (decodedPath.toLowerCase() === WATCHIT_FOLDER.toLowerCase()) continue;
+
+    const filename = decodedPath.split("/").pop() || "";
+    const contentType = guessVideoMime(filename);
+    if (!contentType) continue;
+
+    const lenMatch = block.match(/<[^:>]*:?getcontentlength\b[^>]*>(\d+)<\/[^:>]*:?getcontentlength>/i);
+    const size = lenMatch ? Number(lenMatch[1]) : 0;
+
+    files.push({
+      davPath: decodedPath,
+      filename,
+      contentType,
+      size,
+    });
+  }
+  return { ok: true, files };
+}
+
+async function syncWatchitFolder(env, baseUrl, notifyEvenIfEmpty = false) {
+  const auth = seedrAuthHeader(env);
+  if (!auth) return { ok: false, error: "Missing SEEDR_EMAIL / SEEDR_PASSWORD", total: 0, sent: 0 };
+
+  await seedrEnsureWatchitFolder(auth);
+  const listed = await seedrListWatchitVideos(auth);
+  if (!listed.ok) return { ok: false, error: listed.error, total: 0, sent: 0 };
+
+  let sent = 0;
+  for (const file of listed.files) {
+    const seenKey = `watchit:seen:${file.davPath}`;
+    const existingId = await env.LICENSES.get(seenKey);
+    if (existingId) continue;
+
+    const id = randomId(10);
+    const meta = {
+      davPath: file.davPath,
+      filename: file.filename,
+      contentType: file.contentType,
+      size: file.size,
+      createdAt: nowSec(),
+    };
+    await env.LICENSES.put(`watchit:${id}`, JSON.stringify(meta));
+    await env.LICENSES.put(seenKey, id);
+
+    const watchUrl = `${baseUrl}/w/${id}`;
+    const dlUrl = `${baseUrl}/w/${id}/download`;
+    if (env.ADMIN_USER_ID && env.TELEGRAM_BOT_TOKEN) {
+      const sizeStr = file.size ? ` (${formatBytesHuman(file.size)})` : "";
+      const escName = file.filename.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      await sendTelegram(
+        env,
+        env.ADMIN_USER_ID,
+        `<b>New Watchit Video</b>\n<code>${escName}</code>${sizeStr}\n\nWatch &amp; Download:\n${watchUrl}\n\nDirect Download:\n${dlUrl}`
+      );
+      sent++;
+    }
+  }
+
+  return { ok: true, total: listed.files.length, sent };
+}
+
+function renderWatchitHTML(id, meta) {
+  const safeName = sanitizeFilename(meta.filename || "video.mp4")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const sizeLabel = meta.size ? `${formatBytesHuman(meta.size)} · ` : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${safeName} · Watchit</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; background: radial-gradient(circle at top, #220b15, #090609 65%); color: #fff; display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; }
+  .wrap { width: 100%; max-width: 780px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); border-radius: 22px; padding: 20px; box-shadow: 0 24px 70px rgba(0,0,0,0.55); }
+  .title { font-size: 16px; font-weight: 700; word-break: break-word; }
+  .sub { font-size: 12px; color: #b5a9b0; margin: 4px 0 14px; }
+  video { width: 100%; max-height: 70vh; border-radius: 14px; background: #000; display: block; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 12px 18px; border-radius: 999px; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer; border: none; }
+  .btn-primary { background: linear-gradient(135deg, #ff3b7f, #d91b5c); color: #fff; }
+  .btn-ghost { background: rgba(255,255,255,0.09); color: #fff; border: 1px solid rgba(255,255,255,0.15); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">${safeName}</div>
+    <div class="sub">${sizeLabel}Watchit Stream</div>
+    <video controls playsinline preload="metadata" src="/w/${id}/video"></video>
+    <div class="actions">
+      <a class="btn btn-primary" href="/w/${id}/download" download="${safeName}">Download Video</a>
+      <button id="copyBtn" class="btn btn-ghost" type="button">Copy Direct Download URL</button>
+    </div>
+  </div>
+  <script>
+    const copyBtn = document.getElementById("copyBtn");
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(location.origin + "/w/${id}/download");
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => (copyBtn.textContent = "Copy Direct Download URL"), 1800);
+    };
+  </script>
+</body>
+</html>`;
+}

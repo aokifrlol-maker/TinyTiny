@@ -6,6 +6,5 @@ compatibility_date = "2025-02-01"
 binding = "LICENSES"
 id = "dd45b67fc4794b1bb303b08a3147447f"
 
-[[r2_buckets]]
-binding = "DIRECT_R2"
-bucket_name = "tinytiny-direct"
+[triggers]
+crons = ["*/2 * * * *"]
