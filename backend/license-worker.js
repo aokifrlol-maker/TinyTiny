@@ -561,6 +561,185 @@ function renderShareLandingHTML(shareId) {
 </html>`;
 }
 
+// MARK: - DirectStuff Encrypted R2 Video Streaming & Direct Download
+
+function b64UrlToUint8(str) {
+  const pad = "=".repeat((4 - (str.length % 4)) % 4);
+  const b64 = (str + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function b64ToUint8(str) {
+  const bin = atob(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function isDirectAuthorized(request, env) {
+  const secret = env.DIRECT_UPLOAD_SECRET || env.WEBHOOK_SECRET;
+  if (!secret) return false;
+  const provided = request.headers.get("X-Direct-Secret") || "";
+  return provided.length > 0 && provided === secret;
+}
+
+function parseByteRange(rangeHeader, totalSize) {
+  if (!rangeHeader || !rangeHeader.startsWith("bytes=")) return null;
+  const spec = rangeHeader.slice(6).split(",")[0].trim();
+  const [startStr, endStr] = spec.split("-");
+  let start, end;
+  if (startStr === "") {
+    const suffix = Number(endStr);
+    if (!Number.isFinite(suffix) || suffix <= 0) return { invalid: true };
+    start = Math.max(0, totalSize - suffix);
+    end = totalSize - 1;
+  } else {
+    start = Number(startStr);
+    end = endStr ? Number(endStr) : totalSize - 1;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= totalSize || end < start) {
+    return { invalid: true };
+  }
+  end = Math.min(end, totalSize - 1);
+  return { start, end, invalid: false };
+}
+
+function counterForBlock(nonce16, blockIndex) {
+  const counter = new Uint8Array(nonce16);
+  const view = new DataView(counter.buffer, counter.byteOffset, counter.byteLength);
+  const base = view.getBigUint64(8, false);
+  view.setBigUint64(8, base + blockIndex, false);
+  return counter;
+}
+
+async function createCtrDecryptStream(keyBytes, nonce16, byteOffset) {
+  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CTR" }, false, ["decrypt"]);
+  let blockIndex = BigInt(Math.floor(byteOffset / 16));
+  let skipFirst = byteOffset % 16;
+  let pending = new Uint8Array(0);
+  const CHUNK_TARGET = 65536; // 64 KB (exact multiple of 16 bytes)
+
+  async function decryptBlockAligned(bytes, controller) {
+    const counter = counterForBlock(nonce16, blockIndex);
+    const plainBuf = await crypto.subtle.decrypt({ name: "AES-CTR", counter, length: 64 }, cryptoKey, bytes);
+    blockIndex += BigInt(Math.floor(bytes.byteLength / 16));
+    let out = new Uint8Array(plainBuf);
+    if (skipFirst > 0) {
+      out = out.subarray(skipFirst);
+      skipFirst = 0;
+    }
+    if (out.byteLength > 0) controller.enqueue(out);
+  }
+
+  return new TransformStream({
+    async transform(chunk, controller) {
+      const merged = new Uint8Array(pending.byteLength + chunk.byteLength);
+      merged.set(pending, 0);
+      merged.set(chunk, pending.byteLength);
+      pending = merged;
+
+      while (pending.byteLength >= CHUNK_TARGET) {
+        const slice = pending.subarray(0, CHUNK_TARGET);
+        pending = pending.subarray(CHUNK_TARGET);
+        await decryptBlockAligned(slice, controller);
+      }
+    },
+    async flush(controller) {
+      if (pending.byteLength > 0) {
+        await decryptBlockAligned(pending, controller);
+        pending = new Uint8Array(0);
+      }
+    },
+  });
+}
+
+function formatBytesHuman(bytes) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = bytes / 1024;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return `${v.toFixed(1)} ${units[u]}`;
+}
+
+function sanitizeFilename(name) {
+  return String(name || "video.mp4").replace(/["\\\r\n]/g, "_");
+}
+
+function renderDirectVideoHTML(id, meta) {
+  const safeName = sanitizeFilename(meta.filename || "video.mp4")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const sizeLabel = formatBytesHuman(meta.size);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${safeName} · TinyTiny Direct</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; background: radial-gradient(circle at top, #220b15, #090609 65%); color: #fff; display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; }
+  .wrap { width: 100%; max-width: 780px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); border-radius: 22px; padding: 20px; box-shadow: 0 24px 70px rgba(0,0,0,0.55); }
+  .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .title { font-size: 16px; font-weight: 700; word-break: break-word; }
+  .sub { font-size: 12px; color: #b5a9b0; margin-top: 2px; }
+  video { width: 100%; max-height: 70vh; border-radius: 14px; background: #000; display: block; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 18px; border-radius: 999px; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer; border: none; }
+  .btn-primary { background: linear-gradient(135deg, #ff3b7f, #d91b5c); color: #fff; }
+  .btn-ghost { background: rgba(255,255,255,0.09); color: #fff; border: 1px solid rgba(255,255,255,0.15); }
+  .err { color: #ff7a9f; font-size: 14px; padding: 18px 0; display: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title">${safeName}</div>
+        <div class="sub">${sizeLabel} · AES-256-CTR Encrypted R2 Stream</div>
+      </div>
+    </div>
+    <div id="err" class="err">Missing decryption key (?k=...) in URL.</div>
+    <video id="player" controls playsinline preload="metadata"></video>
+    <div class="actions">
+      <a id="dlBtn" class="btn btn-primary" href="#" download="${safeName}">Download Video</a>
+      <button id="copyBtn" class="btn btn-ghost" type="button">Copy Direct Download URL</button>
+    </div>
+  </div>
+  <script>
+    const k = new URLSearchParams(location.search).get("k");
+    const player = document.getElementById("player");
+    const dlBtn = document.getElementById("dlBtn");
+    const copyBtn = document.getElementById("copyBtn");
+    const err = document.getElementById("err");
+    if (!k) {
+      player.style.display = "none";
+      dlBtn.style.display = "none";
+      err.style.display = "block";
+    } else {
+      const q = "?k=" + encodeURIComponent(k);
+      player.src = "/d/${id}/video" + q;
+      const dlUrl = location.origin + "/d/${id}/download" + q;
+      dlBtn.href = dlUrl;
+      copyBtn.onclick = async () => {
+        await navigator.clipboard.writeText(dlUrl);
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => (copyBtn.textContent = "Copy Direct Download URL"), 1800);
+      };
+    }
+  </script>
+</body>
+</html>`;
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -727,6 +906,199 @@ export default {
           "Cache-Control": "public, max-age=3600",
         },
       });
+    }
+
+    // 7. DirectStuff Encrypted R2 Upload + On-the-Fly Decrypt Streaming + Direct Download
+    if (request.method === "POST" && path === "/v1/direct/init") {
+      if (!isDirectAuthorized(request, env)) return json({ error: "Unauthorized" }, 403);
+      if (!env.DIRECT_R2) return json({ error: "R2 bucket DIRECT_R2 not bound" }, 500);
+
+      const body = await request.json().catch(() => ({}));
+      const filename = sanitizeFilename(body.filename || "video.mp4");
+      const contentType = String(body.contentType || "video/mp4");
+      const size = Number(body.size || 0);
+      const nonceB64 = String(body.nonceB64 || "");
+      if (!size || !nonceB64) return json({ error: "Missing size or nonceB64" }, 400);
+
+      const id = randomId(12);
+      const r2Key = `direct/${id}.enc`;
+      const multipart = size > 90 * 1024 * 1024;
+      let uploadId = null;
+      if (multipart) {
+        const mpu = await env.DIRECT_R2.createMultipartUpload(r2Key);
+        uploadId = mpu.uploadId;
+      }
+
+      return json({ ok: true, id, r2Key, multipart, uploadId, filename, contentType, size });
+    }
+
+    if (request.method === "PUT" && path.startsWith("/v1/direct/upload/")) {
+      if (!isDirectAuthorized(request, env)) return json({ error: "Unauthorized" }, 403);
+      if (!env.DIRECT_R2) return json({ error: "R2 bucket DIRECT_R2 not bound" }, 500);
+
+      const id = path.slice("/v1/direct/upload/".length).replace(/[^a-z0-9]/gi, "");
+      if (!id) return json({ error: "Invalid id" }, 400);
+
+      const filename = sanitizeFilename(request.headers.get("X-File-Name") || "video.mp4");
+      const contentType = request.headers.get("X-Mime-Type") || "video/mp4";
+      const nonceB64 = request.headers.get("X-Nonce-B64") || "";
+      const size = Number(request.headers.get("Content-Length") || 0);
+      if (!nonceB64) return json({ error: "Missing X-Nonce-B64" }, 400);
+
+      const r2Key = `direct/${id}.enc`;
+      const buf = await request.arrayBuffer();
+      await env.DIRECT_R2.put(r2Key, buf);
+
+      const meta = {
+        filename,
+        contentType,
+        size: size || buf.byteLength,
+        nonceB64,
+        r2Key,
+        createdAt: nowSec(),
+      };
+      await env.LICENSES.put(`direct:${id}`, JSON.stringify(meta));
+      return json({
+        ok: true,
+        id,
+        watchPath: `/d/${id}`,
+        videoPath: `/d/${id}/video`,
+        downloadPath: `/d/${id}/download`,
+      });
+    }
+
+    if (request.method === "PUT" && path.startsWith("/v1/direct/part/")) {
+      if (!isDirectAuthorized(request, env)) return json({ error: "Unauthorized" }, 403);
+      if (!env.DIRECT_R2) return json({ error: "R2 bucket DIRECT_R2 not bound" }, 500);
+
+      const id = path.slice("/v1/direct/part/".length).replace(/[^a-z0-9]/gi, "");
+      const uploadId = url.searchParams.get("uploadId") || "";
+      const partNumber = Number(url.searchParams.get("partNumber") || 0);
+      if (!id || !uploadId || partNumber < 1) return json({ error: "Invalid multipart params" }, 400);
+
+      const mpu = env.DIRECT_R2.resumeMultipartUpload(`direct/${id}.enc`, uploadId);
+      const buf = await request.arrayBuffer();
+      const uploaded = await mpu.uploadPart(partNumber, buf);
+      return json({ ok: true, partNumber: uploaded.partNumber, etag: uploaded.etag });
+    }
+
+    if (request.method === "POST" && path.startsWith("/v1/direct/complete/")) {
+      if (!isDirectAuthorized(request, env)) return json({ error: "Unauthorized" }, 403);
+      if (!env.DIRECT_R2) return json({ error: "R2 bucket DIRECT_R2 not bound" }, 500);
+
+      const id = path.slice("/v1/direct/complete/".length).replace(/[^a-z0-9]/gi, "");
+      const body = await request.json().catch(() => ({}));
+      const { uploadId, parts, filename, contentType, size, nonceB64 } = body;
+      if (!id || !uploadId || !Array.isArray(parts) || !size || !nonceB64) {
+        return json({ error: "Invalid complete payload" }, 400);
+      }
+
+      const r2Key = `direct/${id}.enc`;
+      const mpu = env.DIRECT_R2.resumeMultipartUpload(r2Key, uploadId);
+      await mpu.complete(parts);
+
+      const meta = {
+        filename: sanitizeFilename(filename || "video.mp4"),
+        contentType: String(contentType || "video/mp4"),
+        size: Number(size),
+        nonceB64: String(nonceB64),
+        r2Key,
+        createdAt: nowSec(),
+      };
+      await env.LICENSES.put(`direct:${id}`, JSON.stringify(meta));
+      return json({
+        ok: true,
+        id,
+        watchPath: `/d/${id}`,
+        videoPath: `/d/${id}/video`,
+        downloadPath: `/d/${id}/download`,
+      });
+    }
+
+    if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/d/")) {
+      if (!env.DIRECT_R2) return new Response("R2 storage not configured", { status: 500 });
+      const parts = path.slice(3).split("/").filter(Boolean);
+      const id = (parts[0] || "").replace(/[^a-z0-9]/gi, "");
+      const sub = parts[1] || "";
+      if (!id) return new Response("Not found", { status: 404 });
+
+      const metaRaw = await env.LICENSES.get(`direct:${id}`);
+      if (!metaRaw) return new Response("Video not found or removed", { status: 404 });
+      const meta = JSON.parse(metaRaw);
+
+      if (!sub) {
+        return new Response(renderDirectVideoHTML(id, meta), {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      if (sub !== "video" && sub !== "download") {
+        return new Response("Not found", { status: 404 });
+      }
+
+      const kParam = url.searchParams.get("k") || "";
+      if (!kParam) return new Response("Missing decryption key (?k=...)", { status: 403 });
+
+      let keyBytes;
+      let nonceBytes;
+      try {
+        keyBytes = b64UrlToUint8(kParam);
+        nonceBytes = b64ToUint8(meta.nonceB64);
+      } catch {
+        return new Response("Invalid decryption key", { status: 400 });
+      }
+      if (keyBytes.byteLength !== 32 || nonceBytes.byteLength !== 16) {
+        return new Response("Invalid key or nonce length", { status: 400 });
+      }
+
+      const totalSize = Number(meta.size);
+      const rangeHeader = request.headers.get("Range");
+      const parsedRange = parseByteRange(rangeHeader, totalSize);
+      if (parsedRange?.invalid) {
+        return new Response("Range Not Satisfiable", {
+          status: 416,
+          headers: { "Content-Range": `bytes */${totalSize}` },
+        });
+      }
+
+      const isRange = Boolean(parsedRange);
+      const start = isRange ? parsedRange.start : 0;
+      const end = isRange ? parsedRange.end : totalSize - 1;
+      const outLen = end - start + 1;
+      const disp = sub === "download" ? "attachment" : "inline";
+      const safeFile = sanitizeFilename(meta.filename);
+
+      const headers = new Headers({
+        "Content-Type": meta.contentType || "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Content-Length": String(outLen),
+        "Content-Disposition": `${disp}; filename="${safeFile}"`,
+        "Cache-Control": "private, no-store",
+        "Access-Control-Allow-Origin": "*",
+      });
+      if (isRange) {
+        headers.set("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+      }
+
+      if (request.method === "HEAD") {
+        return new Response(null, { status: isRange ? 206 : 200, headers });
+      }
+
+      const alignedStart = start - (start % 16);
+      const fetchLen = end - alignedStart + 1;
+      const obj = await env.DIRECT_R2.get(meta.r2Key, {
+        range: { offset: alignedStart, length: fetchLen },
+      });
+      if (!obj || !obj.body) {
+        return new Response("Encrypted object missing from R2", { status: 404 });
+      }
+
+      const decryptStream = await createCtrDecryptStream(keyBytes, nonceBytes, start);
+      const bodyStream = obj.body.pipeThrough(decryptStream);
+      return new Response(bodyStream, { status: isRange ? 206 : 200, headers });
     }
 
     return json({ ok: true, service: "tinytiny-license" });

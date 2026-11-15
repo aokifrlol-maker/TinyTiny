@@ -7,4 +7,13 @@ Payload/
 TinyTiny/Info.plist
 TinyTiny_Setup_And_Admin_Guide.txt
 .wrangler/
+DirectStuff/.env
+DirectStuff/links.txt
+DirectStuff/uploaded/
+DirectStuff/*.mp4
+DirectStuff/*.mov
+DirectStuff/*.m4v
+DirectStuff/*.webm
+DirectStuff/*.mkv
+DirectStuff/*.avi
 
