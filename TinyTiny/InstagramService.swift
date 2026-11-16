@@ -822,56 +822,63 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
         // 2. Try same-origin relative fetch (guaranteed same origin, zero CORS)
         let js = """
-        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || fallbackCsrf || '';
-        let apiThreads = [];
         try {
-            const r = await fetch('/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5', {
-                credentials: 'include',
-                headers: {
-                    'X-IG-App-ID': '936619743392459',
-                    'X-CSRFToken': csrf,
-                    'X-Requested-With': 'XMLHttpRequest'
+            const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
+            const csrf = (csrfMatch && csrfMatch[1]) ? csrfMatch[1] : (fallbackCsrf || '');
+            let apiThreads = [];
+            try {
+                const r = await fetch('/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5', {
+                    credentials: 'include',
+                    headers: {
+                        'X-IG-App-ID': '936619743392459',
+                        'X-CSRFToken': csrf,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                if (r.ok) {
+                    const data = await r.json();
+                    const list = (data && data.inbox && Array.isArray(data.inbox.threads)) ? data.inbox.threads : [];
+                    apiThreads = list.map(t => ({
+                        id: String((t && t.thread_id) || ''),
+                        isGroup: Boolean(t && t.is_group),
+                        title: String((t && t.thread_title) || '').trim() || ((t && Array.isArray(t.users)) ? t.users : []).slice(0, 3).map(u => u && u.username).filter(Boolean).join(', ') || 'Direct Chat',
+                        memberCount: ((t && Array.isArray(t.users)) ? t.users.length : 0) + 1
+                    })).filter(t => t.id);
                 }
-            });
-            if (r.ok) {
-                const data = await r.json();
-                const list = (data && data.inbox && data.inbox.threads) ? data.inbox.threads : [];
-                apiThreads = list.map(t => ({
-                    id: String(t.thread_id || ''),
-                    isGroup: Boolean(t.is_group),
-                    title: String(t.thread_title || '').trim() || (t.users || []).slice(0, 3).map(u => u.username).filter(Boolean).join(', ') || 'Direct Chat',
-                    memberCount: (t.users ? t.users.length : 0) + 1
-                })).filter(t => t.id);
-            }
-        } catch {}
+            } catch (e1) {}
 
-        if (apiThreads.length > 0) {
-            return JSON.stringify({ ok: true, threads: apiThreads });
-        }
-
-        // 3. Fallback: read rendered DM & Group Chat links from the live /direct/inbox/ DOM
-        for (let attempt = 0; attempt < 8; attempt++) {
-            const links = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
-            if (links.length > 0) {
-                const seen = new Set();
-                const domThreads = [];
-                for (const a of links) {
-                    const m = (a.getAttribute('href') || '').match(/\\/direct\\/t\\/([^/?#]+)/);
-                    if (!m) continue;
-                    const id = m[1];
-                    if (seen.has(id)) continue;
-                    seen.add(id);
-                    const lines = (a.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
-                    const title = lines[0] || ('Chat ' + id.slice(-4));
-                    domThreads.push({ id, isGroup: title.includes(','), title, memberCount: 2 });
-                }
-                if (domThreads.length > 0) {
-                    return JSON.stringify({ ok: true, threads: domThreads });
-                }
+            if (apiThreads.length > 0) {
+                return JSON.stringify({ ok: true, threads: apiThreads });
             }
-            await new Promise(r => setTimeout(r, 350));
+
+            // 3. Fallback: read rendered DM & Group Chat links from the live /direct/inbox/ DOM
+            const tidRe = new RegExp('/direct/t/([^/?#]+)');
+            for (let attempt = 0; attempt < 8; attempt++) {
+                const links = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
+                if (links.length > 0) {
+                    const seen = new Set();
+                    const domThreads = [];
+                    for (const a of links) {
+                        const href = a.getAttribute('href') || '';
+                        const m = href.match(tidRe);
+                        if (!m) continue;
+                        const id = m[1];
+                        if (seen.has(id)) continue;
+                        seen.add(id);
+                        const lines = String(a.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                        const title = lines[0] || ('Chat ' + id.slice(-4));
+                        domThreads.push({ id, isGroup: title.indexOf(',') !== -1, title, memberCount: 2 });
+                    }
+                    if (domThreads.length > 0) {
+                        return JSON.stringify({ ok: true, threads: domThreads });
+                    }
+                }
+                await new Promise(r => setTimeout(r, 350));
+            }
+            return JSON.stringify({ ok: false, message: 'No chats found on ' + location.pathname + '. Open IG tab once to verify login.' });
+        } catch (err) {
+            return JSON.stringify({ ok: false, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
         }
-        return JSON.stringify({ ok: false, message: 'No chats found. Open IG tab once to verify login.' });
         """
         let rawObj = try await wv.callAsyncJavaScript(
             js,
@@ -964,26 +971,31 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         await ensureOnInstagramInbox(wv)
         let clientCtx = UUID().uuidString.lowercased()
         let sendJS = """
-        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || fallbackCsrf || '';
-        const bodyStr = 'action=send_item&client_context=' + encodeURIComponent(clientCtx) +
-            '&thread_ids=' + encodeURIComponent(JSON.stringify([threadId])) +
-            '&upload_id=' + encodeURIComponent(uploadId);
-        const sr = await fetch('/api/v1/direct_v2/threads/broadcast/configure_video/', {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'X-IG-App-ID': '936619743392459',
-                'X-CSRFToken': csrf,
-                'X-Requested-With': 'XMLHttpRequest',
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: bodyStr
-        });
-        if (sr.ok) return JSON.stringify({ ok: true });
-        const st = await sr.text();
-        let msg = '';
-        try { msg = JSON.parse(st).message || ''; } catch {}
-        return JSON.stringify({ ok: false, code: sr.status, message: msg });
+        try {
+            const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
+            const csrf = (csrfMatch && csrfMatch[1]) ? csrfMatch[1] : (fallbackCsrf || '');
+            const bodyStr = 'action=send_item&client_context=' + encodeURIComponent(clientCtx) +
+                '&thread_ids=' + encodeURIComponent(JSON.stringify([threadId])) +
+                '&upload_id=' + encodeURIComponent(uploadId);
+            const sr = await fetch('/api/v1/direct_v2/threads/broadcast/configure_video/', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'X-IG-App-ID': '936619743392459',
+                    'X-CSRFToken': csrf,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: bodyStr
+            });
+            if (sr.ok) return JSON.stringify({ ok: true });
+            const st = await sr.text();
+            let msg = '';
+            try { msg = JSON.parse(st).message || ''; } catch {}
+            return JSON.stringify({ ok: false, code: sr.status, message: msg });
+        } catch (err) {
+            return JSON.stringify({ ok: false, code: 0, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
+        }
         """
         let rawObj = try await wv.callAsyncJavaScript(
             sendJS,
