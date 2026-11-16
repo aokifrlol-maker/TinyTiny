@@ -1037,45 +1037,84 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             throw NSError(domain: "IGDirect", code: upCode, userInfo: [NSLocalizedDescriptionKey: msg ?? "IG video upload rejected (HTTP \(upCode))."])
         }
 
-        // 3. Configure & send via same-origin WKWebView fetch on www.instagram.com
-        let wv = await ensureDirectWebView()
-        await ensureOnInstagramInbox(wv)
+        // 3A. Fast path: native URLSession POST to i.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/
         let clientCtx = UUID().uuidString.lowercased()
-        let sendJS = """
+        if let sendURL = URL(string: "https://i.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/") {
+            let threadArr = "[\"\(threadId)\"]"
+            let bodyStr = "action=send_item&client_context=\(clientCtx)&thread_ids=\(threadArr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? threadArr)&upload_id=\(uploadId)"
+            var sendReq = URLRequest(url: sendURL)
+            sendReq.httpMethod = "POST"
+            sendReq.timeoutInterval = 20
+            sendReq.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            sendReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
+            sendReq.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+            sendReq.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
+            sendReq.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            sendReq.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
+            sendReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+            sendReq.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
+            sendReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            sendReq.httpBody = bodyStr.data(using: .utf8)
+
+            if let (_, sendResp) = try? await URLSession.shared.data(for: sendReq),
+               let code = (sendResp as? HTTPURLResponse)?.statusCode,
+               (200..<300).contains(code) {
+                return
+            }
+        }
+
+        // 3B. Fallback: Desktop WKWebView on /direct/t/<threadId>/ using IG Web's own file input composer
+        let wv = await ensureDirectWebView()
+        let threadURLStr = "https://www.instagram.com/direct/t/\(threadId)/"
+        if wv.url?.absoluteString.contains("/direct/t/\(threadId)") != true,
+           let tURL = URL(string: threadURLStr) {
+            wv.load(URLRequest(url: tURL))
+            for _ in 0..<24 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                let ready = (try? await wv.evaluateJavaScript("location.pathname.indexOf('/direct/t/') !== -1 && document.readyState === 'complete'")) as? Bool ?? false
+                if ready && !wv.isLoading { break }
+            }
+            try? await Task.sleep(nanoseconds: 900_000_000)
+        }
+
+        let b64 = mp4Data.base64EncodedString()
+        let domSendJS = """
         try {
-            const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
-            const csrf = (csrfMatch && csrfMatch[1]) ? csrfMatch[1] : (fallbackCsrf || '');
-            const bodyStr = 'action=send_item&client_context=' + encodeURIComponent(clientCtx) +
-                '&thread_ids=' + encodeURIComponent(JSON.stringify([threadId])) +
-                '&upload_id=' + encodeURIComponent(uploadId);
-            const sr = await fetch('/api/v1/direct_v2/threads/broadcast/configure_video/', {
-                method: 'POST',
-                credentials: 'include',
-                headers: {
-                    'X-IG-App-ID': '936619743392459',
-                    'X-CSRFToken': csrf,
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: bodyStr
-            });
-            if (sr.ok) return JSON.stringify({ ok: true });
-            const st = await sr.text();
-            let msg = '';
-            try { msg = JSON.parse(st).message || ''; } catch {}
-            return JSON.stringify({ ok: false, code: sr.status, message: msg });
+            const bin = atob(mp4B64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            const file = new File([bytes], 'video.mp4', { type: 'video/mp4' });
+
+            let input = null;
+            for (let i = 0; i < 10; i++) {
+                const all = Array.from(document.querySelectorAll('input[type="file"]'));
+                input = all.find(el => (el.getAttribute('accept') || '').indexOf('video') !== -1) || all[0] || null;
+                if (input) break;
+                await new Promise(r => setTimeout(r, 300));
+            }
+            if (!input) {
+                return JSON.stringify({ ok: false, message: 'No file upload input found in this chat (thread may be restricted).' });
+            }
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            input.files = dt.files;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+
+            // Click Send button if IG shows a composer Send button after attaching
+            await new Promise(r => setTimeout(r, 900));
+            const btns = Array.from(document.querySelectorAll('div[role="button"], button'));
+            const sendBtn = btns.find(b => /^send$/i.test((b.innerText || '').trim()));
+            if (sendBtn) sendBtn.click();
+            await new Promise(r => setTimeout(r, 1200));
+            return JSON.stringify({ ok: true });
         } catch (err) {
-            return JSON.stringify({ ok: false, code: 0, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
+            return JSON.stringify({ ok: false, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
         }
         """
         let rawObj = try await wv.callAsyncJavaScript(
-            sendJS,
-            arguments: [
-                "uploadId": uploadId,
-                "clientCtx": clientCtx,
-                "threadId": threadId,
-                "fallbackCsrf": session.csrfToken
-            ],
+            domSendJS,
+            arguments: ["mp4B64": b64],
             in: nil,
             contentWorld: .page
         )
@@ -1085,9 +1124,8 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             throw NSError(domain: "IGDirect", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to read IG send response."])
         }
         guard (parsed["ok"] as? Bool) == true else {
-            let code = (parsed["code"] as? Int) ?? 0
-            let msg = (parsed["message"] as? String) ?? ""
-            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: msg.isEmpty ? "IG rejected sending to this chat (HTTP \(code))." : msg])
+            let msg = (parsed["message"] as? String) ?? "IG rejected sending to this chat."
+            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: msg])
         }
     }
 
