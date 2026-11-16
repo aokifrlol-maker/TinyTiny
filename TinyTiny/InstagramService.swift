@@ -748,11 +748,24 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let memberCount: Int
     }
 
-    private func igCookieHeader(from session: InstagramAccountSession) -> String {
-        var parts = ["sessionid=\(session.sessionId)"]
-        if !session.csrfToken.isEmpty { parts.append("csrftoken=\(session.csrfToken)") }
-        if !session.userId.isEmpty { parts.append("ds_user_id=\(session.userId)") }
-        return parts.joined(separator: "; ")
+    private func fullIGCookieAndCSRF(from session: InstagramAccountSession) async -> (cookie: String, csrf: String) {
+        let storeCookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        var map: [String: String] = [:]
+        for c in storeCookies where c.domain.contains("instagram.com") {
+            map[c.name] = c.value
+        }
+        if map["sessionid"]?.isEmpty != false && !session.sessionId.isEmpty {
+            map["sessionid"] = session.sessionId
+        }
+        if map["csrftoken"]?.isEmpty != false && !session.csrfToken.isEmpty {
+            map["csrftoken"] = session.csrfToken
+        }
+        if map["ds_user_id"]?.isEmpty != false && !session.userId.isEmpty {
+            map["ds_user_id"] = session.userId
+        }
+        let cookieStr = map.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+        let csrf = map["csrftoken"] ?? session.csrfToken
+        return (cookieStr, csrf)
     }
 
     func fetchDirectThreads() async throws -> [IGDirectThread] {
@@ -760,17 +773,20 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
-        guard let url = URL(string: "https://www.instagram.com/api/v1/direct_v2/inbox/?visual_message_return_type=unseen&thread_message_limit=5&persistentBadging=true&limit=25") else {
+        let auth = await fullIGCookieAndCSRF(from: session)
+        guard let url = URL(string: "https://i.instagram.com/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5") else {
             throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid inbox URL"])
         }
         var req = URLRequest(url: url)
         req.timeoutInterval = 12
         req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        req.setValue(session.csrfToken, forHTTPHeaderField: "X-CSRFToken")
+        req.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+        req.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        req.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
-        req.setValue(igCookieHeader(from: session), forHTTPHeaderField: "Cookie")
+        req.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
+        req.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+        req.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -778,7 +794,8 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let inbox = json["inbox"] as? [String: Any],
               let threads = inbox["threads"] as? [[String: Any]] else {
-            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: "Could not load IG inbox (HTTP \(code))."])
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
+            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: msg ?? "Could not load IG inbox (HTTP \(code))."])
         }
 
         return threads.compactMap { t in
@@ -797,6 +814,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
+        let auth = await fullIGCookieAndCSRF(from: session)
 
         // 1. Buffer MP4 strictly in memory (never saved to Photos or phone storage)
         var dlReq = URLRequest(url: videoURL)
@@ -825,16 +843,16 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         ]
         let paramsJSON = String(data: (try? JSONSerialization.data(withJSONObject: ruploadParams)) ?? Data(), encoding: .utf8) ?? "{}"
 
-        let cookies = igCookieHeader(from: session)
         var upReq = URLRequest(url: upURL)
         upReq.httpMethod = "POST"
         upReq.timeoutInterval = 60
         upReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
         upReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        upReq.setValue(session.csrfToken, forHTTPHeaderField: "X-CSRFToken")
-        upReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Origin")
+        upReq.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+        upReq.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
+        upReq.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
         upReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-        upReq.setValue(cookies, forHTTPHeaderField: "Cookie")
+        upReq.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
         upReq.setValue(paramsJSON, forHTTPHeaderField: "X-Instagram-Rupload-Params")
         upReq.setValue(entityName, forHTTPHeaderField: "X-Entity-Name")
         upReq.setValue(String(mp4Data.count), forHTTPHeaderField: "X-Entity-Length")
@@ -850,7 +868,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         }
 
         // 3. Configure & send video directly into DM / Group Chat thread
-        guard let sendURL = URL(string: "https://www.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/") else {
+        guard let sendURL = URL(string: "https://i.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/") else {
             throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid send URL"])
         }
         let clientCtx = UUID().uuidString.lowercased()
@@ -862,10 +880,12 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         sendReq.timeoutInterval = 20
         sendReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
         sendReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        sendReq.setValue(session.csrfToken, forHTTPHeaderField: "X-CSRFToken")
+        sendReq.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+        sendReq.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
         sendReq.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        sendReq.setValue("https://www.instagram.com/direct/t/\(threadId)/", forHTTPHeaderField: "Referer")
-        sendReq.setValue(cookies, forHTTPHeaderField: "Cookie")
+        sendReq.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
+        sendReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+        sendReq.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
         sendReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         sendReq.httpBody = bodyStr.data(using: .utf8)
 
