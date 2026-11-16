@@ -268,12 +268,12 @@ final class LicenseManager: ObservableObject {
             for item in backup.userData.liked where existingIds.insert(item.id).inserted {
                 UserStore.shared.data.liked.append(item)
             }
-            var savedIds = Set(UserStore.shared.data.saved.map(\.id))
-            for item in backup.userData.saved where savedIds.insert(item.id).inserted {
-                UserStore.shared.data.saved.append(item)
+            var dlIds = Set(UserStore.shared.data.downloaded.map(\.id))
+            for item in backup.userData.downloaded where dlIds.insert(item.id).inserted {
+                UserStore.shared.data.downloaded.append(item)
             }
-            for id in backup.userData.dislikedPostIDs where !UserStore.shared.data.dislikedPostIDs.contains(id) {
-                UserStore.shared.data.dislikedPostIDs.append(id)
+            for u in backup.userData.followedUsers where !UserStore.shared.isFollowingUser(u) {
+                UserStore.shared.toggleFollowUser(u)
             }
             for s in backup.userData.followedSubreddits where !UserStore.shared.isFollowingSubreddit(s) {
                 UserStore.shared.toggleFollowSubreddit(s)
@@ -287,8 +287,8 @@ final class LicenseManager: ObservableObject {
             for of in backup.userData.followedOFCreators where !UserStore.shared.isFollowingOFCreator(id: of.id, handle: of.name) {
                 UserStore.shared.toggleFollowOFCreator(id: of.id, name: of.name, displayName: of.displayName)
             }
-            for tag in backup.userData.followedRule34Tags where !UserStore.shared.data.followedRule34Tags.contains(tag) {
-                UserStore.shared.data.followedRule34Tags.append(tag)
+            if !UserStore.shared.data.r34Credentials.isConfigured && backup.userData.r34Credentials.isConfigured {
+                UserStore.shared.data.r34Credentials = backup.userData.r34Credentials
             }
             if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
                 UserStore.shared.data.xSession = backup.userData.xSession
@@ -309,7 +309,7 @@ final class LicenseManager: ObservableObject {
         if x.isConnected {
             let xPairs: [(String, String)] = [
                 ("auth_token", x.authToken),
-                ("ct0", x.ct0Token),
+                ("ct0", x.ct0),
             ]
             for (name, val) in xPairs where !val.isEmpty {
                 for domain in [".x.com", ".twitter.com"] {
@@ -352,7 +352,7 @@ final class LicenseManager: ObservableObject {
         await restoreEncryptedBackupIfPresent()
         await syncEncryptedBackupNow()
         let d = UserStore.shared.data
-        var parts = ["\(d.liked.count) likes", "\(d.saved.count) saved"]
+        var parts = ["\(d.liked.count) likes", "\(d.downloaded.count) saved"]
         if d.xSession.isConnected { parts.append("X login") }
         if d.igSession.isConnected { parts.append("IG login") }
         return "Synced: " + parts.joined(separator: " · ")
