@@ -441,7 +441,7 @@ struct ShareItemSheet: View {
                 if let mp4URL = gif.allVideoURLs(hd: true).first {
                     IGDirectSendSheet(
                         videoURL: mp4URL,
-                        title: gif.title,
+                        title: gif.title ?? "",
                         referer: gif.isOnlyFansPost ? "https://cum.st/" : (gif.isLongVideoPost ? "https://www.xvideos.com/" : nil)
                     )
                     .presentationDetents([.medium, .large])
@@ -734,6 +734,7 @@ struct DirectIGDropPayload: Identifiable {
     let title: String
     let referer: String?
 
+    @MainActor
     static func fetchFromWorker(dropId: String) async -> DirectIGDropPayload? {
         let base = LicenseManager.shared.normalizedBaseURL
         guard let url = URL(string: "\(base)/v1/igdrop/\(dropId)"),
@@ -756,7 +757,7 @@ struct IGDirectSendSheet: View {
     let referer: String?
 
     @Environment(\.dismiss) private var dismiss
-    @State private var threads: [InstagramService.IGDirectThread] = []
+    @State private var threads: [InstagramWebEngine.IGDirectThread] = []
     @State private var isLoading = true
     @State private var sendingThreadId: String?
     @State private var statusText: String?
@@ -866,19 +867,19 @@ struct IGDirectSendSheet: View {
         isLoading = true
         errorText = nil
         do {
-            threads = try await InstagramService.shared.fetchDirectThreads()
+            threads = try await InstagramWebEngine.shared.fetchDirectThreads()
         } catch {
             errorText = error.localizedDescription
         }
         isLoading = false
     }
 
-    private func send(to thread: InstagramService.IGDirectThread) async {
+    private func send(to thread: InstagramWebEngine.IGDirectThread) async {
         sendingThreadId = thread.id
         errorText = nil
         statusText = nil
         do {
-            try await InstagramService.shared.sendMP4ToDirectThread(
+            try await InstagramWebEngine.shared.sendMP4ToDirectThread(
                 threadId: thread.id,
                 videoURL: videoURL,
                 referer: referer

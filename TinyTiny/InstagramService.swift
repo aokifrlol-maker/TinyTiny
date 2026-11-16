@@ -748,7 +748,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let memberCount: Int
     }
 
-    private func igCookieHeader(from session: IGSession) -> String {
+    private func igCookieHeader(from session: InstagramAccountSession) -> String {
         var parts = ["sessionid=\(session.sessionId)"]
         if !session.csrfToken.isEmpty { parts.append("csrftoken=\(session.csrfToken)") }
         if !session.userId.isEmpty { parts.append("ds_user_id=\(session.userId)") }
@@ -756,7 +756,8 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     }
 
     func fetchDirectThreads() async throws -> [IGDirectThread] {
-        guard let session = IGSessionStore.load(), session.isAuthenticated else {
+        let session = UserStore.shared.data.instagramSession
+        guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
         guard let url = URL(string: "https://www.instagram.com/api/v1/direct_v2/inbox/?visual_message_return_type=unseen&thread_message_limit=5&persistentBadging=true&limit=25") else {
@@ -792,7 +793,8 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     }
 
     func sendMP4ToDirectThread(threadId: String, videoURL: URL, referer: String? = nil) async throws {
-        guard let session = IGSessionStore.load(), session.isAuthenticated else {
+        let session = UserStore.shared.data.instagramSession
+        guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
 
