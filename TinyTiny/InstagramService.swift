@@ -503,7 +503,14 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             var found: [IGDirectThread] = []
             var seen = Set<String>()
             Self.extractThreadsRecursively(from: json, into: &found, seen: &seen)
-            if !found.isEmpty { cachedDirectThreads = found }
+            if !found.isEmpty {
+                var merged = cachedDirectThreads
+                var existing = Set(merged.map(\.id))
+                for t in found where existing.insert(t.id).inserted {
+                    merged.append(t)
+                }
+                cachedDirectThreads = merged
+            }
             return
         }
 
@@ -853,12 +860,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         let wv = await ensureDirectWebView()
         await ensureOnInstagramInbox(wv)
 
-        // 1. If Instagram Desktop Web's own inbox XHR/GraphQL was intercepted, return immediately
-        if !cachedDirectThreads.isEmpty {
-            return cachedDirectThreads
-        }
-
-        // 2. Check login redirect, SSR JSON, same-origin API, and live DOM
+        // Merge intercepted payloads + SSR + REST inbox + DOM links (never early-return on just 1 thread)
         let js = """
         try {
             if (location.pathname.indexOf('/accounts/login') !== -1) {
@@ -866,10 +868,15 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             }
             const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
             const csrf = (csrfMatch && csrfMatch[1]) ? csrfMatch[1] : (fallbackCsrf || '');
+            const merged = [];
+            const seen = new Set();
+            function addThread(t) {
+                if (!t || !t.id || seen.has(t.id)) return;
+                seen.add(t.id);
+                merged.push(t);
+            }
 
             // A. Scan SSR <script type="application/json"> embedded in /direct/inbox/
-            let ssrThreads = [];
-            const seenSSR = new Set();
             function walkSSR(obj, depth) {
                 if (!obj || depth > 12) return;
                 if (Array.isArray(obj)) {
@@ -878,11 +885,10 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                 }
                 if (typeof obj === 'object') {
                     const tid = obj.thread_id || obj.ig_thread_id || obj.thread_v2_id;
-                    if (tid && typeof tid === 'string' && !seenSSR.has(tid)) {
-                        seenSSR.add(tid);
+                    if (tid && typeof tid === 'string') {
                         const users = Array.isArray(obj.users) ? obj.users : [];
                         const tTitle = String(obj.thread_title || '').trim() || users.slice(0, 3).map(u => u && u.username).filter(Boolean).join(', ') || ('Chat ' + tid.slice(-4));
-                        ssrThreads.push({ id: tid, isGroup: Boolean(obj.is_group), title: tTitle, memberCount: Math.max(2, users.length + 1) });
+                        addThread({ id: tid, isGroup: Boolean(obj.is_group), title: tTitle, memberCount: Math.max(2, users.length + 1) });
                     }
                     for (const k of Object.keys(obj)) walkSSR(obj[k], depth + 1);
                 }
@@ -890,15 +896,11 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             for (const s of document.querySelectorAll('script[type="application/json"]')) {
                 try { walkSSR(JSON.parse(s.textContent || ''), 0); } catch {}
             }
-            if (ssrThreads.length > 0) {
-                return JSON.stringify({ ok: true, threads: ssrThreads });
-            }
 
             // B. Try same-origin relative REST inbox
             let apiStatus = 0;
-            let apiThreads = [];
             try {
-                const r = await fetch('/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5', {
+                const r = await fetch('/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=40&thread_message_limit=5', {
                     credentials: 'include',
                     headers: {
                         'X-IG-App-ID': '936619743392459',
@@ -910,43 +912,33 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                 if (r.ok) {
                     const data = await r.json();
                     const list = (data && data.inbox && Array.isArray(data.inbox.threads)) ? data.inbox.threads : [];
-                    apiThreads = list.map(t => ({
-                        id: String((t && t.thread_id) || ''),
-                        isGroup: Boolean(t && t.is_group),
-                        title: String((t && t.thread_title) || '').trim() || ((t && Array.isArray(t.users)) ? t.users : []).slice(0, 3).map(u => u && u.username).filter(Boolean).join(', ') || 'Direct Chat',
-                        memberCount: ((t && Array.isArray(t.users)) ? t.users.length : 0) + 1
-                    })).filter(t => t.id);
+                    for (const t of list) {
+                        const id = String((t && t.thread_id) || '');
+                        if (!id) continue;
+                        const users = (t && Array.isArray(t.users)) ? t.users : [];
+                        const title = String((t && t.thread_title) || '').trim() || users.slice(0, 3).map(u => u && u.username).filter(Boolean).join(', ') || 'Direct Chat';
+                        addThread({ id, isGroup: Boolean(t && t.is_group), title, memberCount: users.length + 1 });
+                    }
                 }
             } catch (e1) {}
-            if (apiThreads.length > 0) {
-                return JSON.stringify({ ok: true, threads: apiThreads });
-            }
 
-            // C. Fallback: read rendered DM & Group Chat links from Desktop /direct/inbox/ DOM
+            // C. Read rendered DM & Group Chat links from Desktop /direct/inbox/ DOM
             const tidRe = new RegExp('/direct/t/([^/?#]+)');
-            for (let attempt = 0; attempt < 10; attempt++) {
+            for (let attempt = 0; attempt < 6; attempt++) {
                 const links = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
-                if (links.length > 0) {
-                    const seen = new Set();
-                    const domThreads = [];
-                    for (const a of links) {
-                        const href = a.getAttribute('href') || '';
-                        const m = href.match(tidRe);
-                        if (!m) continue;
-                        const id = m[1];
-                        if (seen.has(id)) continue;
-                        seen.add(id);
-                        const lines = String(a.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
-                        const title = lines[0] || ('Chat ' + id.slice(-4));
-                        domThreads.push({ id, isGroup: title.indexOf(',') !== -1, title, memberCount: 2 });
-                    }
-                    if (domThreads.length > 0) {
-                        return JSON.stringify({ ok: true, threads: domThreads });
-                    }
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    const m = href.match(tidRe);
+                    if (!m) continue;
+                    const id = m[1];
+                    const lines = String(a.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                    const title = lines[0] || ('Chat ' + id.slice(-4));
+                    addThread({ id, isGroup: title.indexOf(',') !== -1, title, memberCount: 2 });
                 }
+                if (merged.length > 1) break;
                 await new Promise(r => setTimeout(r, 350));
             }
-            return JSON.stringify({ ok: false, message: 'Inbox empty on ' + location.pathname + ' (API ' + apiStatus + '). Try opening IG tab once.' });
+            return JSON.stringify({ ok: true, threads: merged, apiStatus });
         } catch (err) {
             return JSON.stringify({ ok: false, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
         }
@@ -957,26 +949,29 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             in: nil,
             contentWorld: .page
         )
-        if !cachedDirectThreads.isEmpty {
-            return cachedDirectThreads
+        var combined = cachedDirectThreads
+        var seenIds = Set(combined.map(\.id))
+        if let rawStr = rawObj as? String,
+           let jsonData = rawStr.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            if (parsed["ok"] as? Bool) == false, let errMsg = parsed["message"] as? String {
+                throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: errMsg])
+            }
+            if let arr = parsed["threads"] as? [[String: Any]] {
+                for t in arr {
+                    guard let id = t["id"] as? String, !id.isEmpty, seenIds.insert(id).inserted else { continue }
+                    let title = (t["title"] as? String) ?? "Direct Chat"
+                    let isGroup = (t["isGroup"] as? Bool) ?? false
+                    let count = (t["memberCount"] as? Int) ?? 2
+                    combined.append(IGDirectThread(id: id, title: title, isGroup: isGroup, memberCount: count))
+                }
+            }
         }
-        guard let rawStr = rawObj as? String,
-              let jsonData = rawStr.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              (parsed["ok"] as? Bool) == true,
-              let arr = parsed["threads"] as? [[String: Any]] else {
-            let msg = ((rawObj as? String)?.data(using: .utf8)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["message"] as? String
-            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: msg ?? "Could not load IG inbox."])
+        guard !combined.isEmpty else {
+            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "No chats found on Instagram. Open IG tab once to verify login."])
         }
-        let result = arr.compactMap { t -> IGDirectThread? in
-            guard let id = t["id"] as? String, !id.isEmpty else { return nil }
-            let title = (t["title"] as? String) ?? "Direct Chat"
-            let isGroup = (t["isGroup"] as? Bool) ?? false
-            let count = (t["memberCount"] as? Int) ?? 2
-            return IGDirectThread(id: id, title: title, isGroup: isGroup, memberCount: count)
-        }
-        cachedDirectThreads = result
-        return result
+        cachedDirectThreads = combined
+        return combined
     }
 
     func sendMP4ToDirectThread(threadId: String, videoURL: URL, referer: String? = nil) async throws {
@@ -1056,9 +1051,12 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             sendReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             sendReq.httpBody = bodyStr.data(using: .utf8)
 
-            if let (_, sendResp) = try? await URLSession.shared.data(for: sendReq),
+            if let (sendData, sendResp) = try? await URLSession.shared.data(for: sendReq),
                let code = (sendResp as? HTTPURLResponse)?.statusCode,
-               (200..<300).contains(code) {
+               (200..<300).contains(code),
+               let json = try? JSONSerialization.jsonObject(with: sendData) as? [String: Any],
+               (json["status"] as? String) == "ok",
+               json["payload"] != nil {
                 return
             }
         }
@@ -1085,15 +1083,29 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             const file = new File([bytes], 'video.mp4', { type: 'video/mp4' });
 
-            let input = null;
-            for (let i = 0; i < 10; i++) {
-                const all = Array.from(document.querySelectorAll('input[type="file"]'));
-                input = all.find(el => (el.getAttribute('accept') || '').indexOf('video') !== -1) || all[0] || null;
-                if (input) break;
-                await new Promise(r => setTimeout(r, 300));
-            }
+            let attachSelectors = [
+                "[aria-label*=\"Add Photo\" i]",
+                "[aria-label*=\"Photo or video\" i]",
+                "[aria-label*=\"Attach\" i]",
+                "[aria-label*=\"Media\" i]"
+            ];
+            let input = await (async () => {
+                for (let i = 0; i < 6; i++) {
+                    const all = Array.from(document.querySelectorAll('input[type="file"]'));
+                    const found = all.find(el => (el.getAttribute('accept') || '').indexOf('video') !== -1) || all[0] || null;
+                    if (found) return found;
+                    if (i === 1) {
+                        for (const sel of attachSelectors) {
+                            const btn = document.querySelector(sel);
+                            if (btn) { btn.click(); break; }
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, 350));
+                }
+                return null;
+            })();
             if (!input) {
-                return JSON.stringify({ ok: false, message: 'No file upload input found in this chat (thread may be restricted).' });
+                return JSON.stringify({ ok: false, message: 'Chat blocked media upload or no composer found in this chat.' });
             }
             const dt = new DataTransfer();
             dt.items.add(file);

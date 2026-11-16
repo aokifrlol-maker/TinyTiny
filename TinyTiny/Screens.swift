@@ -1,4 +1,5 @@
 import SwiftUI
+import Photos
 
 // MARK: - 1. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
 
@@ -1183,6 +1184,10 @@ struct GoonedLikesView: View {
     @State private var isSelecting: Bool = false
     @State private var selectedIDs: Set<String> = []
     @State private var showCollectionShare: Bool = false
+    @State private var exportFileURLs: [URL] = []
+    @State private var showExportSheet: Bool = false
+    @State private var isBulkWorking: Bool = false
+    @State private var bulkToast: String? = nil
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
     private var sourceItems: [Gif] {
@@ -1453,34 +1458,112 @@ struct GoonedLikesView: View {
             }
 
             if isSelecting {
-                VStack {
+                VStack(spacing: 8) {
                     Spacer()
-                    HStack(spacing: 12) {
-                        Text("\(selectedIDs.count) selected")
-                            .font(.system(size: 14, weight: .bold))
+                    if let bulkToast {
+                        Text(bulkToast)
+                            .font(.caption.bold())
                             .foregroundStyle(.white)
-                        Spacer()
-                        Button {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            showCollectionShare = true
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "paperplane.fill")
-                                    .font(.system(size: 13, weight: .bold))
-                                Text("Share (\(selectedIDs.count))")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 10)
-                            .liquidGlassCapsule(active: !selectedIDs.isEmpty)
-                        }
-                        .disabled(selectedIDs.isEmpty)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .liquidGlassCapsule(active: true)
                     }
-                    .padding(.horizontal, 16)
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            Text("\(selectedIDs.count) selected")
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundStyle(.white)
+                            Spacer()
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                if selectedIDs.count == filteredItems.count {
+                                    selectedIDs.removeAll()
+                                } else {
+                                    selectedIDs = Set(filteredItems.map(\.id))
+                                }
+                            } label: {
+                                Text(selectedIDs.count == filteredItems.count && !filteredItems.isEmpty ? "Deselect All" : "Select All")
+                                    .font(.system(size: 12.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .liquidGlassCapsule()
+                            }
+                            Button {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                deleteSelected()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "trash.fill")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                    Text("Delete")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(selectedIDs.isEmpty ? 0.35 : 0.85), in: Capsule())
+                            }
+                            .disabled(selectedIDs.isEmpty || isBulkWorking)
+                        }
+
+                        HStack(spacing: 8) {
+                            Button {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                Task { await exportSelectedAsFiles() }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text("Save File")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .liquidGlassCapsule()
+                            }
+                            .disabled(selectedIDs.isEmpty || isBulkWorking)
+
+                            Button {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                Task { await saveSelectedToPhotos() }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "photo.on.rectangle")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text("Save to Photos")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .liquidGlassCapsule()
+                            }
+                            .disabled(selectedIDs.isEmpty || isBulkWorking)
+
+                            Button {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                showCollectionShare = true
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "paperplane.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text("Share")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .liquidGlassCapsule(active: !selectedIDs.isEmpty)
+                            }
+                            .disabled(selectedIDs.isEmpty || isBulkWorking)
+                        }
+                    }
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                     .liquidGlassCard(cornerRadius: 22)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 14)
                     .padding(.bottom, 86)
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1495,6 +1578,104 @@ struct GoonedLikesView: View {
             ShareCollectionSheet(posts: selectedPosts)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showExportSheet) {
+            ActivityShareSheet(items: exportFileURLs)
+        }
+    }
+
+    private func deleteSelected() {
+        let targets = selectedPosts
+        guard !targets.isEmpty else { return }
+        for post in targets {
+            if mode == "offline" {
+                offline.removeDownload(post)
+            } else {
+                if store.isLiked(post) { store.toggleLike(post) }
+            }
+        }
+        store.saveNow()
+        selectedIDs.removeAll()
+        if filteredItems.isEmpty { isSelecting = false }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        showBulkToast("Deleted \(targets.count) item\(targets.count == 1 ? "" : "s")")
+    }
+
+    private func resolveLocalOrTempURL(for post: Gif) async -> URL? {
+        if let local = offline.localMediaURL(for: post) {
+            return local
+        }
+        let remote = post.isImage ? (post.thumbURL ?? post.allVideoURLs(hd: true).first) : post.allVideoURLs(hd: true).first
+        guard let url = remote else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 35
+        if post.isOnlyFansPost { req.setValue("https://cum.st/", forHTTPHeaderField: "Referer") }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
+              !data.isEmpty else { return nil }
+        let ext = post.isImage ? "jpg" : "mp4"
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tt_export_\(OfflineManager.safeFileStem(for: post.id)).\(ext)")
+        try? data.write(to: tmp, options: [.atomic])
+        return tmp
+    }
+
+    private func exportSelectedAsFiles() async {
+        let targets = selectedPosts
+        guard !targets.isEmpty else { return }
+        isBulkWorking = true
+        showBulkToast("Preparing \(targets.count) file\(targets.count == 1 ? "" : "s")...")
+        var urls: [URL] = []
+        for post in targets {
+            if let u = await resolveLocalOrTempURL(for: post) {
+                urls.append(u)
+            }
+        }
+        isBulkWorking = false
+        if urls.isEmpty {
+            showBulkToast("Could not prepare files")
+        } else {
+            exportFileURLs = urls
+            showExportSheet = true
+        }
+    }
+
+    private func saveSelectedToPhotos() async {
+        let targets = selectedPosts
+        guard !targets.isEmpty else { return }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            showBulkToast("Allow Photos access in Settings")
+            return
+        }
+        isBulkWorking = true
+        showBulkToast("Saving \(targets.count) to Photos...")
+        var savedCount = 0
+        for post in targets {
+            guard let fileURL = await resolveLocalOrTempURL(for: post) else { continue }
+            let isImg = post.isImage || ["jpg", "jpeg", "png", "webp"].contains(fileURL.pathExtension.lowercased())
+            let ok: Bool = await withCheckedContinuation { cont in
+                PHPhotoLibrary.shared().performChanges({
+                    if isImg {
+                        PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                    } else {
+                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+                    }
+                }) { success, _ in
+                    cont.resume(returning: success)
+                }
+            }
+            if ok { savedCount += 1 }
+        }
+        isBulkWorking = false
+        UINotificationFeedbackGenerator().notificationOccurred(savedCount > 0 ? .success : .error)
+        showBulkToast("Saved \(savedCount)/\(targets.count) to Photos!")
+    }
+
+    private func showBulkToast(_ msg: String) {
+        bulkToast = msg
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if bulkToast == msg { bulkToast = nil }
         }
     }
 }
