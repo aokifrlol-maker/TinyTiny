@@ -28,6 +28,7 @@ const ICONS = {
   plus: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
   check: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
   chevDown: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`,
+  chevRight: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`,
   chevUp: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`,
   flame: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.5 3.5-2 5.5-2 8.5 0 1.8 1.2 3.2 2.8 3.2 1.7 0 2.7-1.4 2.7-3.2 0-1-.3-2-.8-2.8C17.5 9.2 19 12 19 14.8A7 7 0 1 1 5 14.8c0-4.2 3-7.6 7-12.8z"/></svg>`,
   lock: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4" fill="none" stroke="currentColor" stroke-width="2.2"/></svg>`,
@@ -99,6 +100,7 @@ const state = {
   loading: false,
   error: "",
   speedLocked2x: false,
+  drawerOpen: false,
   activeModal: null, // null | 'settings' | 'categories' | { type:'more'|'share', idx:number }
   showInstallHint:
     !window.matchMedia("(display-mode: standalone)").matches &&
@@ -505,17 +507,29 @@ function renderPasscodeGate(mode) {
 
 let reelObserver = null;
 
+function channelLabel() {
+  if (state.customFilter) return state.customFilter.label;
+  if (state.channel === "following") return "Following";
+  if (state.channel === "forYou") return "For You";
+  if (state.channel === "rule34") return "Rule 34";
+  if (state.channel === "of") return `OF · ${state.ofSub === "trending" ? "Trending" : state.ofSub === "latest" ? "Latest" : "For You"}`;
+  if (state.channel === "long") return "Videos";
+  return "For You";
+}
+
 function renderMainApp() {
   if (state.tab === "home" && state.items.length === 0 && !state.loading && !state.error) {
     loadFeed(false);
   }
 
   root.innerHTML = `
-    <div class="main-shell">
-      ${state.tab === "home" ? renderHomeView() : ""}
-      ${state.tab === "favorites" ? renderFavoritesView() : ""}
-      ${state.tab === "explore" ? renderExploreView() : ""}
-      ${state.tab === "profile" ? renderProfileView() : ""}
+    <div class="cinema-shell">
+      <div class="stage-area">
+        ${state.tab === "home" ? renderHomeView() : ""}
+        ${state.tab === "favorites" ? renderFavoritesView() : ""}
+        ${state.tab === "explore" ? renderExploreView() : ""}
+        ${state.tab === "profile" ? renderProfileView() : ""}
+      </div>
 
       ${state.showInstallHint ? `
         <div class="glass-pill install-banner">
@@ -524,11 +538,11 @@ function renderMainApp() {
         </div>
       ` : ""}
 
-      <div class="glass-pill bottom-dock">
-        <button class="dock-btn ${state.tab === "home" ? "active" : ""}" data-tab="home">${ICONS.home}</button>
-        <button class="dock-btn ${state.tab === "favorites" ? "active" : ""}" data-tab="favorites">${ICONS.heart}</button>
-        <button class="dock-btn ${state.tab === "explore" ? "active" : ""}" data-tab="explore">${ICONS.compass}</button>
-        <button class="dock-btn ${state.tab === "profile" ? "active" : ""}" data-tab="profile">${ICONS.person}</button>
+      <div class="slim-tabbar">
+        <button class="tab-item ${state.tab === "home" ? "active" : ""}" data-tab="home">${ICONS.home}<span>Home</span></button>
+        <button class="tab-item ${state.tab === "favorites" ? "active" : ""}" data-tab="favorites">${ICONS.heart}<span>Saved</span></button>
+        <button class="tab-item ${state.tab === "explore" ? "active" : ""}" data-tab="explore">${ICONS.compass}<span>Explore</span></button>
+        <button class="tab-item ${state.tab === "profile" ? "active" : ""}" data-tab="profile">${ICONS.person}<span>Profile</span></button>
       </div>
 
       ${renderActiveModal()}
@@ -536,7 +550,7 @@ function renderMainApp() {
   `;
 
   document.querySelectorAll("[data-tab]").forEach((btn) => {
-    btn.onclick = () => { state.tab = btn.dataset.tab; render(); };
+    btn.onclick = () => { state.tab = btn.dataset.tab; state.drawerOpen = false; render(); };
   });
 
   document.getElementById("dismissInstall")?.addEventListener("click", () => {
@@ -557,41 +571,53 @@ function renderHomeView() {
   const showLongSubs = state.channel === "long" && !state.customFilter;
 
   return `
-    ${!state.controlsCollapsed ? `
-      <div class="top-bar-wrap">
-        <div class="top-row">
-          <button id="topSearchBtn" class="icon-circle">${ICONS.search}</button>
-          <div class="channel-strip">
-            ${state.customFilter ? `
-              <button id="clearFilterBtn" class="ch-pill active">${escapeHtml(state.customFilter.label)} ✕</button>
-            ` : `
-              <button class="ch-pill ${state.channel === "following" ? "active" : ""}" data-ch="following">Following</button>
-              <button class="ch-pill ${state.channel === "forYou" ? "active" : ""}" data-ch="forYou">For You</button>
-              <button class="badge-btn badge-r34 ${state.channel === "rule34" ? "active" : ""}" data-ch="rule34">34</button>
-              <button class="badge-btn badge-of ${state.channel === "of" ? "active" : ""}" data-ch="of">OF</button>
-              <button class="badge-btn badge-long ${state.channel === "long" ? "active" : ""}" data-ch="long">${ICONS.playSmall}</button>
-            `}
-          </div>
-          <button id="topSettingsBtn" class="icon-circle">${ICONS.gear}</button>
+    <button id="drawerTrigger" class="drawer-trigger">
+      <span>${escapeHtml(channelLabel())}</span>
+      ${ICONS.chevRight}
+    </button>
+
+    <div id="drawerBackdrop" class="drawer-backdrop ${state.drawerOpen ? "open" : ""}"></div>
+    <div id="slideDrawer" class="slide-drawer ${state.drawerOpen ? "open" : ""}">
+      <div class="drawer-row" style="justify-content:space-between;">
+        <div class="drawer-row" style="flex:1;">
+          ${state.customFilter ? `
+            <button id="clearFilterBtn" class="ch-pill active">${escapeHtml(state.customFilter.label)} ✕</button>
+          ` : `
+            <button class="ch-pill ${state.channel === "following" ? "active" : ""}" data-ch="following">Following</button>
+            <button class="ch-pill ${state.channel === "forYou" ? "active" : ""}" data-ch="forYou">For You</button>
+            <button class="badge-btn badge-r34 ${state.channel === "rule34" ? "active" : ""}" data-ch="rule34">34</button>
+            <button class="badge-btn badge-of ${state.channel === "of" ? "active" : ""}" data-ch="of">OF</button>
+            <button class="badge-btn badge-long ${state.channel === "long" ? "active" : ""}" data-ch="long">${ICONS.playSmall}</button>
+          `}
         </div>
-
-        ${showOFSubs ? `
-          <div class="subtab-pill">
-            ${[["forYou","For You"],["trending","Trending"],["latest","Latest"]].map(([k, lbl]) => `
-              <button class="subtab-btn ${state.ofSub === k ? "active" : ""}" data-ofsub="${k}">${lbl}</button>
-            `).join("")}
-          </div>
-        ` : ""}
-
-        ${showLongSubs ? `
-          <div class="subtab-pill">
-            ${[["latest","Latest"],["top","Top"],["trending","Trending"]].map(([k, lbl]) => `
-              <button class="subtab-btn ${state.longSub === k ? "active" : ""}" data-longsub="${k}">${lbl}</button>
-            `).join("")}
-          </div>
-        ` : ""}
+        <button id="drawerClose" class="ch-pill" style="padding:7px 10px;">${ICONS.chevUp}</button>
       </div>
-    ` : ""}
+
+      ${showOFSubs ? `
+        <div class="subtab-pill">
+          ${[["forYou","For You"],["trending","Trending"],["latest","Latest"]].map(([k, lbl]) => `
+            <button class="subtab-btn ${state.ofSub === k ? "active" : ""}" data-ofsub="${k}">${lbl}</button>
+          `).join("")}
+        </div>
+      ` : ""}
+
+      ${showLongSubs ? `
+        <div class="subtab-pill">
+          ${[["latest","Latest"],["top","Top"],["trending","Trending"]].map(([k, lbl]) => `
+            <button class="subtab-btn ${state.longSub === k ? "active" : ""}" data-longsub="${k}">${lbl}</button>
+          `).join("")}
+        </div>
+      ` : ""}
+
+      <div class="drawer-row">
+        <button class="ch-pill" id="drSort">${ICONS.flame} ${state.sort.toUpperCase()}</button>
+        <button class="ch-pill" id="drCats">${ICONS.grid} Categories</button>
+        <button class="ch-pill" id="drShuffle">${ICONS.shuffle} Shuffle</button>
+        <button class="ch-pill ${state.autoScroll ? "active" : ""}" id="drAuto">${ICONS.autoScroll} Auto</button>
+        <button class="ch-pill ${state.fitMode ? "active" : ""}" id="drFit">${state.fitMode ? "Fit" : "Fill"}</button>
+        <button class="ch-pill" id="drSettings">${ICONS.gear} Settings</button>
+      </div>
+    </div>
 
     ${state.speedLocked2x ? `<div class="glass-pill speed-badge">${ICONS.lock} 2x Locked · Tap to Unlock</div>` : ""}
 
@@ -610,7 +636,6 @@ function renderHomeView() {
 
 function renderReelCell(item, idx) {
   const isLiked = state.liked.some((x) => x.id === item.id);
-  const isSaved = state.saved.some((x) => x.id === item.id);
   const isFollowed = item.subreddit && state.following.includes(item.subreddit);
   const fitClass = state.fitMode ? "fit" : "";
 
@@ -623,32 +648,12 @@ function renderReelCell(item, idx) {
           playsinline webkit-playsinline loop preload="${idx < 2 ? "auto" : "metadata"}" ${state.muted ? "muted" : ""}></video>
       `}
 
-      ${!state.controlsCollapsed ? `
-        <div class="left-cluster">
-          <div class="left-top-pills">
-            <button class="mini-pill" data-sort-cycle="${idx}">${ICONS.flame} ${state.sort.toUpperCase()}</button>
-            <button class="mini-pill ${state.fitMode ? "active" : ""}" data-fit="${idx}">${state.fitMode ? "Fit" : "Fill"}</button>
-            <button class="mini-pill" data-collapse="${idx}">${ICONS.chevDown}</button>
-          </div>
-          <button class="ctrl-circle" data-mute="${idx}" title="Mute">${state.muted ? ICONS.volOff : ICONS.volOn}</button>
-          <button class="ctrl-circle" data-cats="${idx}" title="Categories">${ICONS.grid}</button>
-          <button class="ctrl-circle" data-shuffle="${idx}" title="Shuffle">${ICONS.shuffle}</button>
-          <button class="ctrl-circle ${state.autoScroll ? "active" : ""}" data-autoscroll="${idx}" title="Auto Scroll">${ICONS.autoScroll}</button>
-          ${item.subreddit ? `<button class="ctrl-circle ${isFollowed ? "active" : ""}" data-follow="${idx}" title="Follow">${isFollowed ? ICONS.check : ICONS.plus}</button>` : ""}
-        </div>
-      ` : `
-        <div style="position:absolute;bottom:calc(var(--safe-bottom) + 74px);left:14px;z-index:12;">
-          <button class="mini-pill" data-collapse="${idx}">${ICONS.chevUp} Controls</button>
-        </div>
-      `}
-
       <div class="reel-actions">
         <div class="act-wrap">
           <button class="act-btn ${isLiked ? "liked" : ""}" data-like="${idx}">${ICONS.heart}</button>
           ${item.upvotes ? `<span class="act-count">${formatCount(item.upvotes)}</span>` : ""}
         </div>
-        <button class="act-btn ${isSaved ? "saved" : ""}" data-save="${idx}">${ICONS.bookmark}</button>
-        <button class="act-btn" data-dislike="${idx}">${ICONS.thumbsDown}</button>
+        ${!item.isImage && item.videoUrl ? `<button class="act-btn" data-mute="${idx}">${state.muted ? ICONS.volOff : ICONS.volOn}</button>` : ""}
         <button class="act-btn" data-share="${idx}">${ICONS.share}</button>
         <button class="act-btn" data-more="${idx}">${ICONS.more}</button>
       </div>
@@ -660,9 +665,12 @@ function renderReelCell(item, idx) {
       ` : ""}
 
       <div class="reel-overlay-bottom">
-        <button class="creator-chip" data-creator="${idx}">
-          ${item.subreddit ? `r/${escapeHtml(item.subreddit)}` : `@${escapeHtml(item.author || "post")}`}
-        </button>
+        <div class="creator-row">
+          <button class="creator-chip" data-creator="${idx}">
+            ${item.subreddit ? `r/${escapeHtml(item.subreddit)}` : `@${escapeHtml(item.author || "post")}`}
+          </button>
+          ${item.subreddit ? `<button class="follow-mini ${isFollowed ? "active" : ""}" data-follow="${idx}">${isFollowed ? ICONS.check : ICONS.plus}</button>` : ""}
+        </div>
         ${item.title ? `<div class="reel-title">${escapeHtml(item.title)}</div>` : ""}
       </div>
     </div>
@@ -670,43 +678,60 @@ function renderReelCell(item, idx) {
 }
 
 function bindHomeEvents() {
-  document.getElementById("topSearchBtn")?.addEventListener("click", () => { state.tab = "explore"; render(); });
-  document.getElementById("topSettingsBtn")?.addEventListener("click", () => { state.activeModal = "settings"; render(); });
-  document.getElementById("clearFilterBtn")?.addEventListener("click", () => { state.customFilter = null; loadFeed(true); });
+  const toggleDrawer = (open) => {
+    state.drawerOpen = open;
+    document.getElementById("slideDrawer")?.classList.toggle("open", open);
+    document.getElementById("drawerBackdrop")?.classList.toggle("open", open);
+  };
+  document.getElementById("drawerTrigger")?.addEventListener("click", () => toggleDrawer(true));
+  document.getElementById("drawerClose")?.addEventListener("click", () => toggleDrawer(false));
+  document.getElementById("drawerBackdrop")?.addEventListener("click", () => toggleDrawer(false));
+
+  document.getElementById("clearFilterBtn")?.addEventListener("click", () => { state.customFilter = null; state.drawerOpen = false; loadFeed(true); });
 
   document.querySelectorAll("[data-ch]").forEach((btn) => {
-    btn.onclick = () => { state.channel = btn.dataset.ch; state.customFilter = null; loadFeed(true); };
+    btn.onclick = () => { state.channel = btn.dataset.ch; state.customFilter = null; state.drawerOpen = false; loadFeed(true); };
   });
   document.querySelectorAll("[data-ofsub]").forEach((btn) => {
-    btn.onclick = () => { state.ofSub = btn.dataset.ofsub; loadFeed(true); };
+    btn.onclick = () => { state.ofSub = btn.dataset.ofsub; state.drawerOpen = false; loadFeed(true); };
   });
   document.querySelectorAll("[data-longsub]").forEach((btn) => {
-    btn.onclick = () => { state.longSub = btn.dataset.longsub; loadFeed(true); };
+    btn.onclick = () => { state.longSub = btn.dataset.longsub; state.drawerOpen = false; loadFeed(true); };
   });
   document.getElementById("retryFeedBtn")?.addEventListener("click", () => loadFeed(true));
 
-  document.querySelectorAll("[data-sort-cycle]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      const order = ["hot", "top", "new"];
-      state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
-      loadFeed(true);
-    };
+  document.getElementById("drSort")?.addEventListener("click", () => {
+    const order = ["hot", "top", "new"];
+    state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
+    state.drawerOpen = false;
+    loadFeed(true);
   });
-  document.querySelectorAll("[data-fit]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.fitMode = !state.fitMode;
-      saveStore();
-      render();
-    };
+  document.getElementById("drCats")?.addEventListener("click", () => {
+    state.drawerOpen = false;
+    state.activeModal = "categories";
+    render();
   });
-  document.querySelectorAll("[data-collapse]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.controlsCollapsed = !state.controlsCollapsed;
-      render();
-    };
+  document.getElementById("drShuffle")?.addEventListener("click", () => {
+    state.items.sort(() => Math.random() - 0.5);
+    state.drawerOpen = false;
+    showToast("Shuffled feed");
+    render();
+  });
+  document.getElementById("drAuto")?.addEventListener("click", () => {
+    state.autoScroll = !state.autoScroll;
+    saveStore();
+    showToast(state.autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF");
+    render();
+  });
+  document.getElementById("drFit")?.addEventListener("click", () => {
+    state.fitMode = !state.fitMode;
+    saveStore();
+    render();
+  });
+  document.getElementById("drSettings")?.addEventListener("click", () => {
+    state.drawerOpen = false;
+    state.activeModal = "settings";
+    render();
   });
   document.querySelectorAll("[data-mute]").forEach((b) => {
     b.onclick = (e) => {
@@ -1001,6 +1026,7 @@ function renderActiveModal() {
     }
     if (state.activeModal.type === "more") {
       const dlUrl = item.videoUrl || item.imageUrl;
+      const isSaved = state.saved.some((x) => x.id === item.id);
       return `
         <div class="sheet-backdrop" id="modalBackdrop">
           <div class="sheet-panel">
@@ -1008,6 +1034,8 @@ function renderActiveModal() {
             <h3 style="margin:0 0 6px;font-size:18px;font-weight:900;">${escapeHtml(item.subreddit ? `r/${item.subreddit}` : `@${item.author}`)}</h3>
             <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">${escapeHtml(item.title)}</p>
             <div style="display:flex;flex-direction:column;gap:10px;">
+              <button id="moreSaveBtn" class="btn-primary" style="background:rgba(255,255,255,0.12);box-shadow:none;">${isSaved ? "Remove from Saved" : "Save to Vault"}</button>
+              <button id="moreDislikeBtn" class="btn-primary" style="background:rgba(255,255,255,0.12);box-shadow:none;">Not Interested (Hide)</button>
               ${dlUrl ? `<a class="btn-primary" style="text-align:center;text-decoration:none;" href="${escapeHtml(dlUrl)}" download="gooned_${escapeHtml(item.id)}.mp4">Download Media</a>` : ""}
               ${item.permalink || item.externalUrl ? `<a class="btn-primary" style="text-align:center;text-decoration:none;background:rgba(255,255,255,0.12);box-shadow:none;" href="${escapeHtml(item.permalink || item.externalUrl)}" target="_blank">Open Original Source</a>` : ""}
             </div>
@@ -1042,6 +1070,25 @@ function bindModalEvents() {
       else if (cat.r34) state.customFilter = { type: "r34", value: cat.r34, label: cat.label };
       loadFeed(true);
     };
+  });
+  document.getElementById("moreSaveBtn")?.addEventListener("click", () => {
+    const item = state.items[state.activeModal.idx];
+    toggleList(state.saved, item);
+    state.activeModal = null;
+    showToast("Updated Saved Vault");
+    render();
+  });
+  document.getElementById("moreDislikeBtn")?.addEventListener("click", () => {
+    const idx = state.activeModal.idx;
+    const item = state.items[idx];
+    if (item) {
+      state.dislikedIds.add(item.id);
+      state.items.splice(idx, 1);
+      saveStore();
+    }
+    state.activeModal = null;
+    showToast("Hidden from feed");
+    render();
   });
   document.getElementById("shareCopyBtn")?.addEventListener("click", async () => {
     const item = state.items[state.activeModal.idx];
