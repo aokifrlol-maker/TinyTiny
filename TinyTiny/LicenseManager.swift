@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import Security
 import CryptoKit
+import WebKit
 
 // MARK: - Persistent License + Encrypted Profile Backup Manager
 
@@ -267,6 +268,13 @@ final class LicenseManager: ObservableObject {
             for item in backup.userData.liked where existingIds.insert(item.id).inserted {
                 UserStore.shared.data.liked.append(item)
             }
+            var savedIds = Set(UserStore.shared.data.saved.map(\.id))
+            for item in backup.userData.saved where savedIds.insert(item.id).inserted {
+                UserStore.shared.data.saved.append(item)
+            }
+            for id in backup.userData.dislikedPostIDs where !UserStore.shared.data.dislikedPostIDs.contains(id) {
+                UserStore.shared.data.dislikedPostIDs.append(id)
+            }
             for s in backup.userData.followedSubreddits where !UserStore.shared.isFollowingSubreddit(s) {
                 UserStore.shared.toggleFollowSubreddit(s)
             }
@@ -279,9 +287,75 @@ final class LicenseManager: ObservableObject {
             for of in backup.userData.followedOFCreators where !UserStore.shared.isFollowingOFCreator(id: of.id, handle: of.name) {
                 UserStore.shared.toggleFollowOFCreator(id: of.id, name: of.name, displayName: of.displayName)
             }
+            for tag in backup.userData.followedRule34Tags where !UserStore.shared.data.followedRule34Tags.contains(tag) {
+                UserStore.shared.data.followedRule34Tags.append(tag)
+            }
+            if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
+                UserStore.shared.data.xSession = backup.userData.xSession
+            }
+            if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
+                UserStore.shared.data.igSession = backup.userData.igSession
+            }
         }
         SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
         CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey)
+        UserStore.shared.saveNow()
+        await injectRestoredSocialCookies()
+    }
+
+    private func injectRestoredSocialCookies() async {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        let x = UserStore.shared.data.xSession
+        if x.isConnected {
+            let xPairs: [(String, String)] = [
+                ("auth_token", x.authToken),
+                ("ct0", x.ct0Token),
+            ]
+            for (name, val) in xPairs where !val.isEmpty {
+                for domain in [".x.com", ".twitter.com"] {
+                    if let cookie = HTTPCookie(properties: [
+                        .domain: domain,
+                        .path: "/",
+                        .name: name,
+                        .value: val,
+                        .secure: "TRUE",
+                        .expires: Date().addingTimeInterval(365 * 86400)
+                    ]) {
+                        await store.setCookie(cookie)
+                    }
+                }
+            }
+        }
+        let ig = UserStore.shared.data.igSession
+        if ig.isConnected {
+            let igPairs: [(String, String)] = [
+                ("sessionid", ig.sessionId),
+                ("csrftoken", ig.csrfToken),
+                ("ds_user_id", ig.userId),
+            ]
+            for (name, val) in igPairs where !val.isEmpty {
+                if let cookie = HTTPCookie(properties: [
+                    .domain: ".instagram.com",
+                    .path: "/",
+                    .name: name,
+                    .value: val,
+                    .secure: "TRUE",
+                    .expires: Date().addingTimeInterval(365 * 86400)
+                ]) {
+                    await store.setCookie(cookie)
+                }
+            }
+        }
+    }
+
+    func syncBidirectionalBackup() async -> String {
+        await restoreEncryptedBackupIfPresent()
+        await syncEncryptedBackupNow()
+        let d = UserStore.shared.data
+        var parts = ["\(d.liked.count) likes", "\(d.saved.count) saved"]
+        if d.xSession.isConnected { parts.append("X login") }
+        if d.igSession.isConnected { parts.append("IG login") }
+        return "Synced: " + parts.joined(separator: " · ")
     }
 
     // MARK: - Encrypted Drop Relay Helper

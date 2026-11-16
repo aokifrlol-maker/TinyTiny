@@ -2381,8 +2381,7 @@ struct GoonedSettingsModal: View {
                                     Button {
                                         Task {
                                             syncStatusMessage = "Syncing..."
-                                            await license.syncEncryptedBackupNow()
-                                            syncStatusMessage = "Backup encrypted & synced"
+                                            syncStatusMessage = await license.syncBidirectionalBackup()
                                         }
                                     } label: {
                                         Text("Sync Backup")

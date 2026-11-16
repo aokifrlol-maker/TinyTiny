@@ -773,39 +773,69 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
-        let auth = await fullIGCookieAndCSRF(from: session)
-        guard let url = URL(string: "https://i.instagram.com/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5") else {
-            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid inbox URL"])
+        let wv = await ensureWebView()
+        let js = """
+        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || fallbackCsrf || '';
+        const headers = {
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '129477',
+            'X-CSRFToken': csrf,
+            'X-Requested-With': 'XMLHttpRequest'
+        };
+        const urls = [
+            'https://www.instagram.com/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5',
+            'https://i.instagram.com/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5'
+        ];
+        let lastCode = 0;
+        let lastMsg = '';
+        for (const u of urls) {
+            try {
+                const r = await fetch(u, { credentials: 'include', headers });
+                lastCode = r.status;
+                const txt = await r.text();
+                if (r.ok) {
+                    const data = JSON.parse(txt);
+                    const threads = (data && data.inbox && data.inbox.threads) ? data.inbox.threads : [];
+                    return JSON.stringify({
+                        ok: true,
+                        threads: threads.map(t => ({
+                            id: String(t.thread_id || ''),
+                            isGroup: Boolean(t.is_group),
+                            title: String(t.thread_title || '').trim() || (t.users || []).slice(0, 3).map(u => u.username).filter(Boolean).join(', ') || 'Direct Chat',
+                            memberCount: (t.users ? t.users.length : 0) + 1
+                        })).filter(t => t.id)
+                    });
+                }
+                try { lastMsg = JSON.parse(txt).message || ''; } catch {}
+            } catch (e) {
+                lastMsg = String(e);
+            }
         }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 12
-        req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        req.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
-        req.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
-        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        req.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-        req.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-        req.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(code),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let inbox = json["inbox"] as? [String: Any],
-              let threads = inbox["threads"] as? [[String: Any]] else {
-            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
-            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: msg ?? "Could not load IG inbox (HTTP \(code))."])
+        return JSON.stringify({ ok: false, code: lastCode, message: lastMsg });
+        """
+        let rawObj = try await wv.callAsyncJavaScript(
+            js,
+            arguments: ["fallbackCsrf": session.csrfToken],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let rawStr = rawObj as? String,
+              let jsonData = rawStr.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            throw NSError(domain: "IGDirect", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to read IG inbox response."])
         }
-
-        return threads.compactMap { t in
-            guard let tid = t["thread_id"] as? String, !tid.isEmpty else { return nil }
-            let isGroup = (t["is_group"] as? Bool) ?? false
-            let users = (t["users"] as? [[String: Any]]) ?? []
-            let rawTitle = (t["thread_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let fallbackNames = users.compactMap { $0["username"] as? String }.prefix(3).joined(separator: ", ")
-            let title = rawTitle.isEmpty ? (fallbackNames.isEmpty ? "Direct Chat" : fallbackNames) : rawTitle
-            return IGDirectThread(id: tid, title: title, isGroup: isGroup, memberCount: users.count + 1)
+        guard (parsed["ok"] as? Bool) == true,
+              let arr = parsed["threads"] as? [[String: Any]] else {
+            let code = (parsed["code"] as? Int) ?? 0
+            let msg = (parsed["message"] as? String) ?? ""
+            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: msg.isEmpty ? "Could not load IG inbox (HTTP \(code))." : msg])
+        }
+        return arr.compactMap { t in
+            guard let id = t["id"] as? String, !id.isEmpty else { return nil }
+            let title = (t["title"] as? String) ?? "Direct Chat"
+            let isGroup = (t["isGroup"] as? Bool) ?? false
+            let count = (t["memberCount"] as? Int) ?? 2
+            return IGDirectThread(id: id, title: title, isGroup: isGroup, memberCount: count)
         }
     }
 
@@ -814,7 +844,6 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
-        let auth = await fullIGCookieAndCSRF(from: session)
 
         // 1. Buffer MP4 strictly in memory (never saved to Photos or phone storage)
         var dlReq = URLRequest(url: videoURL)
@@ -829,71 +858,100 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             throw NSError(domain: "IGDirect", code: dlCode, userInfo: [NSLocalizedDescriptionKey: "Could not fetch MP4 stream (HTTP \(dlCode))."])
         }
 
-        // 2. Upload MP4 bytes to Instagram rupload_igvideo
+        // 2. Upload & send via authenticated WKWebView
+        let wv = await ensureWebView()
+        let b64 = mp4Data.base64EncodedString()
         let uploadId = String(Int64(Date().timeIntervalSince1970 * 1000))
-        let entityName = "fb_uploader_\(uploadId)"
-        guard let upURL = URL(string: "https://i.instagram.com/rupload_igvideo/\(entityName)") else {
-            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid upload URL"])
-        }
-        let ruploadParams: [String: Any] = [
-            "media_type": 2,
-            "upload_id": uploadId,
-            "upload_media_height": 720,
-            "upload_media_width": 720
-        ]
-        let paramsJSON = String(data: (try? JSONSerialization.data(withJSONObject: ruploadParams)) ?? Data(), encoding: .utf8) ?? "{}"
-
-        var upReq = URLRequest(url: upURL)
-        upReq.httpMethod = "POST"
-        upReq.timeoutInterval = 60
-        upReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-        upReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        upReq.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
-        upReq.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
-        upReq.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-        upReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-        upReq.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
-        upReq.setValue(paramsJSON, forHTTPHeaderField: "X-Instagram-Rupload-Params")
-        upReq.setValue(entityName, forHTTPHeaderField: "X-Entity-Name")
-        upReq.setValue(String(mp4Data.count), forHTTPHeaderField: "X-Entity-Length")
-        upReq.setValue("0", forHTTPHeaderField: "Offset")
-        upReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        upReq.httpBody = mp4Data
-
-        let (upData, upResp) = try await URLSession.shared.data(for: upReq)
-        let upCode = (upResp as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(upCode) else {
-            let msg = (try? JSONSerialization.jsonObject(with: upData) as? [String: Any])?["message"] as? String
-            throw NSError(domain: "IGDirect", code: upCode, userInfo: [NSLocalizedDescriptionKey: msg ?? "IG video upload rejected (HTTP \(upCode))."])
-        }
-
-        // 3. Configure & send video directly into DM / Group Chat thread
-        guard let sendURL = URL(string: "https://i.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/") else {
-            throw NSError(domain: "IGDirect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid send URL"])
-        }
         let clientCtx = UUID().uuidString.lowercased()
-        let threadArr = "[\"\(threadId)\"]"
-        let bodyStr = "action=send_item&client_context=\(clientCtx)&thread_ids=\(threadArr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? threadArr)&upload_id=\(uploadId)"
 
-        var sendReq = URLRequest(url: sendURL)
-        sendReq.httpMethod = "POST"
-        sendReq.timeoutInterval = 20
-        sendReq.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-        sendReq.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        sendReq.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
-        sendReq.setValue(auth.csrf, forHTTPHeaderField: "X-CSRFToken")
-        sendReq.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        sendReq.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-        sendReq.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-        sendReq.setValue(auth.cookie, forHTTPHeaderField: "Cookie")
-        sendReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        sendReq.httpBody = bodyStr.data(using: .utf8)
+        let js = """
+        const bin = atob(mp4B64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-        let (sendData, sendResp) = try await URLSession.shared.data(for: sendReq)
-        let sendCode = (sendResp as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(sendCode) else {
-            let msg = (try? JSONSerialization.jsonObject(with: sendData) as? [String: Any])?["message"] as? String
-            throw NSError(domain: "IGDirect", code: sendCode, userInfo: [NSLocalizedDescriptionKey: msg ?? "IG rejected sending to this chat (HTTP \(sendCode))."])
+        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || fallbackCsrf || '';
+        const entityName = 'fb_uploader_' + uploadId;
+        const ruploadParams = JSON.stringify({
+            media_type: 2,
+            upload_id: uploadId,
+            upload_media_height: 720,
+            upload_media_width: 720
+        });
+
+        const upResp = await fetch('https://i.instagram.com/rupload_igvideo/' + entityName, {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'X-IG-App-ID': '936619743392459',
+                'X-ASBD-ID': '129477',
+                'X-CSRFToken': csrf,
+                'X-Instagram-Rupload-Params': ruploadParams,
+                'X-Entity-Name': entityName,
+                'X-Entity-Length': String(bytes.byteLength),
+                'Offset': '0',
+                'Content-Type': 'application/octet-stream'
+            },
+            body: bytes
+        });
+        if (!upResp.ok) {
+            const t = await upResp.text();
+            let m = '';
+            try { m = JSON.parse(t).message || ''; } catch {}
+            return JSON.stringify({ ok: false, code: upResp.status, message: m || ('Upload rejected (HTTP ' + upResp.status + ')') });
+        }
+
+        const bodyStr = 'action=send_item&client_context=' + encodeURIComponent(clientCtx) +
+            '&thread_ids=' + encodeURIComponent(JSON.stringify([threadId])) +
+            '&upload_id=' + encodeURIComponent(uploadId);
+
+        const sendUrls = [
+            'https://www.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/',
+            'https://i.instagram.com/api/v1/direct_v2/threads/broadcast/configure_video/'
+        ];
+        let lastCode = 0;
+        let lastMsg = '';
+        for (const su of sendUrls) {
+            const sr = await fetch(su, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'X-IG-App-ID': '936619743392459',
+                    'X-ASBD-ID': '129477',
+                    'X-CSRFToken': csrf,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: bodyStr
+            });
+            lastCode = sr.status;
+            if (sr.ok) return JSON.stringify({ ok: true });
+            const st = await sr.text();
+            try { lastMsg = JSON.parse(st).message || ''; } catch {}
+        }
+        return JSON.stringify({ ok: false, code: lastCode, message: lastMsg || ('IG rejected send (HTTP ' + lastCode + ')') });
+        """
+
+        let rawObj = try await wv.callAsyncJavaScript(
+            js,
+            arguments: [
+                "mp4B64": b64,
+                "uploadId": uploadId,
+                "clientCtx": clientCtx,
+                "threadId": threadId,
+                "fallbackCsrf": session.csrfToken
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let rawStr = rawObj as? String,
+              let jsonData = rawStr.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            throw NSError(domain: "IGDirect", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to read IG send response."])
+        }
+        guard (parsed["ok"] as? Bool) == true else {
+            let code = (parsed["code"] as? Int) ?? 0
+            let msg = (parsed["message"] as? String) ?? "IG rejected sending to this chat (HTTP \(code))."
+            throw NSError(domain: "IGDirect", code: code, userInfo: [NSLocalizedDescriptionKey: msg])
         }
     }
 
