@@ -233,6 +233,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     static let shared = InstagramWebEngine()
 
     private var webView: WKWebView?
+    private var directWebView: WKWebView?
     private var activeRouteKey: String = ""
     private var routeBuffers: [String: [Gif]] = [:]
     private var seenIds = Set<String>()
@@ -391,7 +392,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
             function postPayload(url, body) {
                 if (!body || body.length < 20) return;
-                if (body.indexOf('"thread_id"') !== -1 && (url || '').indexOf('direct') !== -1) {
+                if (body.indexOf('"thread_id"') !== -1 || body.indexOf('"thread_v2_id"') !== -1 || body.indexOf('"ig_thread_id"') !== -1) {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.igBridge) {
                         window.webkit.messageHandlers.igBridge.postMessage({ type: 'inbox', url: url || '', body: body });
                     }
@@ -498,19 +499,11 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         if type == "inbox",
            let jsonText = body["body"] as? String,
            let data = jsonText.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let inbox = json["inbox"] as? [String: Any],
-           let threads = inbox["threads"] as? [[String: Any]] {
-            let parsed = threads.compactMap { t -> IGDirectThread? in
-                guard let tid = t["thread_id"] as? String, !tid.isEmpty else { return nil }
-                let isGroup = (t["is_group"] as? Bool) ?? false
-                let users = (t["users"] as? [[String: Any]]) ?? []
-                let rawTitle = (t["thread_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let fallbackNames = users.compactMap { $0["username"] as? String }.prefix(3).joined(separator: ", ")
-                let title = rawTitle.isEmpty ? (fallbackNames.isEmpty ? "Direct Chat" : fallbackNames) : rawTitle
-                return IGDirectThread(id: tid, title: title, isGroup: isGroup, memberCount: users.count + 1)
-            }
-            if !parsed.isEmpty { cachedDirectThreads = parsed }
+           let json = try? JSONSerialization.jsonObject(with: data) {
+            var found: [IGDirectThread] = []
+            var seen = Set<String>()
+            Self.extractThreadsRecursively(from: json, into: &found, seen: &seen)
+            if !found.isEmpty { cachedDirectThreads = found }
             return
         }
 
@@ -794,16 +787,61 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         return (cookieStr, csrf)
     }
 
+    private static func extractThreadsRecursively(from obj: Any, into out: inout [IGDirectThread], seen: inout Set<String>, depth: Int = 0) {
+        guard depth < 14 else { return }
+        if let dict = obj as? [String: Any] {
+            let tid = (dict["thread_id"] as? String)
+                ?? (dict["ig_thread_id"] as? String)
+                ?? (dict["thread_v2_id"] as? String)
+            if let tid, !tid.isEmpty, seen.insert(tid).inserted {
+                let isGroup = (dict["is_group"] as? Bool) ?? false
+                let users = (dict["users"] as? [[String: Any]]) ?? []
+                let rawTitle = (dict["thread_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let fallbackNames = users.compactMap { $0["username"] as? String }.prefix(3).joined(separator: ", ")
+                let title = rawTitle.isEmpty ? (fallbackNames.isEmpty ? "Chat \(tid.suffix(4))" : fallbackNames) : rawTitle
+                out.append(IGDirectThread(id: tid, title: title, isGroup: isGroup, memberCount: max(2, users.count + 1)))
+            }
+            for v in dict.values {
+                extractThreadsRecursively(from: v, into: &out, seen: &seen, depth: depth + 1)
+            }
+        } else if let arr = obj as? [Any] {
+            for item in arr {
+                extractThreadsRecursively(from: item, into: &out, seen: &seen, depth: depth + 1)
+            }
+        }
+    }
+
+    private func ensureDirectWebView() async -> WKWebView {
+        if let existing = directWebView {
+            attachToKeyWindowIfNeeded(existing)
+            await injectStoredCookies(into: existing.configuration.websiteDataStore.httpCookieStore)
+            return existing
+        }
+        let mainWv = await ensureWebView()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.userContentController = mainWv.configuration.userContentController
+        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 800), configuration: config)
+        wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        wv.isHidden = true
+        wv.alpha = 0.01
+        wv.isUserInteractionEnabled = false
+        attachToKeyWindowIfNeeded(wv)
+        await injectStoredCookies(into: wv.configuration.websiteDataStore.httpCookieStore)
+        self.directWebView = wv
+        return wv
+    }
+
     private func ensureOnInstagramInbox(_ wv: WKWebView) async {
         let onDirect = wv.url?.host?.contains("instagram.com") == true && wv.url?.path.contains("/direct/inbox") == true
         if !onDirect {
             wv.load(URLRequest(url: URL(string: "https://www.instagram.com/direct/inbox/")!))
-            for _ in 0..<25 {
+            for _ in 0..<28 {
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                let ready = (try? await wv.evaluateJavaScript("location.origin === 'https://www.instagram.com' && document.readyState !== 'loading'")) as? Bool ?? false
+                let ready = (try? await wv.evaluateJavaScript("location.origin === 'https://www.instagram.com' && document.readyState === 'complete'")) as? Bool ?? false
                 if ready && !wv.isLoading { break }
             }
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
         }
     }
 
@@ -812,19 +850,52 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
-        let wv = await ensureWebView()
+        let wv = await ensureDirectWebView()
         await ensureOnInstagramInbox(wv)
 
-        // 1. If Instagram Web's own inbox XHR was intercepted, return immediately
+        // 1. If Instagram Desktop Web's own inbox XHR/GraphQL was intercepted, return immediately
         if !cachedDirectThreads.isEmpty {
             return cachedDirectThreads
         }
 
-        // 2. Try same-origin relative fetch (guaranteed same origin, zero CORS)
+        // 2. Check login redirect, SSR JSON, same-origin API, and live DOM
         let js = """
         try {
+            if (location.pathname.indexOf('/accounts/login') !== -1) {
+                return JSON.stringify({ ok: false, message: 'Instagram session expired — sign in again in the IG tab.' });
+            }
             const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
             const csrf = (csrfMatch && csrfMatch[1]) ? csrfMatch[1] : (fallbackCsrf || '');
+
+            // A. Scan SSR <script type="application/json"> embedded in /direct/inbox/
+            let ssrThreads = [];
+            const seenSSR = new Set();
+            function walkSSR(obj, depth) {
+                if (!obj || depth > 12) return;
+                if (Array.isArray(obj)) {
+                    for (const it of obj) walkSSR(it, depth + 1);
+                    return;
+                }
+                if (typeof obj === 'object') {
+                    const tid = obj.thread_id || obj.ig_thread_id || obj.thread_v2_id;
+                    if (tid && typeof tid === 'string' && !seenSSR.has(tid)) {
+                        seenSSR.add(tid);
+                        const users = Array.isArray(obj.users) ? obj.users : [];
+                        const tTitle = String(obj.thread_title || '').trim() || users.slice(0, 3).map(u => u && u.username).filter(Boolean).join(', ') || ('Chat ' + tid.slice(-4));
+                        ssrThreads.push({ id: tid, isGroup: Boolean(obj.is_group), title: tTitle, memberCount: Math.max(2, users.length + 1) });
+                    }
+                    for (const k of Object.keys(obj)) walkSSR(obj[k], depth + 1);
+                }
+            }
+            for (const s of document.querySelectorAll('script[type="application/json"]')) {
+                try { walkSSR(JSON.parse(s.textContent || ''), 0); } catch {}
+            }
+            if (ssrThreads.length > 0) {
+                return JSON.stringify({ ok: true, threads: ssrThreads });
+            }
+
+            // B. Try same-origin relative REST inbox
+            let apiStatus = 0;
             let apiThreads = [];
             try {
                 const r = await fetch('/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=25&thread_message_limit=5', {
@@ -835,6 +906,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                         'X-Requested-With': 'XMLHttpRequest'
                     }
                 });
+                apiStatus = r.status;
                 if (r.ok) {
                     const data = await r.json();
                     const list = (data && data.inbox && Array.isArray(data.inbox.threads)) ? data.inbox.threads : [];
@@ -846,14 +918,13 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                     })).filter(t => t.id);
                 }
             } catch (e1) {}
-
             if (apiThreads.length > 0) {
                 return JSON.stringify({ ok: true, threads: apiThreads });
             }
 
-            // 3. Fallback: read rendered DM & Group Chat links from the live /direct/inbox/ DOM
+            // C. Fallback: read rendered DM & Group Chat links from Desktop /direct/inbox/ DOM
             const tidRe = new RegExp('/direct/t/([^/?#]+)');
-            for (let attempt = 0; attempt < 8; attempt++) {
+            for (let attempt = 0; attempt < 10; attempt++) {
                 const links = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
                 if (links.length > 0) {
                     const seen = new Set();
@@ -875,7 +946,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                 }
                 await new Promise(r => setTimeout(r, 350));
             }
-            return JSON.stringify({ ok: false, message: 'No chats found on ' + location.pathname + '. Open IG tab once to verify login.' });
+            return JSON.stringify({ ok: false, message: 'Inbox empty on ' + location.pathname + ' (API ' + apiStatus + '). Try opening IG tab once.' });
         } catch (err) {
             return JSON.stringify({ ok: false, message: 'JS: ' + (err && err.message ? err.message : String(err)) });
         }
@@ -967,7 +1038,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         }
 
         // 3. Configure & send via same-origin WKWebView fetch on www.instagram.com
-        let wv = await ensureWebView()
+        let wv = await ensureDirectWebView()
         await ensureOnInstagramInbox(wv)
         let clientCtx = UUID().uuidString.lowercased()
         let sendJS = """
