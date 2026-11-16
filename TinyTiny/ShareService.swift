@@ -301,12 +301,14 @@ final class ShareService: ObservableObject {
 struct ShareItemSheet: View {
     let gif: Gif
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var license = LicenseManager.shared
 
     @State private var generatedCode: String?
     @State private var generatedLink: String?
     @State private var statusNote: String?
     @State private var isCreatingDrop = false
     @State private var showActivitySheet = false
+    @State private var showIGDirectSheet = false
 
     var body: some View {
         NavigationStack {
@@ -413,6 +415,14 @@ struct ShareItemSheet: View {
                     .liquidGlassCard(cornerRadius: 18)
 
                     // 2. Direct File / Post Link via System Share Sheet
+                    if license.isAdmin, !gif.isImage, let mp4URL = gif.allVideoURLs(hd: true).first {
+                        Button {
+                            showIGDirectSheet = true
+                        } label: {
+                            shareRow(icon: "paperplane.circle.fill", text: "Send MP4 to IG DM / Group (Admin)")
+                        }
+                    }
+
                     if let local = OfflineManager.localMediaURL(forId: gif.id) {
                         ShareLink(item: local) {
                             shareRow(icon: "doc.fill", text: "Share Downloaded Video File (AirDrop / Messages)")
@@ -426,6 +436,17 @@ struct ShareItemSheet: View {
                 }
                 .padding(18)
                 .foregroundStyle(.white)
+            }
+            .sheet(isPresented: $showIGDirectSheet) {
+                if let mp4URL = gif.allVideoURLs(hd: true).first {
+                    IGDirectSendSheet(
+                        videoURL: mp4URL,
+                        title: gif.title,
+                        referer: gif.isOnlyFansPost ? "https://cum.st/" : (gif.isLongVideoPost ? "https://www.xvideos.com/" : nil)
+                    )
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                }
             }
             .sheet(isPresented: $showActivitySheet) {
                 if let urlStr = generatedLink, let u = URL(string: urlStr) {
@@ -703,4 +724,171 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - Admin Direct IG DM / Group Chat MP4 Sender Sheet
+
+struct DirectIGDropPayload: Identifiable {
+    let id = UUID()
+    let videoURL: URL
+    let title: String
+    let referer: String?
+
+    static func fetchFromWorker(dropId: String) async -> DirectIGDropPayload? {
+        let base = LicenseManager.shared.normalizedBaseURL
+        guard let url = URL(string: "\(base)/v1/igdrop/\(dropId)"),
+              let (data, resp) = try? await URLSession.shared.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let mp4Str = json["mp4Url"] as? String,
+              let mp4URL = URL(string: mp4Str) else {
+            return nil
+        }
+        let title = (json["title"] as? String) ?? "Video"
+        let ref = mp4Str.contains("xvideos") ? "https://www.xvideos.com/" : nil
+        return DirectIGDropPayload(videoURL: mp4URL, title: title, referer: ref)
+    }
+}
+
+struct IGDirectSendSheet: View {
+    let videoURL: URL
+    let title: String
+    let referer: String?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var threads: [InstagramService.IGDirectThread] = []
+    @State private var isLoading = true
+    @State private var sendingThreadId: String?
+    @State private var statusText: String?
+    @State private var errorText: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Theme.modalGradient.ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Send MP4 to Instagram")
+                                .font(.system(size: 19, weight: .bold))
+                            Text(title.isEmpty ? "In-memory upload (not saved to phone)" : title)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.62))
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 13, weight: .bold))
+                                .frame(width: 32, height: 32)
+                                .liquidGlassCircle()
+                        }
+                    }
+
+                    if let statusText {
+                        Text(statusText)
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.green)
+                    }
+                    if let errorText {
+                        Text(errorText)
+                            .font(.caption.bold())
+                            .foregroundStyle(.red)
+                    }
+
+                    if isLoading {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            ProgressView("Loading IG DMs & Group Chats...")
+                                .tint(Theme.accentBright)
+                            Spacer()
+                        }
+                        Spacer()
+                    } else if threads.isEmpty {
+                        Spacer()
+                        VStack(spacing: 10) {
+                            Text("No Instagram chats loaded.")
+                                .font(.subheadline.bold())
+                            Text("Make sure you are signed into Instagram in the IG tab.")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        .frame(maxWidth: .infinity)
+                        Spacer()
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 10) {
+                                ForEach(threads) { thread in
+                                    Button {
+                                        Task { await send(to: thread) }
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: thread.isGroup ? "person.3.fill" : "person.fill")
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundStyle(Theme.accentBright)
+                                                .frame(width: 36, height: 36)
+                                                .liquidGlassCircle()
+
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(thread.title)
+                                                    .font(.subheadline.bold())
+                                                    .lineLimit(1)
+                                                Text(thread.isGroup ? "Group Chat · \(thread.memberCount) members" : "Direct Message")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.white.opacity(0.55))
+                                            }
+                                            Spacer()
+                                            if sendingThreadId == thread.id {
+                                                ProgressView().tint(.white)
+                                            } else {
+                                                Image(systemName: "paperplane.fill")
+                                                    .foregroundStyle(Theme.accentBright)
+                                            }
+                                        }
+                                        .padding(12)
+                                        .liquidGlassCard(cornerRadius: 16)
+                                    }
+                                    .disabled(sendingThreadId != nil)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(18)
+                .foregroundStyle(.white)
+            }
+            .task { await loadInbox() }
+        }
+    }
+
+    private func loadInbox() async {
+        isLoading = true
+        errorText = nil
+        do {
+            threads = try await InstagramService.shared.fetchDirectThreads()
+        } catch {
+            errorText = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func send(to thread: InstagramService.IGDirectThread) async {
+        sendingThreadId = thread.id
+        errorText = nil
+        statusText = nil
+        do {
+            try await InstagramService.shared.sendMP4ToDirectThread(
+                threadId: thread.id,
+                videoURL: videoURL,
+                referer: referer
+            )
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            statusText = "Sent MP4 to \(thread.title)!"
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            errorText = error.localizedDescription
+        }
+        sendingThreadId = nil
+    }
 }

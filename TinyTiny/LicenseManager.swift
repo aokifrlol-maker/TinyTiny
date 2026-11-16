@@ -7,6 +7,7 @@ import CryptoKit
 
 struct LicenseStatus: Codable, Equatable {
     var licenseKey: String = ""
+    var isAdmin: Bool = false
     var expiresAt: TimeInterval? = nil // nil = lifetime when valid == true
     var isLifetime: Bool = false
     var durationLabel: String = ""
@@ -76,6 +77,10 @@ final class LicenseManager: ObservableObject {
         return true
     }
 
+    var isAdmin: Bool {
+        isValidAccess && status.isAdmin
+    }
+
     var expirySummary: String {
         guard status.isActivated else { return "Not activated" }
         if status.isExpiredOrRevoked { return "Expired / Revoked" }
@@ -136,6 +141,7 @@ final class LicenseManager: ObservableObject {
             if (json["valid"] as? Bool) == true {
                 var next = LicenseStatus()
                 next.licenseKey = cleanKey
+                next.isAdmin = (json["admin"] as? Bool) ?? false
                 next.isActivated = true
                 next.isExpiredOrRevoked = false
                 next.isLifetime = (json["lifetime"] as? Bool) ?? (json["expiresAt"] == nil)
@@ -181,6 +187,7 @@ final class LicenseManager: ObservableObject {
         if let valid = json["valid"] as? Bool {
             next.isExpiredOrRevoked = !valid
             if valid {
+                next.isAdmin = (json["admin"] as? Bool) ?? next.isAdmin
                 next.isLifetime = (json["lifetime"] as? Bool) ?? (json["expiresAt"] == nil)
                 next.expiresAt = json["expiresAt"] as? TimeInterval
                 if let lbl = json["durationLabel"] as? String, !lbl.isEmpty {

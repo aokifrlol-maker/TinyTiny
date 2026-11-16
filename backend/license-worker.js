@@ -165,23 +165,27 @@ async function handleTelegramUpdate(env, update) {
       [
         "<b>TinyTiny License Admin</b>",
         "<code>/gen 30d [maxDevices] [note]</code> — Create key (e.g. 12h, 7d, 30d, 1y, lifetime)",
+        "<code>/genadmin 30d [maxDevices] [note]</code> — Create Admin key (unlocks Direct IG MP4)",
         "<code>/info TT-XXXX-XXXX-XXXX</code> — Inspect key",
         "<code>/list</code> — Recent license keys",
         "<code>/extend TT-XXXX-XXXX-XXXX 30d</code> — Add duration",
         "<code>/unbind TT-XXXX-XXXX-XXXX</code> — Reset device lock",
         "<code>/revoke TT-XXXX-XXXX-XXXX</code> — Revoke key",
+        "<code>/watchit</code> — Sync Seedr Watchit folder",
+        "<code>/directig</code> — Send last XVideos MP4 to IG DM/Group",
       ].join("\n")
     );
     return new Response("ok");
   }
 
-  if (cmd === "/gen") {
+  if (cmd === "/gen" || cmd === "/genadmin") {
+    const isAdminKey = cmd === "/genadmin";
     const durSpec = parseDuration(parts[1] || "30d");
     if (!durSpec) {
       await sendTelegram(
         env,
         chatId,
-        "Invalid duration. Examples: <code>/gen 24h</code>, <code>/gen 7d</code>, <code>/gen 30d 2 Friend</code>, <code>/gen lifetime</code>"
+        `Invalid duration. Examples: <code>${cmd} 24h</code>, <code>${cmd} 7d</code>, <code>${cmd} 30d 2 Friend</code>, <code>${cmd} lifetime</code>`
       );
       return new Response("ok");
     }
@@ -195,6 +199,7 @@ async function handleTelegramUpdate(env, update) {
     const key = generateLicenseKey();
     const rec = {
       key,
+      admin: isAdminKey,
       lifetime: durSpec.lifetime,
       durationSeconds: durSpec.seconds,
       durationLabel: durSpec.label,
@@ -216,7 +221,8 @@ async function handleTelegramUpdate(env, update) {
     await sendTelegram(
       env,
       chatId,
-      `<b>New License Key</b>\nKey: <code>${key}</code>\nDuration: <b>${durSpec.label}</b> (starts on first activation)\nMax Devices: ${maxDevices}` +
+      `<b>New ${isAdminKey ? "ADMIN " : ""}License Key</b>\nKey: <code>${key}</code>\nDuration: <b>${durSpec.label}</b> (starts on first activation)\nMax Devices: ${maxDevices}` +
+        (isAdminKey ? `\nRole: <b>Admin (Direct IG MP4 enabled)</b>` : "") +
         (note ? `\nNote: ${note}` : "")
     );
     return new Response("ok");
@@ -233,6 +239,7 @@ async function handleTelegramUpdate(env, update) {
       chatId,
       [
         `<b>${rec.key}</b>`,
+        rec.admin ? `Role: <b>ADMIN</b>` : `Role: Standard`,
         `Status: <b>${formatRemaining(rec)}</b>`,
         `Devices: ${(rec.deviceIds || []).length}/${rec.maxDevices || 1}`,
         rec.note ? `Note: ${rec.note}` : null,
@@ -322,6 +329,63 @@ async function handleTelegramUpdate(env, update) {
         `Seedr <code>/Watchit/</code> is ready (${res.total} video${res.total === 1 ? "" : "s"} tracked, no new uploads).`
       );
     }
+    return new Response("ok");
+  }
+
+  if (cmd === "/directig") {
+    let mp4Info = null;
+    if (parts[1] && /^https?:\/\//i.test(parts[1])) {
+      if (parts[1].toLowerCase().includes("xvideos.com")) {
+        mp4Info = await extractXVideosMP4(parts[1]);
+      } else {
+        mp4Info = { mp4Url: parts[1], title: "Direct Video", pageUrl: parts[1] };
+      }
+    } else {
+      const saved = await env.LICENSES.get(`admin:last_mp4:${senderId}`);
+      if (saved) mp4Info = JSON.parse(saved);
+    }
+
+    if (!mp4Info || !mp4Info.mp4Url) {
+      await sendTelegram(
+        env,
+        chatId,
+        "No recent MP4 found. Send an XVideos link first, or run <code>/directig https://...</code>"
+      );
+      return new Response("ok");
+    }
+
+    const dropId = randomId(10);
+    await env.LICENSES.put(
+      `igdrop:${dropId}`,
+      JSON.stringify({ mp4Url: mp4Info.mp4Url, title: mp4Info.title || "Video", createdAt: nowSec() }),
+      { expirationTtl: DAY_SEC }
+    );
+    const openUrl = `${getPublicBaseUrl(env)}/ig/${dropId}`;
+    await sendTelegram(
+      env,
+      chatId,
+      `<b>Send MP4 to Instagram DM / Group</b>\n<code>${escapeHtmlTg(mp4Info.title || "Video")}</code>\n\nTap below to list your IG DMs &amp; Group Chats in TinyTiny:\n${openUrl}`
+    );
+    return new Response("ok");
+  }
+
+  // Auto-extract MP4 when Admin pastes an XVideos URL
+  const xvMatch = text.match(/https?:\/\/(?:www\.)?xvideos\.com\/[^\s]+/i);
+  if (xvMatch) {
+    const info = await extractXVideosMP4(xvMatch[0]);
+    if (!info || !info.mp4Url) {
+      await sendTelegram(env, chatId, "Could not extract an MP4 from that XVideos link.");
+      return new Response("ok");
+    }
+    const xvId = randomId(10);
+    await env.LICENSES.put(`xv:${xvId}`, JSON.stringify(info), { expirationTtl: DAY_SEC });
+    await env.LICENSES.put(`admin:last_mp4:${senderId}`, JSON.stringify(info), { expirationTtl: DAY_SEC });
+    const proxyMp4 = `${getPublicBaseUrl(env)}/xv/${xvId}/video.mp4`;
+    await sendTelegram(
+      env,
+      chatId,
+      `<b>XVideos MP4 Ready</b>\n<code>${escapeHtmlTg(info.title)}</code>\n\nMP4 Link:\n${proxyMp4}\n\nRun <code>/directig</code> to pick an Instagram DM or Group Chat.`
+    );
     return new Response("ok");
   }
 
@@ -791,6 +855,7 @@ export default {
 
       return json({
         valid: true,
+        admin: Boolean(rec.admin),
         lifetime: Boolean(rec.lifetime),
         expiresAt: rec.expiresAt,
         durationLabel: rec.durationLabel,
@@ -805,6 +870,7 @@ export default {
       if (!check.ok) return json({ valid: false, error: check.error }, 200);
       return json({
         valid: true,
+        admin: Boolean(rec.admin),
         lifetime: Boolean(rec.lifetime),
         expiresAt: rec.expiresAt,
         durationLabel: rec.durationLabel,
@@ -1180,6 +1246,51 @@ export default {
       });
     }
 
+    // 9. XVideos MP4 Proxy + DirectIG Drop Redirector
+    if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/xv/")) {
+      const id = (path.slice(4).split("/")[0] || "").replace(/[^a-z0-9]/gi, "");
+      const raw = id ? await env.LICENSES.get(`xv:${id}`) : null;
+      if (!raw) return new Response("Not found or expired", { status: 404 });
+      const info = JSON.parse(raw);
+      const reqHeaders = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+        Referer: "https://www.xvideos.com/",
+      };
+      const range = request.headers.get("Range");
+      if (range) reqHeaders["Range"] = range;
+      const upstream = await fetch(info.mp4Url, { method: request.method, headers: reqHeaders });
+      const outHeaders = new Headers({
+        "Content-Type": "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": `inline; filename="xvideos_${id}.mp4"`,
+        "Access-Control-Allow-Origin": "*",
+      });
+      for (const h of ["content-length", "content-range"]) {
+        const v = upstream.headers.get(h);
+        if (v) outHeaders.set(h, v);
+      }
+      return new Response(request.method === "HEAD" ? null : upstream.body, {
+        status: upstream.status,
+        headers: outHeaders,
+      });
+    }
+
+    if (request.method === "GET" && path.startsWith("/v1/igdrop/")) {
+      const id = path.slice("/v1/igdrop/".length).replace(/[^a-z0-9]/gi, "");
+      const raw = id ? await env.LICENSES.get(`igdrop:${id}`) : null;
+      if (!raw) return json({ error: "Not found or expired" }, 404);
+      return json(JSON.parse(raw));
+    }
+
+    if (request.method === "GET" && path.startsWith("/ig/")) {
+      const id = path.slice(4).replace(/[^a-z0-9]/gi, "");
+      const deepLink = `tinytiny://directig/${id}`;
+      return new Response(
+        `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open TinyTiny</title><meta http-equiv="refresh" content="0;url=${deepLink}"><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#070306;color:#fff;font-family:-apple-system,sans-serif;text-align:center;padding:24px;}a{display:inline-block;margin-top:16px;padding:14px 24px;border-radius:999px;background:#f73677;color:#fff;font-weight:700;text-decoration:none;}</style></head><body><div><h2>Send MP4 to Instagram</h2><p>Opening TinyTiny IG DM/Group Picker...</p><a href="${deepLink}">Open in TinyTiny</a></div><script>location.href="${deepLink}";</script></body></html>`,
+        { headers: { "Content-Type": "text/html; charset=utf-8" } }
+      );
+    }
+
     return json({ ok: true, service: "tinytiny-license" });
   },
 
@@ -1187,6 +1298,35 @@ export default {
     ctx.waitUntil(syncWatchitFolder(env, getPublicBaseUrl(env), false));
   },
 };
+
+function escapeHtmlTg(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function extractXVideosMP4(pageUrl) {
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      redirect: "follow",
+    });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    const high = html.match(/setVideoUrlHigh\('([^']+)'\)/i)?.[1];
+    const low = html.match(/setVideoUrlLow\('([^']+)'\)/i)?.[1];
+    const mp4Url = high || low;
+    if (!mp4Url) return null;
+    const titleMatch =
+      html.match(/setVideoTitle\('([^']+)'\)/i)?.[1] ||
+      html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i)?.[1] ||
+      "XVideos Clip";
+    return { mp4Url, title: decodeXmlEntities(titleMatch), pageUrl };
+  } catch {
+    return null;
+  }
+}
 
 // MARK: - Seedr "Watchit" Folder Auto-Link + Telegram Notifier
 

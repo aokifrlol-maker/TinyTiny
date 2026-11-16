@@ -59,6 +59,7 @@ struct RootView: View {
     @EnvironmentObject var store: UserStore
     @ObservedObject private var license = LicenseManager.shared
     @Environment(\.scenePhase) private var phase
+    @State private var directIGPayload: DirectIGDropPayload?
 
     var body: some View {
         ZStack {
@@ -109,8 +110,21 @@ struct RootView: View {
         }
         .onOpenURL { url in
             Task {
+                if url.scheme?.lowercased() == "tinytiny",
+                   url.host?.lowercased() == "directig",
+                   let dropId = url.pathComponents.last(where: { $0 != "/" }),
+                   license.isAdmin,
+                   let payload = await DirectIGDropPayload.fetchFromWorker(dropId: dropId) {
+                    directIGPayload = payload
+                    return
+                }
                 _ = await ShareService.shared.handleIncomingShare(url.absoluteString)
             }
+        }
+        .sheet(item: $directIGPayload) { payload in
+            IGDirectSendSheet(videoURL: payload.videoURL, title: payload.title, referer: payload.referer)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .onChange(of: phase) { _, p in
             if p == .background {
