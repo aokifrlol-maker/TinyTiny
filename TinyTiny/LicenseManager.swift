@@ -287,9 +287,6 @@ final class LicenseManager: ObservableObject {
             for of in backup.userData.followedOFCreators where !UserStore.shared.isFollowingOFCreator(id: of.id, handle: of.name) {
                 UserStore.shared.toggleFollowOFCreator(id: of.id, name: of.name, displayName: of.displayName)
             }
-            if !UserStore.shared.data.r34Credentials.isConfigured && backup.userData.r34Credentials.isConfigured {
-                UserStore.shared.data.r34Credentials = backup.userData.r34Credentials
-            }
             if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
                 UserStore.shared.data.xSession = backup.userData.xSession
             }
