@@ -1,4 +1,4 @@
-const CACHE_NAME = "gooned-pwa-v1";
+const CACHE_NAME = "gooned-pwa-v2";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
