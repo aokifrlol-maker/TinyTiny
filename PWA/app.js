@@ -30,6 +30,8 @@ const ICONS = {
   chevDown: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`,
   chevRight: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`,
   chevUp: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`,
+  expand: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
+  compress: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
   flame: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.5 3.5-2 5.5-2 8.5 0 1.8 1.2 3.2 2.8 3.2 1.7 0 2.7-1.4 2.7-3.2 0-1-.3-2-.8-2.8C17.5 9.2 19 12 19 14.8A7 7 0 1 1 5 14.8c0-4.2 3-7.6 7-12.8z"/></svg>`,
   lock: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4" fill="none" stroke="currentColor" stroke-width="2.2"/></svg>`,
   key: `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>`,
@@ -100,7 +102,9 @@ const state = {
   loading: false,
   error: "",
   speedLocked2x: false,
+  fullscreen: false,
   drawerOpen: false,
+  seenSessionIds: new Set(),
   activeModal: null, // null | 'settings' | 'categories' | { type:'more'|'share', idx:number }
   showInstallHint:
     !window.matchMedia("(display-mode: standalone)").matches &&
@@ -166,8 +170,8 @@ async function fetchGoonedPosts(endpoint) {
         subreddit: p.subreddit || "",
         title: p.title || "",
         upvotes: p.upvotes || 0,
-        videoUrl: videoUrl ? PROXY(videoUrl) : "",
-        imageUrl: imageUrl ? PROXY(imageUrl) : "",
+        videoUrl: videoUrl || "",
+        imageUrl: imageUrl || "",
         isImage: isImg,
         rawUrl: videoUrl || imageUrl || p.permalink || "",
         permalink: p.permalink || "",
@@ -226,8 +230,8 @@ async function fetchRule34Posts(tags, page) {
         author: (p.tags || "").split(" ").slice(0, 2).join(" ") || "rule34",
         title: p.tags || "",
         upvotes: p.score || 0,
-        videoUrl: isVid ? PROXY(fileUrl) : "",
-        imageUrl: PROXY(p.sample_url || p.preview_url || fileUrl),
+        videoUrl: isVid ? fileUrl : "",
+        imageUrl: p.sample_url || p.preview_url || fileUrl,
         isImage: !isVid,
         rawUrl: fileUrl,
       };
@@ -265,14 +269,17 @@ async function fetchLongVideos(sort, page, query = "") {
 
 async function loadFeed(reset = false) {
   if (state.loading) return;
+  const hadItems = !reset && state.items.length > 0;
   if (reset) {
     state.items = [];
+    state.seenSessionIds.clear();
     state.page = 1;
     state.afterCursor = "";
     state.error = "";
     render();
   }
   state.loading = true;
+  const prevLen = state.items.length;
   try {
     let fetched = [];
     const afterQ = state.afterCursor ? `&after=${encodeURIComponent(state.afterCursor)}` : "";
@@ -303,15 +310,23 @@ async function loadFeed(reset = false) {
       fetched = await fetchLongVideos(state.longSub, state.page);
     }
 
-    const seen = new Set(state.items.map((x) => x.id));
-    const fresh = fetched.filter((x) => !seen.has(x.id) && !state.dislikedIds.has(x.id));
+    const fresh = [];
+    for (const x of fetched) {
+      if (state.seenSessionIds.has(x.id) || state.dislikedIds.has(x.id)) continue;
+      state.seenSessionIds.add(x.id);
+      fresh.push(x);
+    }
     state.items = [...state.items, ...fresh];
     state.page += 1;
   } catch (err) {
     state.error = err.message || "Failed to load feed";
   } finally {
     state.loading = false;
-    render();
+    if (hadItems && state.tab === "home" && document.getElementById("feedScroller")) {
+      appendFeedCells(prevLen);
+    } else {
+      render();
+    }
   }
 }
 
@@ -523,7 +538,7 @@ function renderMainApp() {
   }
 
   root.innerHTML = `
-    <div class="cinema-shell">
+    <div id="cinemaShell" class="cinema-shell ${state.fullscreen ? "fullscreen" : ""}">
       <div class="stage-area">
         ${state.tab === "home" ? renderHomeView() : ""}
         ${state.tab === "favorites" ? renderFavoritesView() : ""}
@@ -571,10 +586,12 @@ function renderHomeView() {
   const showLongSubs = state.channel === "long" && !state.customFilter;
 
   return `
-    <button id="drawerTrigger" class="drawer-trigger">
+    <button id="drawerTrigger" class="drawer-trigger ui-chrome">
       <span>${escapeHtml(channelLabel())}</span>
       ${ICONS.chevRight}
     </button>
+
+    <button id="fsExitBtn" class="fs-exit-btn">${ICONS.compress}<span>Exit</span></button>
 
     <div id="drawerBackdrop" class="drawer-backdrop ${state.drawerOpen ? "open" : ""}"></div>
     <div id="slideDrawer" class="slide-drawer ${state.drawerOpen ? "open" : ""}">
@@ -642,29 +659,30 @@ function renderReelCell(item, idx) {
   return `
     <div class="reel-cell" data-idx="${idx}" data-id="${escapeHtml(item.id)}">
       ${item.isImage || !item.videoUrl ? `
-        <img class="reel-media ${fitClass}" src="${escapeHtml(item.imageUrl)}" decoding="async" alt="" />
+        <img class="reel-media ${fitClass}" src="${escapeHtml(item.imageUrl)}" referrerpolicy="no-referrer" decoding="async" alt="" />
       ` : `
-        <video class="reel-media ${fitClass}" src="${escapeHtml(item.videoUrl)}" poster="${escapeHtml(item.imageUrl || "")}"
-          playsinline webkit-playsinline loop preload="${idx < 2 ? "auto" : "metadata"}" ${state.muted ? "muted" : ""}></video>
+        <video class="reel-media ${fitClass}" data-src="${escapeHtml(item.videoUrl)}" poster="${escapeHtml(item.imageUrl || "")}"
+          playsinline webkit-playsinline loop preload="metadata" ${state.muted ? "muted" : ""}></video>
       `}
 
-      <div class="reel-actions">
+      <div class="reel-actions ui-chrome">
         <div class="act-wrap">
           <button class="act-btn ${isLiked ? "liked" : ""}" data-like="${idx}">${ICONS.heart}</button>
           ${item.upvotes ? `<span class="act-count">${formatCount(item.upvotes)}</span>` : ""}
         </div>
         ${!item.isImage && item.videoUrl ? `<button class="act-btn" data-mute="${idx}">${state.muted ? ICONS.volOff : ICONS.volOn}</button>` : ""}
+        <button class="act-btn" data-fullscreen="${idx}" title="Fullscreen">${ICONS.expand}</button>
         <button class="act-btn" data-share="${idx}">${ICONS.share}</button>
         <button class="act-btn" data-more="${idx}">${ICONS.more}</button>
       </div>
 
       ${!item.isImage && item.videoUrl ? `
-        <div class="scrubber-wrap" data-scrub="${idx}">
+        <div class="scrubber-wrap ui-chrome" data-scrub="${idx}">
           <div class="scrubber-track"><div class="scrubber-fill"></div></div>
         </div>
       ` : ""}
 
-      <div class="reel-overlay-bottom">
+      <div class="reel-overlay-bottom ui-chrome">
         <div class="creator-row">
           <button class="creator-chip" data-creator="${idx}">
             ${item.subreddit ? `r/${escapeHtml(item.subreddit)}` : `@${escapeHtml(item.author || "post")}`}
@@ -733,98 +751,9 @@ function bindHomeEvents() {
     state.activeModal = "settings";
     render();
   });
-  document.querySelectorAll("[data-mute]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.muted = !state.muted;
-      saveStore();
-      document.querySelectorAll("video").forEach((v) => (v.muted = state.muted));
-      document.querySelectorAll("[data-mute]").forEach((btn) => (btn.innerHTML = state.muted ? ICONS.volOff : ICONS.volOn));
-    };
-  });
-  document.querySelectorAll("[data-cats]").forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); state.activeModal = "categories"; render(); };
-  });
-  document.querySelectorAll("[data-shuffle]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.items.sort(() => Math.random() - 0.5);
-      showToast("Shuffled feed");
-      render();
-    };
-  });
-  document.querySelectorAll("[data-autoscroll]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.autoScroll = !state.autoScroll;
-      saveStore();
-      showToast(state.autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF");
-      render();
-    };
-  });
-  document.querySelectorAll("[data-follow]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      const item = state.items[Number(b.dataset.follow)];
-      if (!item?.subreddit) return;
-      const idx = state.following.indexOf(item.subreddit);
-      if (idx >= 0) {
-        state.following.splice(idx, 1);
-        showToast(`Unfollowed r/${item.subreddit}`);
-      } else {
-        state.following.push(item.subreddit);
-        showToast(`Following r/${item.subreddit}`);
-      }
-      saveStore();
-      render();
-    };
-  });
-
-  document.querySelectorAll("[data-like]").forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); toggleList(state.liked, state.items[Number(b.dataset.like)], b, "liked"); };
-  });
-  document.querySelectorAll("[data-save]").forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); toggleList(state.saved, state.items[Number(b.dataset.save)], b, "saved"); };
-  });
-  document.querySelectorAll("[data-dislike]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      const idx = Number(b.dataset.dislike);
-      const item = state.items[idx];
-      if (!item) return;
-      state.dislikedIds.add(item.id);
-      state.items.splice(idx, 1);
-      saveStore();
-      showToast("Not interested · Hidden");
-      render();
-    };
-  });
-  document.querySelectorAll("[data-share]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.activeModal = { type: "share", idx: Number(b.dataset.share) };
-      render();
-    };
-  });
-  document.querySelectorAll("[data-more]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      state.activeModal = { type: "more", idx: Number(b.dataset.more) };
-      render();
-    };
-  });
-  document.querySelectorAll("[data-creator]").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      const item = state.items[Number(b.dataset.creator)];
-      if (!item) return;
-      if (item.subreddit) {
-        state.customFilter = { type: "subreddit", value: item.subreddit, label: `r/${item.subreddit}` };
-        loadFeed(true);
-      } else if (item.externalUrl) {
-        window.open(item.externalUrl, "_blank");
-      }
-    };
+  document.getElementById("fsExitBtn")?.addEventListener("click", () => {
+    state.fullscreen = false;
+    document.getElementById("cinemaShell")?.classList.remove("fullscreen");
   });
 
   if (reelObserver) reelObserver.disconnect();
@@ -840,12 +769,16 @@ function bindHomeEvents() {
         if (entry.isIntersecting && entry.intersectionRatio >= 0.65) {
           state.watchedCount += 1;
           saveStore();
+          syncVideoWindow(idx);
           if (vid) {
+            if (!vid.getAttribute("src") && vid.dataset.src) {
+              vid.setAttribute("src", vid.dataset.src);
+            }
             vid.muted = state.muted;
             vid.playbackRate = state.speedLocked2x ? 2.0 : 1.0;
             vid.play().catch(() => {});
           }
-          if (idx >= state.items.length - 4 && !state.loading) loadFeed(false);
+          if (idx >= state.items.length - 5 && !state.loading) loadFeed(false);
         } else if (vid) {
           vid.pause();
         }
@@ -856,7 +789,113 @@ function bindHomeEvents() {
 
   document.querySelectorAll(".reel-cell").forEach((cell) => {
     reelObserver.observe(cell);
+    bindCellEvents(cell, scroller);
     attachCellGestures(cell, scroller);
+  });
+  if (state.items.length > 0) syncVideoWindow(0);
+}
+
+function syncVideoWindow(activeIdx) {
+  document.querySelectorAll(".reel-cell").forEach((cell) => {
+    const idx = Number(cell.dataset.idx);
+    const vid = cell.querySelector("video");
+    if (!vid || !vid.dataset.src) return;
+    if (idx >= activeIdx - 1 && idx <= activeIdx + 2) {
+      if (!vid.getAttribute("src")) {
+        vid.setAttribute("src", vid.dataset.src);
+        vid.preload = idx === activeIdx ? "auto" : "metadata";
+      }
+    } else if (Math.abs(idx - activeIdx) > 3) {
+      if (vid.getAttribute("src")) {
+        vid.pause();
+        vid.removeAttribute("src");
+        vid.load();
+      }
+    }
+  });
+}
+
+function appendFeedCells(startIdx) {
+  const scroller = document.getElementById("feedScroller");
+  if (!scroller) return;
+  let html = "";
+  for (let i = startIdx; i < state.items.length; i++) {
+    html += renderReelCell(state.items[i], i);
+  }
+  if (!html) return;
+  scroller.insertAdjacentHTML("beforeend", html);
+  for (let i = startIdx; i < state.items.length; i++) {
+    const cell = scroller.querySelector(`.reel-cell[data-idx="${i}"]`);
+    if (cell) {
+      reelObserver?.observe(cell);
+      bindCellEvents(cell, scroller);
+      attachCellGestures(cell, scroller);
+    }
+  }
+}
+
+function bindCellEvents(cell, scroller) {
+  cell.querySelector("[data-mute]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.muted = !state.muted;
+    saveStore();
+    document.querySelectorAll("video").forEach((v) => (v.muted = state.muted));
+    document.querySelectorAll("[data-mute]").forEach((btn) => (btn.innerHTML = state.muted ? ICONS.volOff : ICONS.volOn));
+  });
+
+  cell.querySelector("[data-fullscreen]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.fullscreen = !state.fullscreen;
+    document.getElementById("cinemaShell")?.classList.toggle("fullscreen", state.fullscreen);
+  });
+
+  cell.querySelector("[data-follow]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    const item = state.items[Number(b.dataset.follow)];
+    if (!item?.subreddit) return;
+    const idx = state.following.indexOf(item.subreddit);
+    const nowFollowing = idx < 0;
+    if (nowFollowing) {
+      state.following.push(item.subreddit);
+      showToast(`Following r/${item.subreddit}`);
+    } else {
+      state.following.splice(idx, 1);
+      showToast(`Unfollowed r/${item.subreddit}`);
+    }
+    saveStore();
+    b.classList.toggle("active", nowFollowing);
+    b.innerHTML = nowFollowing ? ICONS.check : ICONS.plus;
+  });
+
+  cell.querySelector("[data-like]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    toggleList(state.liked, state.items[Number(b.dataset.like)], b, "liked");
+  });
+
+  cell.querySelector("[data-share]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.activeModal = { type: "share", idx: Number(e.currentTarget.dataset.share) };
+    render();
+  });
+
+  cell.querySelector("[data-more]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.activeModal = { type: "more", idx: Number(e.currentTarget.dataset.more) };
+    render();
+  });
+
+  cell.querySelector("[data-creator]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const item = state.items[Number(e.currentTarget.dataset.creator)];
+    if (!item) return;
+    if (item.subreddit) {
+      state.customFilter = { type: "subreddit", value: item.subreddit, label: `r/${item.subreddit}` };
+      loadFeed(true);
+    } else if (item.externalUrl) {
+      window.open(item.externalUrl, "_blank");
+    }
   });
 }
 
