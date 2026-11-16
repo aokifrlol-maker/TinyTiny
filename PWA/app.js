@@ -29,6 +29,7 @@ const ICONS = {
   check: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
   chevDown: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`,
   chevRight: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`,
+  chevLeft: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 6 9 12 15 18"/></svg>`,
   chevUp: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`,
   expand: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
   compress: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
@@ -80,7 +81,7 @@ const state = {
   muted: localStorage.getItem("tt_muted") !== "0",
   hd: localStorage.getItem("tt_hd") !== "0",
   autoScroll: localStorage.getItem("tt_autoscroll") === "1",
-  fitMode: localStorage.getItem("tt_fit") === "1",
+  fitMode: localStorage.getItem("tt_fit") !== "0",
   controlsCollapsed: false,
 
   liked: JSON.parse(localStorage.getItem("tt_liked") || "[]"),
@@ -537,8 +538,84 @@ function renderMainApp() {
     loadFeed(false);
   }
 
+  const showOFSubs = state.channel === "of" && !state.customFilter;
+  const showLongSubs = state.channel === "long" && !state.customFilter;
+
   root.innerHTML = `
     <div id="cinemaShell" class="cinema-shell ${state.fullscreen ? "fullscreen" : ""}">
+      <button id="drawerTrigger" class="top-left-btn ui-chrome">
+        <span>${escapeHtml(state.tab === "home" ? channelLabel() : state.tab.charAt(0).toUpperCase() + state.tab.slice(1))}</span>
+        ${ICONS.chevRight}
+      </button>
+
+      ${state.tab === "home" ? `
+        <div class="top-right-group ui-chrome">
+          <button id="topMuteBtn" class="icon-btn-sm" title="Mute">${state.muted ? ICONS.volOff : ICONS.volOn}</button>
+          <button id="topFsBtn" class="icon-btn-sm" title="Fullscreen">${ICONS.expand}</button>
+        </div>
+      ` : ""}
+
+      <button id="fsExitBtn" class="fs-exit-btn">${ICONS.compress}<span>Exit</span></button>
+
+      <div id="drawerBackdrop" class="drawer-backdrop ${state.drawerOpen ? "open" : ""}"></div>
+      <aside id="slideDrawer" class="side-drawer ${state.drawerOpen ? "open" : ""}">
+        <div class="drawer-header">
+          <span class="brand-title">Gooned</span>
+          <button id="drawerClose" class="icon-btn-sm">${ICONS.chevLeft || "✕"}</button>
+        </div>
+
+        <div>
+          <div class="drawer-section-lbl">Feeds</div>
+          <div class="drawer-nav-list">
+            ${state.customFilter ? `
+              <button id="clearFilterBtn" class="drawer-item active"><span>${escapeHtml(state.customFilter.label)}</span><span style="margin-left:auto;">✕</span></button>
+            ` : ""}
+            <button class="drawer-item ${state.tab === "home" && !state.customFilter && state.channel === "following" ? "active" : ""}" data-ch="following">${ICONS.heart}<span>Following</span></button>
+            <button class="drawer-item ${state.tab === "home" && !state.customFilter && state.channel === "forYou" ? "active" : ""}" data-ch="forYou">${ICONS.flame}<span>For You</span></button>
+            <button class="drawer-item ${state.tab === "home" && !state.customFilter && state.channel === "rule34" ? "active" : ""}" data-ch="rule34"><span class="badge-sm badge-r34">34</span><span>Rule 34</span></button>
+            <button class="drawer-item ${state.tab === "home" && !state.customFilter && state.channel === "of" ? "active" : ""}" data-ch="of"><span class="badge-sm badge-of">OF</span><span>OnlyFans</span></button>
+            <button class="drawer-item ${state.tab === "home" && !state.customFilter && state.channel === "long" ? "active" : ""}" data-ch="long"><span class="badge-sm badge-long">${ICONS.playSmall}</span><span>Long Videos</span></button>
+          </div>
+        </div>
+
+        ${showOFSubs ? `
+          <div class="subtab-pill">
+            ${[["forYou","For You"],["trending","Trending"],["latest","Latest"]].map(([k, lbl]) => `
+              <button class="subtab-btn ${state.ofSub === k ? "active" : ""}" data-ofsub="${k}">${lbl}</button>
+            `).join("")}
+          </div>
+        ` : ""}
+
+        ${showLongSubs ? `
+          <div class="subtab-pill">
+            ${[["latest","Latest"],["top","Top"],["trending","Trending"]].map(([k, lbl]) => `
+              <button class="subtab-btn ${state.longSub === k ? "active" : ""}" data-longsub="${k}">${lbl}</button>
+            `).join("")}
+          </div>
+        ` : ""}
+
+        <div>
+          <div class="drawer-section-lbl">Library</div>
+          <div class="drawer-nav-list">
+            <button class="drawer-item ${state.tab === "favorites" ? "active" : ""}" data-tab="favorites">${ICONS.bookmark}<span>Saved & Liked</span></button>
+            <button class="drawer-item ${state.tab === "explore" ? "active" : ""}" data-tab="explore">${ICONS.search}<span>Explore & Search</span></button>
+            <button class="drawer-item ${state.tab === "profile" ? "active" : ""}" data-tab="profile">${ICONS.person}<span>Profile & Vault</span></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="drawer-section-lbl">Controls</div>
+          <div class="drawer-tools-grid">
+            <button class="tool-chip" id="drSort">${ICONS.flame} ${state.sort.toUpperCase()}</button>
+            <button class="tool-chip" id="drCats">${ICONS.grid} Categories</button>
+            <button class="tool-chip" id="drShuffle">${ICONS.shuffle} Shuffle</button>
+            <button class="tool-chip ${state.autoScroll ? "active" : ""}" id="drAuto">${ICONS.autoScroll} Auto</button>
+            <button class="tool-chip ${!state.fitMode ? "active" : ""}" id="drFit">${state.fitMode ? "Fit (Full)" : "Fill (Crop)"}</button>
+            <button class="tool-chip" id="drSettings">${ICONS.gear} Settings</button>
+          </div>
+        </div>
+      </aside>
+
       <div class="stage-area">
         ${state.tab === "home" ? renderHomeView() : ""}
         ${state.tab === "favorites" ? renderFavoritesView() : ""}
@@ -547,25 +624,77 @@ function renderMainApp() {
       </div>
 
       ${state.showInstallHint ? `
-        <div class="glass-pill install-banner">
+        <div class="glass-pill install-banner ui-chrome">
           <span>Tap Share → <b>Add to Home Screen</b></span>
           <button id="dismissInstall" style="background:none;border:none;color:#fff;font-weight:900;cursor:pointer;">✕</button>
         </div>
       ` : ""}
 
-      <div class="slim-tabbar">
-        <button class="tab-item ${state.tab === "home" ? "active" : ""}" data-tab="home">${ICONS.home}<span>Home</span></button>
-        <button class="tab-item ${state.tab === "favorites" ? "active" : ""}" data-tab="favorites">${ICONS.heart}<span>Saved</span></button>
-        <button class="tab-item ${state.tab === "explore" ? "active" : ""}" data-tab="explore">${ICONS.compass}<span>Explore</span></button>
-        <button class="tab-item ${state.tab === "profile" ? "active" : ""}" data-tab="profile">${ICONS.person}<span>Profile</span></button>
-      </div>
-
       ${renderActiveModal()}
     </div>
   `;
 
+  const toggleDrawer = (open) => {
+    state.drawerOpen = open;
+    document.getElementById("slideDrawer")?.classList.toggle("open", open);
+    document.getElementById("drawerBackdrop")?.classList.toggle("open", open);
+  };
+  document.getElementById("drawerTrigger")?.addEventListener("click", () => toggleDrawer(true));
+  document.getElementById("drawerClose")?.addEventListener("click", () => toggleDrawer(false));
+  document.getElementById("drawerBackdrop")?.addEventListener("click", () => toggleDrawer(false));
+
   document.querySelectorAll("[data-tab]").forEach((btn) => {
     btn.onclick = () => { state.tab = btn.dataset.tab; state.drawerOpen = false; render(); };
+  });
+  document.getElementById("clearFilterBtn")?.addEventListener("click", () => {
+    state.customFilter = null; state.tab = "home"; state.drawerOpen = false; loadFeed(true);
+  });
+  document.querySelectorAll("[data-ch]").forEach((btn) => {
+    btn.onclick = () => { state.channel = btn.dataset.ch; state.customFilter = null; state.tab = "home"; state.drawerOpen = false; loadFeed(true); };
+  });
+  document.querySelectorAll("[data-ofsub]").forEach((btn) => {
+    btn.onclick = () => { state.ofSub = btn.dataset.ofsub; state.drawerOpen = false; loadFeed(true); };
+  });
+  document.querySelectorAll("[data-longsub]").forEach((btn) => {
+    btn.onclick = () => { state.longSub = btn.dataset.longsub; state.drawerOpen = false; loadFeed(true); };
+  });
+
+  document.getElementById("drSort")?.addEventListener("click", () => {
+    const order = ["hot", "top", "new"];
+    state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
+    state.drawerOpen = false; state.tab = "home"; loadFeed(true);
+  });
+  document.getElementById("drCats")?.addEventListener("click", () => {
+    state.drawerOpen = false; state.activeModal = "categories"; render();
+  });
+  document.getElementById("drShuffle")?.addEventListener("click", () => {
+    state.items.sort(() => Math.random() - 0.5);
+    state.drawerOpen = false; showToast("Shuffled feed"); render();
+  });
+  document.getElementById("drAuto")?.addEventListener("click", () => {
+    state.autoScroll = !state.autoScroll; saveStore();
+    showToast(state.autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"); render();
+  });
+  document.getElementById("drFit")?.addEventListener("click", () => {
+    state.fitMode = !state.fitMode; saveStore(); render();
+  });
+  document.getElementById("drSettings")?.addEventListener("click", () => {
+    state.drawerOpen = false; state.activeModal = "settings"; render();
+  });
+
+  document.getElementById("topMuteBtn")?.addEventListener("click", () => {
+    state.muted = !state.muted; saveStore();
+    document.querySelectorAll("video").forEach((v) => (v.muted = state.muted));
+    const b = document.getElementById("topMuteBtn");
+    if (b) b.innerHTML = state.muted ? ICONS.volOff : ICONS.volOn;
+  });
+  document.getElementById("topFsBtn")?.addEventListener("click", () => {
+    state.fullscreen = true;
+    document.getElementById("cinemaShell")?.classList.add("fullscreen");
+  });
+  document.getElementById("fsExitBtn")?.addEventListener("click", () => {
+    state.fullscreen = false;
+    document.getElementById("cinemaShell")?.classList.remove("fullscreen");
   });
 
   document.getElementById("dismissInstall")?.addEventListener("click", () => {
@@ -582,60 +711,7 @@ function renderMainApp() {
 }
 
 function renderHomeView() {
-  const showOFSubs = state.channel === "of" && !state.customFilter;
-  const showLongSubs = state.channel === "long" && !state.customFilter;
-
   return `
-    <button id="drawerTrigger" class="drawer-trigger ui-chrome">
-      <span>${escapeHtml(channelLabel())}</span>
-      ${ICONS.chevRight}
-    </button>
-
-    <button id="fsExitBtn" class="fs-exit-btn">${ICONS.compress}<span>Exit</span></button>
-
-    <div id="drawerBackdrop" class="drawer-backdrop ${state.drawerOpen ? "open" : ""}"></div>
-    <div id="slideDrawer" class="slide-drawer ${state.drawerOpen ? "open" : ""}">
-      <div class="drawer-row" style="justify-content:space-between;">
-        <div class="drawer-row" style="flex:1;">
-          ${state.customFilter ? `
-            <button id="clearFilterBtn" class="ch-pill active">${escapeHtml(state.customFilter.label)} ✕</button>
-          ` : `
-            <button class="ch-pill ${state.channel === "following" ? "active" : ""}" data-ch="following">Following</button>
-            <button class="ch-pill ${state.channel === "forYou" ? "active" : ""}" data-ch="forYou">For You</button>
-            <button class="badge-btn badge-r34 ${state.channel === "rule34" ? "active" : ""}" data-ch="rule34">34</button>
-            <button class="badge-btn badge-of ${state.channel === "of" ? "active" : ""}" data-ch="of">OF</button>
-            <button class="badge-btn badge-long ${state.channel === "long" ? "active" : ""}" data-ch="long">${ICONS.playSmall}</button>
-          `}
-        </div>
-        <button id="drawerClose" class="ch-pill" style="padding:7px 10px;">${ICONS.chevUp}</button>
-      </div>
-
-      ${showOFSubs ? `
-        <div class="subtab-pill">
-          ${[["forYou","For You"],["trending","Trending"],["latest","Latest"]].map(([k, lbl]) => `
-            <button class="subtab-btn ${state.ofSub === k ? "active" : ""}" data-ofsub="${k}">${lbl}</button>
-          `).join("")}
-        </div>
-      ` : ""}
-
-      ${showLongSubs ? `
-        <div class="subtab-pill">
-          ${[["latest","Latest"],["top","Top"],["trending","Trending"]].map(([k, lbl]) => `
-            <button class="subtab-btn ${state.longSub === k ? "active" : ""}" data-longsub="${k}">${lbl}</button>
-          `).join("")}
-        </div>
-      ` : ""}
-
-      <div class="drawer-row">
-        <button class="ch-pill" id="drSort">${ICONS.flame} ${state.sort.toUpperCase()}</button>
-        <button class="ch-pill" id="drCats">${ICONS.grid} Categories</button>
-        <button class="ch-pill" id="drShuffle">${ICONS.shuffle} Shuffle</button>
-        <button class="ch-pill ${state.autoScroll ? "active" : ""}" id="drAuto">${ICONS.autoScroll} Auto</button>
-        <button class="ch-pill ${state.fitMode ? "active" : ""}" id="drFit">${state.fitMode ? "Fit" : "Fill"}</button>
-        <button class="ch-pill" id="drSettings">${ICONS.gear} Settings</button>
-      </div>
-    </div>
-
     ${state.speedLocked2x ? `<div class="glass-pill speed-badge">${ICONS.lock} 2x Locked · Tap to Unlock</div>` : ""}
 
     <div id="feedScroller" class="feed-scroller">
@@ -654,14 +730,14 @@ function renderHomeView() {
 function renderReelCell(item, idx) {
   const isLiked = state.liked.some((x) => x.id === item.id);
   const isFollowed = item.subreddit && state.following.includes(item.subreddit);
-  const fitClass = state.fitMode ? "fit" : "";
+  const mediaClass = state.fitMode ? "" : "fill";
 
   return `
     <div class="reel-cell" data-idx="${idx}" data-id="${escapeHtml(item.id)}">
       ${item.isImage || !item.videoUrl ? `
-        <img class="reel-media ${fitClass}" src="${escapeHtml(item.imageUrl)}" referrerpolicy="no-referrer" decoding="async" alt="" />
+        <img class="reel-media ${mediaClass}" src="${escapeHtml(item.imageUrl)}" referrerpolicy="no-referrer" decoding="async" alt="" />
       ` : `
-        <video class="reel-media ${fitClass}" data-src="${escapeHtml(item.videoUrl)}" poster="${escapeHtml(item.imageUrl || "")}"
+        <video class="reel-media ${mediaClass}" data-src="${escapeHtml(item.videoUrl)}" poster="${escapeHtml(item.imageUrl || "")}"
           playsinline webkit-playsinline loop preload="metadata" ${state.muted ? "muted" : ""}></video>
       `}
 
@@ -670,8 +746,6 @@ function renderReelCell(item, idx) {
           <button class="act-btn ${isLiked ? "liked" : ""}" data-like="${idx}">${ICONS.heart}</button>
           ${item.upvotes ? `<span class="act-count">${formatCount(item.upvotes)}</span>` : ""}
         </div>
-        ${!item.isImage && item.videoUrl ? `<button class="act-btn" data-mute="${idx}">${state.muted ? ICONS.volOff : ICONS.volOn}</button>` : ""}
-        <button class="act-btn" data-fullscreen="${idx}" title="Fullscreen">${ICONS.expand}</button>
         <button class="act-btn" data-share="${idx}">${ICONS.share}</button>
         <button class="act-btn" data-more="${idx}">${ICONS.more}</button>
       </div>
@@ -696,65 +770,7 @@ function renderReelCell(item, idx) {
 }
 
 function bindHomeEvents() {
-  const toggleDrawer = (open) => {
-    state.drawerOpen = open;
-    document.getElementById("slideDrawer")?.classList.toggle("open", open);
-    document.getElementById("drawerBackdrop")?.classList.toggle("open", open);
-  };
-  document.getElementById("drawerTrigger")?.addEventListener("click", () => toggleDrawer(true));
-  document.getElementById("drawerClose")?.addEventListener("click", () => toggleDrawer(false));
-  document.getElementById("drawerBackdrop")?.addEventListener("click", () => toggleDrawer(false));
-
-  document.getElementById("clearFilterBtn")?.addEventListener("click", () => { state.customFilter = null; state.drawerOpen = false; loadFeed(true); });
-
-  document.querySelectorAll("[data-ch]").forEach((btn) => {
-    btn.onclick = () => { state.channel = btn.dataset.ch; state.customFilter = null; state.drawerOpen = false; loadFeed(true); };
-  });
-  document.querySelectorAll("[data-ofsub]").forEach((btn) => {
-    btn.onclick = () => { state.ofSub = btn.dataset.ofsub; state.drawerOpen = false; loadFeed(true); };
-  });
-  document.querySelectorAll("[data-longsub]").forEach((btn) => {
-    btn.onclick = () => { state.longSub = btn.dataset.longsub; state.drawerOpen = false; loadFeed(true); };
-  });
   document.getElementById("retryFeedBtn")?.addEventListener("click", () => loadFeed(true));
-
-  document.getElementById("drSort")?.addEventListener("click", () => {
-    const order = ["hot", "top", "new"];
-    state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
-    state.drawerOpen = false;
-    loadFeed(true);
-  });
-  document.getElementById("drCats")?.addEventListener("click", () => {
-    state.drawerOpen = false;
-    state.activeModal = "categories";
-    render();
-  });
-  document.getElementById("drShuffle")?.addEventListener("click", () => {
-    state.items.sort(() => Math.random() - 0.5);
-    state.drawerOpen = false;
-    showToast("Shuffled feed");
-    render();
-  });
-  document.getElementById("drAuto")?.addEventListener("click", () => {
-    state.autoScroll = !state.autoScroll;
-    saveStore();
-    showToast(state.autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF");
-    render();
-  });
-  document.getElementById("drFit")?.addEventListener("click", () => {
-    state.fitMode = !state.fitMode;
-    saveStore();
-    render();
-  });
-  document.getElementById("drSettings")?.addEventListener("click", () => {
-    state.drawerOpen = false;
-    state.activeModal = "settings";
-    render();
-  });
-  document.getElementById("fsExitBtn")?.addEventListener("click", () => {
-    state.fullscreen = false;
-    document.getElementById("cinemaShell")?.classList.remove("fullscreen");
-  });
 
   if (reelObserver) reelObserver.disconnect();
   const scroller = document.getElementById("feedScroller");
