@@ -756,7 +756,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     }
 
     func fetchDirectThreads() async throws -> [IGDirectThread] {
-        let session = UserStore.shared.data.instagramSession
+        let session = UserStore.shared.data.igSession
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
@@ -793,7 +793,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     }
 
     func sendMP4ToDirectThread(threadId: String, videoURL: URL, referer: String? = nil) async throws {
-        let session = UserStore.shared.data.instagramSession
+        let session = UserStore.shared.data.igSession
         guard session.isConnected else {
             throw NSError(domain: "IGDirect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Connect your Instagram account first."])
         }
