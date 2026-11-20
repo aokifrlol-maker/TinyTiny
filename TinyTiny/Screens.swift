@@ -3233,7 +3233,7 @@ struct CreatorProfileGridView: View {
         switch source {
         case .xUser(let u): store.toggleFollowXUser(u)
         case .igUser(let u): store.toggleFollowIGUser(u)
-        case .ofCreator(let id, let handle, _): store.toggleFollowOFCreator(id: id, handle: handle)
+        case .ofCreator(let id, let handle, let displayName): store.toggleFollowOFCreator(id: id, name: handle, displayName: displayName)
         case .user(let u): store.toggleFollowUser(u)
         case .subreddit(let s): store.toggleFollowSubreddit(s)
         default: break
