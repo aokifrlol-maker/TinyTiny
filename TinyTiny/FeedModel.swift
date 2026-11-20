@@ -181,6 +181,7 @@ final class FeedModel: ObservableObject {
     private var seenSimKeys = Set<String>()
     private var activeLoadTask: Task<Void, Never>?
     private var emptyPageStreak = 0
+    private var lastAppearedIndex = 0
     private var followingRoundRobin = 0
     private var followingCursors: [String: String] = [:]
 
@@ -310,20 +311,26 @@ final class FeedModel: ObservableObject {
     }
 
     func onItemAppear(_ g: Gif) {
+        if let idx = items.firstIndex(where: { $0.id == g.id }) {
+            lastAppearedIndex = max(lastAppearedIndex, idx)
+        }
         if items.suffix(20).contains(where: { $0.id == g.id }) {
             Task { await loadMore() }
         }
     }
 
     func prefetchIfNeeded(currentID: String?) {
-        guard !isLoading, canLoadMore else { return }
-        if items.count < 24 {
-            Task { await loadMore() }
+        if let currentID,
+           let idx = items.firstIndex(where: { $0.id == currentID }) {
+            lastAppearedIndex = max(lastAppearedIndex, idx)
+            guard !isLoading, canLoadMore else { return }
+            if items.count < 24 || idx >= max(0, items.count - 18) {
+                Task { await loadMore() }
+            }
             return
         }
-        guard let currentID,
-              let idx = items.firstIndex(where: { $0.id == currentID }) else { return }
-        if idx >= max(0, items.count - 18) {
+        guard !isLoading, canLoadMore else { return }
+        if items.count < 24 {
             Task { await loadMore() }
         }
     }
@@ -334,6 +341,7 @@ final class FeedModel: ObservableObject {
         mediaKeys = []
         seenSimKeys = []
         emptyPageStreak = 0
+        lastAppearedIndex = 0
         followingRoundRobin = 0
         followingCursors = [:]
         if rotateCursor {
@@ -569,9 +577,11 @@ final class FeedModel: ObservableObject {
                 errorText = nil
             }
 
-            if !Task.isCancelled && items.count < 16 && canLoadMore && emptyPageStreak == 0 {
+            let needsMoreSoon = (items.count < 16 && emptyPageStreak == 0)
+                || (isInfiniteSource && lastAppearedIndex >= max(0, items.count - 6) && emptyPageStreak < 5)
+            if !Task.isCancelled && canLoadMore && needsMoreSoon {
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    try? await Task.sleep(nanoseconds: 280_000_000)
                     await self?.loadMore()
                 }
             }

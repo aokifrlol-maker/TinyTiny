@@ -298,10 +298,16 @@ final class VideoPreloader {
 // MARK: - Resilient PlayerModel (Auto-Fallback URLs + Black-Screen/Stall Recovery + HLS Looper Fix)
 
 @MainActor
-final class PlayerModel: ObservableObject {
-    let player = AVQueuePlayer()
+final class PlayerProgressState: ObservableObject {
     @Published var progress: Double = 0
     @Published var currentSeconds: Double = 0
+    @Published var durationSeconds: Double = 0
+}
+
+@MainActor
+final class PlayerModel: ObservableObject {
+    let player = AVQueuePlayer()
+    let progressState = PlayerProgressState()
     @Published var durationSeconds: Double = 0
     @Published var is2xSpeed: Bool = false
     @Published var detectedAspect: Double? = nil
@@ -345,12 +351,15 @@ final class PlayerModel: ObservableObject {
                     self.promoteReadyIfRenderable()
                 }
                 let ratio = min(max(cur / d, 0), 1)
-                if ratio >= 0.97 && self.progress < 0.97 {
+                if ratio >= 0.97 && self.progressState.progress < 0.97 {
                     self.onClipEnded?()
                 }
-                self.currentSeconds = cur
-                self.durationSeconds = d
-                self.progress = ratio
+                self.progressState.currentSeconds = cur
+                self.progressState.durationSeconds = d
+                self.progressState.progress = ratio
+                if abs(self.durationSeconds - d) > 0.25 {
+                    self.durationSeconds = d
+                }
             }
         }
     }
@@ -466,6 +475,7 @@ final class PlayerModel: ObservableObject {
         player.removeAllItems()
 
         // Loop via AVPlayerItemDidPlayToEndTime for all media (avoids AVPlayerLooper main-thread freezes)
+        player.actionAtItemEnd = .none
         player.insert(item, after: nil)
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -475,10 +485,11 @@ final class PlayerModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.onClipEnded?()
-                self.player.seek(to: .zero) { _ in
+                self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                     Task { @MainActor [weak self] in
                         guard let self, self.wantsPlaying else { return }
                         self.player.play()
+                        if self.is2xSpeed { self.player.rate = 2.0 }
                     }
                 }
             }
@@ -551,10 +562,19 @@ final class PlayerModel: ObservableObject {
         guard let item = player.currentItem else { return }
         let dur = item.duration.seconds
         let cur = player.currentTime().seconds
-        guard dur.isFinite, dur > 0, cur.isFinite else { return }
-        let targetSec = min(max(cur + seconds, 0), max(dur - 0.1, 0))
+        guard dur.isFinite, dur > 0 else { return }
+        let safeCur = cur.isFinite ? cur : dur
+        let targetSec = min(max(safeCur + seconds, 0), max(dur - 0.1, 0))
         let target = CMTime(seconds: targetSec, preferredTimescale: 600)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.wantsPlaying else { return }
+                if self.player.rate == 0 {
+                    self.player.play()
+                    if self.is2xSpeed { self.player.rate = 2.0 }
+                }
+            }
+        }
     }
 
     func seek(toProgress ratio: Double) {
@@ -1963,9 +1983,33 @@ struct GoonedReelCell: View {
     }
 
     private func scrubberBar(width: CGFloat) -> some View {
+        PlayerScrubberBar(
+            player: player,
+            progressState: player.progressState,
+            isScrubbing: $isScrubbing,
+            isImage: gif.isImage,
+            width: width
+        )
+    }
+
+    private func formatTime(_ sec: Double) -> String {
+        guard sec.isFinite, sec >= 0 else { return "0:00" }
+        let total = Int(sec)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct PlayerScrubberBar: View {
+    let player: PlayerModel
+    @ObservedObject var progressState: PlayerProgressState
+    @Binding var isScrubbing: Bool
+    let isImage: Bool
+    let width: CGFloat
+
+    var body: some View {
         VStack(spacing: 4) {
-            if isScrubbing && player.durationSeconds > 0 {
-                Text("\(formatTime(player.currentSeconds)) / \(formatTime(player.durationSeconds))")
+            if isScrubbing && progressState.durationSeconds > 0 {
+                Text("\(formatTime(progressState.currentSeconds)) / \(formatTime(progressState.durationSeconds))")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 10)
@@ -1976,7 +2020,7 @@ struct GoonedReelCell: View {
             ZStack(alignment: .leading) {
                 Rectangle().fill(Color.white.opacity(0.24))
                 Rectangle().fill(Theme.accent)
-                    .frame(width: max(0, width * player.progress))
+                    .frame(width: max(0, width * progressState.progress))
             }
             .frame(height: isScrubbing ? 6 : 2.5)
             .frame(height: 16)
@@ -1993,7 +2037,7 @@ struct GoonedReelCell: View {
                     }
             )
         }
-        .opacity(gif.isImage ? 0 : 1)
+        .opacity(isImage ? 0 : 1)
     }
 
     private func formatTime(_ sec: Double) -> String {

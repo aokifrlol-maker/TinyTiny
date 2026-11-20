@@ -418,6 +418,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private var lockWaiters: [CheckedContinuation<Void, Never>] = []
     private var pumpTask: Task<Void, Never>?
     private var lastLoadedTab: String = ""
+    private var capturedSearchURL: String?
+    private var capturedSearchHeaders: [String: String] = [:]
 
     private override init() {
         super.init()
@@ -525,6 +527,19 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             window.fetch = async function(...args) {
                 const req = args[0];
                 const url = (typeof req === 'string') ? req : (req && req.url ? req.url : '');
+                try {
+                    if (url && url.indexOf('/SearchTimeline') !== -1 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
+                        const init = args[1] || {};
+                        const hdrs = {};
+                        const src = (req && req.headers) ? req.headers : init.headers;
+                        if (src && typeof src.forEach === 'function') {
+                            src.forEach(function(v, k) { hdrs[k] = v; });
+                        } else if (src && typeof src === 'object') {
+                            Object.keys(src).forEach(function(k) { hdrs[k] = src[k]; });
+                        }
+                        window.webkit.messageHandlers.xBridge.postMessage({ type: 'graphqlOp', op: 'SearchTimeline', url: url, headers: hdrs });
+                    }
+                } catch (e) {}
                 const resp = await origFetch.apply(this, args);
                 try {
                     if (shouldCapture(url)) {
@@ -579,7 +594,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 } catch (e) {}
             }
             document.addEventListener('DOMContentLoaded', scanPageMeta);
-            setInterval(scanPageMeta, 1800);
+            setTimeout(scanPageMeta, 350);
+            setInterval(scanPageMeta, 1500);
         })();
         """
 
@@ -650,6 +666,16 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         if type == "screenName", let sn = body["screenName"] as? String, !sn.isEmpty {
             if UserStore.shared.data.xSession.screenName.isEmpty {
                 UserStore.shared.data.xSession.screenName = sn
+            }
+            return
+        }
+
+        if type == "graphqlOp",
+           let op = body["op"] as? String, op == "SearchTimeline",
+           let url = body["url"] as? String {
+            capturedSearchURL = url
+            if let hdrs = body["headers"] as? [String: String] {
+                capturedSearchHeaders = hdrs
             }
             return
         }
@@ -901,8 +927,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
         }
 
-        let nudgeDelayNs: UInt64 = didLoadNewURL ? 1_400_000_000 : 650_000_000
-        let maxRemainingNs: UInt64 = didLoadNewURL ? 3_400_000_000 : 1_800_000_000
+        let nudgeDelayNs: UInt64 = didLoadNewURL ? 450_000_000 : 250_000_000
+        let maxRemainingNs: UInt64 = didLoadNewURL ? 1_800_000_000 : 1_000_000_000
 
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             self.waiters.append((routeKey: routeKey, cont: cont))
@@ -933,8 +959,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
     }
 
-    /// Direct authenticated X Search via REST v2 (`adaptive.json`) — bypasses slow DOM navigation (~350ms).
-    /// Falls back cleanly to live WebView search if adaptive.json is blocked or returns 0 videos.
+    /// Fast authenticated X Search: uses captured live SearchTimeline GraphQL endpoint when available (~250ms),
+    /// and otherwise loads X search directly in the warmed WebView without wasting time on deprecated REST endpoints.
     func searchFast(query: String, sort: String, after: String?) async -> GoonedFeedResponse {
         let session = UserStore.shared.data.xSession
         guard session.isConnected else { return GoonedFeedResponse(posts: [], after: nil) }
@@ -943,50 +969,61 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             .replacingOccurrences(of: "x:", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let baseQuery = cleaned.isEmpty ? "nsfw" : cleaned
+        let product = (sort == "Latest") ? "Latest" : "Top"
 
-        // Try direct authenticated adaptive JSON API first (very fast, zero WebView lock contention)
-        for qVariant in ["\(baseQuery) filter:videos", baseQuery] {
-            var comps = URLComponents(string: "https://x.com/i/api/2/search/adaptive.json")!
-            comps.queryItems = [
-                URLQueryItem(name: "q", value: qVariant),
-                URLQueryItem(name: "count", value: "40"),
-                URLQueryItem(name: "tweet_mode", value: "extended"),
-                URLQueryItem(name: "include_entities", value: "1"),
-                URLQueryItem(name: "include_ext_media_color", value: "true"),
-                URLQueryItem(name: "tweet_search_mode", value: sort == "Latest" ? "live" : "top")
-            ]
-            if let after, after.hasPrefix("cursor:"), !after.dropFirst(7).isEmpty {
-                comps.queryItems?.append(URLQueryItem(name: "cursor", value: String(after.dropFirst(7))))
-            }
-            if let url = comps.url {
-                var req = URLRequest(url: url)
-                req.timeoutInterval = 7
-                req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-                req.setValue("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA", forHTTPHeaderField: "Authorization")
-                req.setValue(session.ct0, forHTTPHeaderField: "x-csrf-token")
-                req.setValue("auth_token=\(session.authToken); ct0=\(session.ct0)", forHTTPHeaderField: "Cookie")
-                req.setValue("https://x.com/search", forHTTPHeaderField: "Referer")
-                req.setValue("OAuth2Session", forHTTPHeaderField: "x-twitter-auth-type")
-                req.setValue("true", forHTTPHeaderField: "x-twitter-active-user")
+        // Fast path: reuse captured SearchTimeline GraphQL URL + headers directly via URLSession
+        if let templateURL = capturedSearchURL,
+           var comps = URLComponents(string: templateURL) {
+            for qVariant in ["\(baseQuery) filter:videos", baseQuery] {
+                var vars: [String: Any] = [
+                    "rawQuery": qVariant,
+                    "count": 30,
+                    "querySource": "typed_query",
+                    "product": product
+                ]
+                if let after, after.hasPrefix("cursor:"), !after.dropFirst(7).isEmpty {
+                    vars["cursor"] = String(after.dropFirst(7))
+                }
+                if let varsData = try? JSONSerialization.data(withJSONObject: vars),
+                   let varsStr = String(data: varsData, encoding: .utf8) {
+                    var items = comps.queryItems ?? []
+                    items.removeAll { $0.name == "variables" }
+                    items.append(URLQueryItem(name: "variables", value: varsStr))
+                    comps.queryItems = items
+                    if let url = comps.url {
+                        var req = URLRequest(url: url)
+                        req.timeoutInterval = 5
+                        req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
+                        for (k, v) in capturedSearchHeaders {
+                            req.setValue(v, forHTTPHeaderField: k)
+                        }
+                        if req.value(forHTTPHeaderField: "authorization") == nil {
+                            req.setValue("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA", forHTTPHeaderField: "Authorization")
+                        }
+                        req.setValue(session.ct0, forHTTPHeaderField: "x-csrf-token")
+                        req.setValue("auth_token=\(session.authToken); ct0=\(session.ct0)", forHTTPHeaderField: "Cookie")
+                        req.setValue("https://x.com/search", forHTTPHeaderField: "Referer")
 
-                if let (data, resp) = try? await URLSession.shared.data(for: req),
-                   (resp as? HTTPURLResponse)?.statusCode == 200 {
-                    let parsed = XTweetParser.parseTweets(from: data, routeKey: "x_search_fast")
-                    let store = UserStore.shared
-                    let filtered = parsed.filter {
-                        !store.isSeen($0)
-                        && !store.isBlockedByAlgorithm($0)
-                        && seenIds.insert($0.canonicalDedupeKey).inserted
-                    }
-                    let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
-                    if !filtered.isEmpty {
-                        return GoonedFeedResponse(posts: filtered, after: nextCursor)
+                        if let (data, resp) = try? await URLSession.shared.data(for: req),
+                           (resp as? HTTPURLResponse)?.statusCode == 200 {
+                            let parsed = XTweetParser.parseTweets(from: data, routeKey: "x_search_fast")
+                            let store = UserStore.shared
+                            let filtered = parsed.filter {
+                                !store.isSeen($0)
+                                && !store.isBlockedByAlgorithm($0)
+                                && seenIds.insert($0.canonicalDedupeKey).inserted
+                            }
+                            let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
+                            if !filtered.isEmpty {
+                                return GoonedFeedResponse(posts: filtered, after: nextCursor)
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // WebView fallback: try unfiltered / filtered search on x.com/search
+        // Direct warmed WebView search (first search captures SearchTimeline for subsequent queries)
         let encoded = "\(baseQuery) filter:videos".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
         let tab = (sort == "Latest") ? "live" : "top"
         let searchURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
