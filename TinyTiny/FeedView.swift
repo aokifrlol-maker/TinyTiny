@@ -393,7 +393,7 @@ final class PlayerModel: ObservableObject {
 
     private func promoteReadyIfRenderable() {
         guard !isReady else { return }
-        if hasValidVideoSize && (layerReadyForDisplay || currentSeconds > 0.08) {
+        if hasValidVideoSize && (layerReadyForDisplay || progressState.currentSeconds > 0.08) {
             isReady = true
             allFailed = false
             stallWatchdogTask?.cancel()
@@ -584,8 +584,9 @@ final class PlayerModel: ObservableObject {
         let clamped = min(max(ratio, 0), 0.995)
         let target = CMTime(seconds: dur * clamped, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
-        progress = clamped
-        currentSeconds = dur * clamped
+        progressState.progress = clamped
+        progressState.currentSeconds = dur * clamped
+        progressState.durationSeconds = dur
     }
 
     func teardown() {
@@ -612,8 +613,9 @@ final class PlayerModel: ObservableObject {
         looper = nil
         player.removeAllItems()
         prepared = false
-        progress = 0
-        currentSeconds = 0
+        progressState.progress = 0
+        progressState.currentSeconds = 0
+        progressState.durationSeconds = 0
         durationSeconds = 0
     }
 }
