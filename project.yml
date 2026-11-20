@@ -23,6 +23,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSFaceIDUsageDescription: "Unlock the app with Face ID."
         NSPhotoLibraryAddUsageDescription: "Save selected videos and images to your Photos library."
+        NSPhotoLibraryUsageDescription: "Save and delete downloaded videos and images in your Photos library."
         UILaunchScreen:
           UIColorName: ""
         UIApplicationSceneManifest:

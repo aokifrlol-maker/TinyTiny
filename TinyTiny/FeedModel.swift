@@ -251,7 +251,14 @@ final class FeedModel: ObservableObject {
         return "\(k.kind):\(k.name.lowercased()):\(sort.rawValue)"
     }
 
-    func switchSource(_ newSource: FeedSource, initialItems: [Gif] = []) {
+    var currentCursor: String? { afterCursor }
+
+    func switchSource(
+        _ newSource: FeedSource,
+        initialItems: [Gif] = [],
+        cursor: String? = nil,
+        allowLoadMore: Bool = false
+    ) {
         guard newSource != source || !initialItems.isEmpty else {
             Task { await refresh(rotateCursor: true) }
             return
@@ -259,15 +266,16 @@ final class FeedModel: ObservableObject {
         activeLoadTask?.cancel()
         source = newSource
         emptyPageStreak = 0
+        lastAppearedIndex = 0
         followingRoundRobin = 0
         followingCursors = [:]
         if !initialItems.isEmpty {
             items = initialItems
             ids = Set(initialItems.map(\.id))
             mediaKeys = Set(initialItems.map(\.canonicalDedupeKey))
-            hasMore = false
+            hasMore = allowLoadMore
             isSwitching = false
-            afterCursor = nil
+            afterCursor = cursor
             xMixAfterCursor = nil
             igMixAfterCursor = nil
             ofMixOffset = 0

@@ -1642,7 +1642,7 @@ struct GoonedLikesView: View {
     private func saveSelectedToPhotos() async {
         let targets = selectedPosts
         guard !targets.isEmpty else { return }
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else {
             showBulkToast("Allow Photos access in Settings")
             return
@@ -1653,18 +1653,21 @@ struct GoonedLikesView: View {
         for post in targets {
             guard let fileURL = await resolveLocalOrTempURL(for: post) else { continue }
             let isImg = post.isImage || ["jpg", "jpeg", "png", "webp"].contains(fileURL.pathExtension.lowercased())
-            let ok: Bool = await withCheckedContinuation { cont in
+            let createdId: String? = await withCheckedContinuation { cont in
+                var placeholderId: String?
                 PHPhotoLibrary.shared().performChanges({
-                    if isImg {
-                        PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
-                    } else {
-                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-                    }
+                    let req: PHAssetChangeRequest? = isImg
+                        ? PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                        : PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+                    placeholderId = req?.placeholderForCreatedAsset?.localIdentifier
                 }) { success, _ in
-                    cont.resume(returning: success)
+                    cont.resume(returning: success ? placeholderId : nil)
                 }
             }
-            if ok { savedCount += 1 }
+            if let createdId {
+                OfflineManager.shared.recordSavedPhotoAssetId(createdId, for: post.id)
+                savedCount += 1
+            }
         }
         isBulkWorking = false
         UINotificationFeedbackGenerator().notificationOccurred(savedCount > 0 ? .success : .error)
@@ -3180,6 +3183,181 @@ struct AlgorithmEditorSheet: View {
                     .padding(.vertical, 6)
                     .liquidGlassCapsule(tinted: !tintActive, active: tintActive)
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Creator / Tag Profile Grid (Tap any post to open Scroller from that item)
+
+struct CreatorProfileGridView: View {
+    let source: FeedSource
+    var onClose: () -> Void
+    var onSelectPost: (_ post: Gif, _ loadedItems: [Gif], _ cursor: String?, _ hasMore: Bool) -> Void
+
+    @EnvironmentObject private var store: UserStore
+    @ObservedObject private var offline = OfflineManager.shared
+    @StateObject private var model: FeedModel
+
+    init(
+        source: FeedSource,
+        onClose: @escaping () -> Void,
+        onSelectPost: @escaping (_ post: Gif, _ loadedItems: [Gif], _ cursor: String?, _ hasMore: Bool) -> Void
+    ) {
+        self.source = source
+        self.onClose = onClose
+        self.onSelectPost = onSelectPost
+        _model = StateObject(wrappedValue: FeedModel(source: source))
+    }
+
+    private var isFollowed: Bool {
+        switch source {
+        case .xUser(let u): return store.isFollowingXUser(u)
+        case .igUser(let u): return store.isFollowingIGUser(u)
+        case .ofCreator(let id, let handle, _): return store.isFollowingOFCreator(id: id, handle: handle)
+        case .user(let u): return store.isFollowingUser(u)
+        case .subreddit(let s): return store.isFollowingSubreddit(s)
+        default: return false
+        }
+    }
+
+    private var canFollow: Bool {
+        switch source {
+        case .xUser, .igUser, .ofCreator, .user, .subreddit: return true
+        default: return false
+        }
+    }
+
+    private func toggleFollow() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        switch source {
+        case .xUser(let u): store.toggleFollowXUser(u)
+        case .igUser(let u): store.toggleFollowIGUser(u)
+        case .ofCreator(let id, let handle, _): store.toggleFollowOFCreator(id: id, handle: handle)
+        case .user(let u): store.toggleFollowUser(u)
+        case .subreddit(let s): store.toggleFollowSubreddit(s)
+        default: break
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        onClose()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .liquidGlassCircle(tinted: store.data.settings.tintedGlass)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(source.displayTitle)
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text("\(model.items.count) posts")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.65))
+                    }
+
+                    Spacer()
+
+                    if canFollow {
+                        Button {
+                            toggleFollow()
+                        } label: {
+                            Text(isFollowed ? "Following" : "Follow")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .liquidGlassCapsule(tinted: store.data.settings.tintedGlass, active: isFollowed)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                if model.items.isEmpty && model.isLoading {
+                    Spacer()
+                    ProgressView()
+                        .tint(Theme.accent)
+                        .scaleEffect(1.2)
+                    Text("Loading \(source.displayTitle)...")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .padding(.top, 10)
+                    Spacer()
+                } else if model.items.isEmpty {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.white.opacity(0.55))
+                        Text(model.errorText ?? "No posts found for \(source.displayTitle)")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.75))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                        Button("Retry") {
+                            Task { await model.refresh(rotateCursor: false) }
+                        }
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 9)
+                        .liquidGlassCapsule(tinted: true, active: true)
+                    }
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3),
+                            spacing: 2
+                        ) {
+                            ForEach(model.items) { gif in
+                                Button {
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    onSelectPost(gif, model.items, model.currentCursor, model.canLoadMore)
+                                } label: {
+                                    GridThumb(gif: gif, isOfflineBadge: offline.isDownloaded(gif))
+                                }
+                                .buttonStyle(.plain)
+                                .onAppear { model.onItemAppear(gif) }
+                            }
+                        }
+                        .padding(.bottom, 110)
+
+                        if model.isLoading {
+                            ProgressView()
+                                .tint(Theme.accent)
+                                .padding(.vertical, 16)
+                        } else if model.canLoadMore {
+                            Button("Load More") {
+                                Task { await model.loadMore() }
+                            }
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 9)
+                            .liquidGlassCapsule(tinted: true)
+                            .padding(.vertical, 14)
+                        }
+                    }
+                }
+            }
+        }
+        .task {
+            if model.items.isEmpty {
+                await model.loadMore()
             }
         }
     }

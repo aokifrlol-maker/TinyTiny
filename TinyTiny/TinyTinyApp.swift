@@ -201,6 +201,7 @@ struct GoonedMainShell: View {
     @State private var showIGLoginSheet = false
     @State private var showR34KeySheet = false
     @State private var pendingFeedAfterLogin: FeedSource? = nil
+    @State private var creatorGridSource: FeedSource? = nil
     @State private var didPrewarm = false
 
     private var tinted: Bool { store.data.settings.tintedGlass }
@@ -456,6 +457,36 @@ struct GoonedMainShell: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 .zIndex(30)
             }
+
+            // 8. Creator / Tag Grid Overlay (tap any post to launch scroller from that item)
+            if let gridSrc = creatorGridSource {
+                CreatorProfileGridView(
+                    source: gridSrc,
+                    onClose: {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            creatorGridSource = nil
+                        }
+                    },
+                    onSelectPost: { post, loadedItems, cursor, canLoadMore in
+                        pushCustomBackHistory(returnTab: .home)
+                        customModel.switchSource(
+                            gridSrc,
+                            initialItems: loadedItems,
+                            cursor: cursor,
+                            allowLoadMore: canLoadMore
+                        )
+                        slotPostIDs[.custom] = post.id
+                        activeChannel = .custom
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            creatorGridSource = nil
+                            activeTab = .home
+                        }
+                    }
+                )
+                .id(gridSrc.displayTitle)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(25)
+            }
         }
         .animation(.easeOut(duration: 0.14), value: activeTab)
         .animation(.easeOut(duration: 0.14), value: showSettingsModal)
@@ -596,7 +627,24 @@ struct GoonedMainShell: View {
         }
     }
 
+    private func isCreatorProfileSource(_ src: FeedSource) -> Bool {
+        switch src {
+        case .user, .xUser, .igUser, .ofCreator, .subreddit:
+            return true
+        case .rule34(let tag):
+            return !tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default:
+            return false
+        }
+    }
+
     private func selectFeed(_ src: FeedSource, forceReload: Bool = false) {
+        if !forceReload && isCreatorProfileSource(src) {
+            withAnimation(.easeOut(duration: 0.16)) {
+                creatorGridSource = src
+            }
+            return
+        }
         switch src {
         case .following:
             customBackStack.removeAll()

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import WebKit
+import Photos
 
 /// Manages offline video/image downloading into the app's private, passcode-protected Documents/OfflineVault directory.
 /// Stores only relative filenames so offline media survives iOS container UUID changes across app updates/re-signs.
@@ -218,18 +219,54 @@ final class OfflineManager: ObservableObject {
         }
     }
 
-    func removeDownload(_ gif: Gif) {
+    private static let photoIDsKey = "tt_saved_photo_asset_ids_v1"
+
+    func recordSavedPhotoAssetId(_ localIdentifier: String, for gifId: String) {
+        guard !localIdentifier.isEmpty else { return }
+        var map = UserDefaults.standard.dictionary(forKey: Self.photoIDsKey) as? [String: String] ?? [:]
+        map[gifId] = localIdentifier
+        UserDefaults.standard.set(map, forKey: Self.photoIDsKey)
+    }
+
+    func savedPhotoAssetId(for gifId: String) -> String? {
+        let map = UserDefaults.standard.dictionary(forKey: Self.photoIDsKey) as? [String: String] ?? [:]
+        return map[gifId]
+    }
+
+    func deleteSavedPhotos(forIds gifIds: [String]) {
+        var map = UserDefaults.standard.dictionary(forKey: Self.photoIDsKey) as? [String: String] ?? [:]
+        var assetIds: [String] = []
+        for gid in gifIds {
+            if let localId = map.removeValue(forKey: gid), !localId.isEmpty {
+                assetIds.append(localId)
+            }
+        }
+        UserDefaults.standard.set(map, forKey: Self.photoIDsKey)
+        guard !assetIds.isEmpty else { return }
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: assetIds, options: nil)
+        guard fetched.count > 0 else { return }
+        PHPhotoLibrary.shared().performChanges({
+            PHAssetChangeRequest.deleteAssets(fetched)
+        }, completionHandler: nil)
+    }
+
+    func removeDownload(_ gif: Gif, deleteFromPhotos: Bool = true) {
         let stem = Self.safeFileStem(for: gif.id)
         let dir = Self.vaultDirectory
         for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem).\(ext)"))
         }
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem)_thumb.jpg"))
+        if deleteFromPhotos {
+            deleteSavedPhotos(forIds: [gif.id])
+        }
         UserStore.shared.removeDownloadedRecord(gif)
         objectWillChange.send()
     }
 
     func clearAllDownloads() {
+        let allIds = UserStore.shared.data.downloaded.map(\.id)
+        deleteSavedPhotos(forIds: allIds)
         let dir = Self.vaultDirectory
         if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for f in files {
