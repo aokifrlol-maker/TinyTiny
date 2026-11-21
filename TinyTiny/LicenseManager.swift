@@ -441,6 +441,7 @@ struct LicenseGateView: View {
     var onActivated: () -> Void
 
     @State private var keyInput = ""
+    @State private var copiedToast = false
 
     var body: some View {
         ZStack {
@@ -523,6 +524,39 @@ struct LicenseGateView: View {
                         .liquidGlassCapsule(active: !keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                     .disabled(license.isChecking || keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                    if !license.status.licenseKey.isEmpty {
+                        HStack(spacing: 10) {
+                            Button {
+                                UIPasteboard.general.string = license.status.licenseKey
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                copiedToast = true
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                    copiedToast = false
+                                }
+                            } label: {
+                                Label(copiedToast ? "Copied!" : "Copy Key", systemImage: "doc.on.doc")
+                                    .font(.caption.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 9)
+                                    .liquidGlassCapsule()
+                            }
+
+                            Button {
+                                let encoded = "/extend \(license.status.licenseKey) 30d".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                                if let tgURL = URL(string: "https://t.me/JarveyIsBot?text=\(encoded)") {
+                                    UIApplication.shared.open(tgURL)
+                                }
+                            } label: {
+                                Label("Extend on Telegram", systemImage: "paperplane.fill")
+                                    .font(.caption.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 9)
+                                    .liquidGlassCapsule()
+                            }
+                        }
+                    }
                 }
                 .padding(18)
                 .liquidGlassCard(cornerRadius: 22)
@@ -532,6 +566,11 @@ struct LicenseGateView: View {
             }
             .foregroundStyle(.white)
             .padding(.bottom, 24)
+        }
+        .onAppear {
+            if keyInput.isEmpty && !license.status.licenseKey.isEmpty {
+                keyInput = license.status.licenseKey
+            }
         }
     }
 }

@@ -1587,9 +1587,10 @@ struct GoonedLikesView: View {
     private func deleteSelected() {
         let targets = selectedPosts
         guard !targets.isEmpty else { return }
+        OfflineManager.shared.deleteSavedPhotos(forIds: targets.map(\.id))
         for post in targets {
             if mode == "offline" {
-                offline.removeDownload(post)
+                offline.removeDownload(post, deleteFromPhotos: false)
             } else {
                 if store.isLiked(post) { store.toggleLike(post) }
             }
@@ -2556,10 +2557,23 @@ struct GoonedSettingsModal: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text("License Access")
                                             .font(.system(size: 15, weight: .bold))
-                                        Text("\(license.expirySummary) · \(license.status.licenseKey.isEmpty ? "Unbound" : license.status.licenseKey)")
-                                            .font(.system(size: 12, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.68))
-                                            .lineLimit(1)
+                                        HStack(spacing: 6) {
+                                            Text("\(license.expirySummary) · \(license.status.licenseKey.isEmpty ? "Unbound" : license.status.licenseKey)")
+                                                .font(.system(size: 12, design: .monospaced))
+                                                .foregroundStyle(.white.opacity(0.68))
+                                                .lineLimit(1)
+                                            if !license.status.licenseKey.isEmpty {
+                                                Button {
+                                                    UIPasteboard.general.string = license.status.licenseKey
+                                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                    syncStatusMessage = "Copied license key!"
+                                                } label: {
+                                                    Image(systemName: "doc.on.doc")
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .foregroundStyle(Theme.accentBright)
+                                                }
+                                            }
+                                        }
                                     }
                                     Spacer()
                                     Button {
@@ -2573,6 +2587,46 @@ struct GoonedSettingsModal: View {
                                             .padding(.horizontal, 11)
                                             .padding(.vertical, 7)
                                             .liquidGlassCapsule(active: true)
+                                    }
+                                }
+                                HStack(spacing: 8) {
+                                    if !license.status.licenseKey.isEmpty {
+                                        Button {
+                                            UIPasteboard.general.string = license.status.licenseKey
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            syncStatusMessage = "Copied \(license.status.licenseKey)"
+                                        } label: {
+                                            Label("Copy Key", systemImage: "doc.on.doc")
+                                                .font(.caption.bold())
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .liquidGlassCapsule()
+                                        }
+                                    }
+                                    Button {
+                                        let keyPart = license.status.licenseKey.isEmpty ? "" : "?text=" + ("/extend \(license.status.licenseKey) 30d".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")
+                                        if let tgURL = URL(string: "https://t.me/JarveyIsBot\(keyPart)") {
+                                            UIApplication.shared.open(tgURL)
+                                        }
+                                    } label: {
+                                        Label("Extend (Telegram)", systemImage: "paperplane.fill")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .liquidGlassCapsule()
+                                    }
+                                    Button {
+                                        Task {
+                                            syncStatusMessage = "Checking license..."
+                                            await license.verifySilently()
+                                            syncStatusMessage = license.expirySummary
+                                        }
+                                    } label: {
+                                        Label("Refresh", systemImage: "arrow.clockwise")
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .liquidGlassCapsule()
                                     }
                                 }
                                 if let syncStatusMessage {
