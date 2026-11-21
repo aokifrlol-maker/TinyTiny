@@ -741,7 +741,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             let tweets = XTweetParser.parseTweets(from: data, routeKey: routeAtCapture)
             let filteredPre = tweets.filter { post in
                 if !blockedSnapshot.isEmpty {
-                    let tLower = post.title.lowercased()
+                    let tLower = (post.title ?? "").lowercased()
                     if blockedSnapshot.contains(where: { !$0.isEmpty && tLower.contains($0.lowercased()) }) {
                         return false
                     }
