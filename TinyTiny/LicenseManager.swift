@@ -240,9 +240,10 @@ final class LicenseManager: ObservableObject {
         _ = try? await session.data(for: req)
     }
 
-    func restoreEncryptedBackupIfPresent() async {
+    @discardableResult
+    func restoreEncryptedBackupIfPresent() async -> Bool {
         guard !status.licenseKey.isEmpty,
-              let url = URL(string: "\(normalizedBaseURL)/v1/backup/get") else { return }
+              let url = URL(string: "\(normalizedBaseURL)/v1/backup/get") else { return false }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -254,13 +255,20 @@ final class LicenseManager: ObservableObject {
         ])
 
         guard let (data, resp) = try? await session.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let http = resp as? HTTPURLResponse else {
+            return false
+        }
+        if http.statusCode == 404 {
+            // No cloud backup exists yet for this key — safe to upload local state
+            return true
+        }
+        guard http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let b64 = json["blob"] as? String,
               let cipher = Data(base64Encoded: b64),
               let plain = try? CryptoBox.open(cipher, using: backupKey(for: status.licenseKey)),
               let backup = try? JSONDecoder().decode(EncryptedProfileBackup.self, from: plain) else {
-            return
+            return false
         }
 
         // Merge non-destructively so existing local likes/follows aren't overwritten if newer
@@ -301,6 +309,7 @@ final class LicenseManager: ObservableObject {
         CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey)
         UserStore.shared.saveNow()
         await injectRestoredSocialCookies()
+        return true
     }
 
     private func injectRestoredSocialCookies() async {
@@ -349,9 +358,23 @@ final class LicenseManager: ObservableObject {
     }
 
     func syncBidirectionalBackup() async -> String {
-        await restoreEncryptedBackupIfPresent()
-        await syncEncryptedBackupNow()
+        let restoredOK = await restoreEncryptedBackupIfPresent()
+        guard restoredOK else {
+            return "Sync paused: couldn't restore cloud backup (kept cloud data safe)."
+        }
         let d = UserStore.shared.data
+        let hasAnyData = !d.liked.isEmpty
+            || !d.downloaded.isEmpty
+            || d.xSession.isConnected
+            || d.igSession.isConnected
+            || !d.followedUsers.isEmpty
+            || !d.followedXUsers.isEmpty
+            || !d.followedIGUsers.isEmpty
+            || !d.followedSubreddits.isEmpty
+            || !d.followedOFCreators.isEmpty
+        if hasAnyData {
+            await syncEncryptedBackupNow()
+        }
         var parts = ["\(d.liked.count) likes", "\(d.downloaded.count) saved"]
         if d.xSession.isConnected { parts.append("X login") }
         if d.igSession.isConnected { parts.append("IG login") }

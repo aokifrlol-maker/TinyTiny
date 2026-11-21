@@ -885,6 +885,10 @@ export default {
       if (!check.ok) return json({ error: check.error }, 403);
       if (!body.blob || typeof body.blob !== "string") return json({ error: "Missing blob" }, 400);
 
+      const existingBlob = await env.LICENSES.get(`backup:${rec.key}`);
+      if (existingBlob && existingBlob !== body.blob) {
+        await env.LICENSES.put(`backup_prev:${rec.key}`, existingBlob);
+      }
       await env.LICENSES.put(`backup:${rec.key}`, body.blob);
       return json({ ok: true });
     }
