@@ -237,7 +237,7 @@ final class FeedModel: ObservableObject {
     }
 
     private static func saveDiskCache(_ posts: [Gif], for key: String) {
-        let slice = Array(posts.prefix(18))
+        let slice = Array(posts.prefix(30))
         let url = cacheFileURL(for: key)
         Task.detached(priority: .utility) {
             if let data = try? JSONEncoder().encode(slice) {

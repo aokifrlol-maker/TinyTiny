@@ -420,6 +420,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private var lastLoadedTab: String = ""
     private var capturedSearchURL: String?
     private var capturedSearchHeaders: [String: String] = [:]
+    private var capturedGraphQLOps: [String: (url: String, headers: [String: String])] = [:]
+
+    var hasCapturedSearch: Bool { capturedSearchURL != nil }
 
     private override init() {
         super.init()
@@ -517,9 +520,15 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
             function shouldCapture(url) {
                 if (!url) return false;
-                return url.indexOf('/graphql') !== -1 ||
-                       url.indexOf('/i/api/') !== -1 ||
-                       url.indexOf('/1.1/') !== -1 ||
+                if (url.indexOf('/graphql') !== -1) {
+                    return url.indexOf('Timeline') !== -1 ||
+                           url.indexOf('Search') !== -1 ||
+                           url.indexOf('Bookmarks') !== -1 ||
+                           url.indexOf('UserMedia') !== -1 ||
+                           url.indexOf('UserTweets') !== -1 ||
+                           url.indexOf('Likes') !== -1;
+                }
+                return url.indexOf('adaptive.json') !== -1 ||
                        url.indexOf('settings.json') !== -1;
             }
 
@@ -528,16 +537,23 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 const req = args[0];
                 const url = (typeof req === 'string') ? req : (req && req.url ? req.url : '');
                 try {
-                    if (url && url.indexOf('/SearchTimeline') !== -1 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                        const init = args[1] || {};
-                        const hdrs = {};
-                        const src = (req && req.headers) ? req.headers : init.headers;
-                        if (src && typeof src.forEach === 'function') {
-                            src.forEach(function(v, k) { hdrs[k] = v; });
-                        } else if (src && typeof src === 'object') {
-                            Object.keys(src).forEach(function(k) { hdrs[k] = src[k]; });
+                    if (url && url.indexOf('/graphql/') !== -1 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
+                        const ops = ['HomeTimeline', 'HomeLatestTimeline', 'SearchTimeline', 'UserMedia', 'Bookmarks'];
+                        let matchedOp = null;
+                        for (let i = 0; i < ops.length; i++) {
+                            if (url.indexOf('/' + ops[i]) !== -1) { matchedOp = ops[i]; break; }
                         }
-                        window.webkit.messageHandlers.xBridge.postMessage({ type: 'graphqlOp', op: 'SearchTimeline', url: url, headers: hdrs });
+                        if (matchedOp) {
+                            const init = args[1] || {};
+                            const hdrs = {};
+                            const src = (req && req.headers) ? req.headers : init.headers;
+                            if (src && typeof src.forEach === 'function') {
+                                src.forEach(function(v, k) { hdrs[k] = v; });
+                            } else if (src && typeof src === 'object') {
+                                Object.keys(src).forEach(function(k) { hdrs[k] = src[k]; });
+                            }
+                            window.webkit.messageHandlers.xBridge.postMessage({ type: 'graphqlOp', op: matchedOp, url: url, headers: hdrs });
+                        }
                     }
                 } catch (e) {}
                 const resp = await origFetch.apply(this, args);
@@ -602,6 +618,19 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         let userScript = WKUserScript(source: hookJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         config.userContentController.addUserScript(userScript)
         config.userContentController.add(self, name: "xBridge")
+
+        // Block heavy images, fonts, and media downloads in the hidden scraper WebView
+        let blockRulesJSON = """
+        [
+          {"trigger":{"url-filter":".*","resource-type":["image","font","media"]},"action":{"type":"block"}}
+        ]
+        """
+        if let ruleList = try? await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "tinytiny-x-scraper-fast",
+            encodedContentRuleList: blockRulesJSON
+        ) {
+            config.userContentController.add(ruleList)
+        }
 
         let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
         wv.customUserAgent = Config.userAgent
@@ -671,10 +700,12 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         }
 
         if type == "graphqlOp",
-           let op = body["op"] as? String, op == "SearchTimeline",
+           let op = body["op"] as? String,
            let url = body["url"] as? String {
-            capturedSearchURL = url
-            if let hdrs = body["headers"] as? [String: String] {
+            let hdrs = (body["headers"] as? [String: String]) ?? [:]
+            capturedGraphQLOps[op] = (url: url, headers: hdrs)
+            if op == "SearchTimeline" {
+                capturedSearchURL = url
                 capturedSearchHeaders = hdrs
             }
             return
@@ -685,75 +716,92 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
               let jsonText = body["body"] as? String,
               let data = jsonText.data(using: .utf8) else { return }
 
-        if UserStore.shared.data.xSession.screenName.isEmpty,
-           let sn = XTweetParser.parseScreenName(from: data) {
-            UserStore.shared.data.xSession.screenName = sn
-        }
-
-        // Strict route isolation: never let X's "For you" HomeTimeline, initial SSR HTML, or Search payloads leak into Following/Bookmarks/User feeds
+        let routeAtCapture = activeRouteKey
         let pageUrl = (body["pageUrl"] as? String ?? "").lowercased()
-        if activeRouteKey == "x_following" {
+
+        // Strict route isolation before dispatching off-main parse
+        if routeAtCapture == "x_following" {
             let isForYouTimeline = (url.contains("HomeTimeline") && !url.contains("HomeLatestTimeline")) || url == "ssr_x"
             let isSearchResult = url.contains("SearchTimeline") || pageUrl.contains("/search") || url.contains("adaptive.json")
             if isForYouTimeline || isSearchResult {
                 return
             }
-        } else if activeRouteKey == "x_bookmarks" && !url.contains("Bookmarks") && !pageUrl.contains("/bookmarks") && url != "ssr_x" {
+        } else if routeAtCapture == "x_bookmarks" && !url.contains("Bookmarks") && !pageUrl.contains("/bookmarks") && url != "ssr_x" {
             return
-        } else if activeRouteKey.hasPrefix("x_search_") && (url.contains("HomeTimeline") || url.contains("HomeLatestTimeline")) {
+        } else if routeAtCapture.hasPrefix("x_search_") && (url.contains("HomeTimeline") || url.contains("HomeLatestTimeline")) {
             return
         }
 
-        let tweets = XTweetParser.parseTweets(from: data, routeKey: activeRouteKey)
-        if !tweets.isEmpty {
-            let store = UserStore.shared
-            let fresh = tweets.filter { post in
-                guard !store.isSeen(post),
-                      !store.isBlockedByAlgorithm(post) else { return false }
-                if activeRouteKey == "x_following" {
-                    let author = post.author ?? ""
-                    let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
-                    if viewerFollows == false && !store.isFollowingXUser(author) {
+        let blockedSnapshot = Set(UserStore.shared.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
+        let followedXSnapshot = Set(UserStore.shared.data.followedXUsers.map { $0.lowercased() })
+        let needScreenName = UserStore.shared.data.xSession.screenName.isEmpty
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let sn = needScreenName ? XTweetParser.parseScreenName(from: data) : nil
+            let tweets = XTweetParser.parseTweets(from: data, routeKey: routeAtCapture)
+            let filteredPre = tweets.filter { post in
+                if !blockedSnapshot.isEmpty {
+                    let tLower = post.title.lowercased()
+                    if blockedSnapshot.contains(where: { !$0.isEmpty && tLower.contains($0.lowercased()) }) {
                         return false
                     }
                 }
-                return seenIds.insert(post.canonicalDedupeKey).inserted
-            }
-            if !fresh.isEmpty {
-                dryPayloadCount = 0
-                var buf = routeBuffers[activeRouteKey] ?? []
-                buf.append(contentsOf: fresh)
-                routeBuffers[activeRouteKey] = buf
-                flushWaitersIfNeeded(for: activeRouteKey)
-                if buf.count < 24, let wv = webView {
-                    scheduleBackgroundPump(for: activeRouteKey, wv: wv)
+                if routeAtCapture == "x_following" {
+                    let author = post.author ?? ""
+                    let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
+                    if viewerFollows == false && !followedXSnapshot.contains(author.lowercased()) {
+                        return false
+                    }
                 }
-                return
+                return true
             }
-        }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let sn, !sn.isEmpty, UserStore.shared.data.xSession.screenName.isEmpty {
+                    UserStore.shared.data.xSession.screenName = sn
+                }
+                let store = UserStore.shared
+                let fresh = filteredPre.filter { post in
+                    guard !store.isSeen(post),
+                          !store.isBlockedByAlgorithm(post) else { return false }
+                    return self.seenIds.insert(post.canonicalDedupeKey).inserted
+                }
+                if !fresh.isEmpty {
+                    self.dryPayloadCount = 0
+                    var buf = self.routeBuffers[routeAtCapture] ?? []
+                    buf.append(contentsOf: fresh)
+                    self.routeBuffers[routeAtCapture] = buf
+                    self.flushWaitersIfNeeded(for: routeAtCapture)
+                    if buf.count < 24, let wv = self.webView, self.activeRouteKey == routeAtCapture {
+                        self.scheduleBackgroundPump(for: routeAtCapture, wv: wv)
+                    }
+                    return
+                }
 
-        let isTimelinePayload = url.contains("Timeline") || url.contains("Search") || url.contains("Bookmarks") || url.contains("likes") || url.contains("Likes") || url.contains("UserVideo") || url.contains("UserMedia") || jsonText.contains("media_entities2") || jsonText.contains("video_info")
-        guard isTimelinePayload else { return }
+                guard self.activeRouteKey == routeAtCapture else { return }
+                let isTimelinePayload = url.contains("Timeline") || url.contains("Search") || url.contains("Bookmarks") || url.contains("likes") || url.contains("Likes") || url.contains("UserVideo") || url.contains("UserMedia") || jsonText.contains("media_entities2") || jsonText.contains("video_info")
+                guard isTimelinePayload else { return }
 
-        dryPayloadCount += 1
-        let bufCount = routeBuffers[activeRouteKey]?.count ?? 0
-        // Only "For You" may fall back to adult search discovery; Following/Bookmarks/Search/User never mix in random tweets
-        let shouldSupplement = (activeRouteKey == "x_foryou")
-        if shouldSupplement && bufCount == 0 && dryPayloadCount >= 1,
-           let wv = webView,
-           let supURL = nextAdultSupplementURL() {
-            if dryPayloadCount >= 2 {
-                wv.load(URLRequest(url: supURL))
-            } else {
-                Task { @MainActor [weak self] in
-                    _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
-                    try? await Task.sleep(nanoseconds: 1_100_000_000)
-                    guard let self,
-                          self.activeRouteKey == "x_foryou",
-                          !self.waiters.filter({ $0.routeKey == self.activeRouteKey }).isEmpty,
-                          (self.routeBuffers[self.activeRouteKey]?.isEmpty ?? true),
-                          let nextSup = self.nextAdultSupplementURL() else { return }
-                    wv.load(URLRequest(url: nextSup))
+                self.dryPayloadCount += 1
+                let bufCount = self.routeBuffers[routeAtCapture]?.count ?? 0
+                let shouldSupplement = (routeAtCapture == "x_foryou")
+                if shouldSupplement && bufCount == 0 && self.dryPayloadCount >= 1,
+                   let wv = self.webView,
+                   let supURL = self.nextAdultSupplementURL() {
+                    if self.dryPayloadCount >= 2 {
+                        wv.load(URLRequest(url: supURL))
+                    } else {
+                        Task { @MainActor [weak self] in
+                            _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
+                            try? await Task.sleep(nanoseconds: 1_100_000_000)
+                            guard let self,
+                                  self.activeRouteKey == "x_foryou",
+                                  !self.waiters.filter({ $0.routeKey == self.activeRouteKey }).isEmpty,
+                                  (self.routeBuffers[self.activeRouteKey]?.isEmpty ?? true),
+                                  let nextSup = self.nextAdultSupplementURL() else { return }
+                            wv.load(URLRequest(url: nextSup))
+                        }
+                    }
                 }
             }
         }
@@ -1023,8 +1071,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             }
         }
 
-        // Direct warmed WebView search (first search captures SearchTimeline for subsequent queries)
-        let encoded = "\(baseQuery) filter:videos".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
+        // Direct warmed WebView search (use filter:native_video so every returned post has playable video)
+        let encoded = "\(baseQuery) filter:native_video".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
         let tab = (sort == "Latest") ? "live" : "top"
         let searchURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
         let res = await fetchFeed(
@@ -1041,6 +1089,57 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             targetURL: broadURL,
             isRefresh: true
         )
+    }
+
+    /// Executes a captured X GraphQL query directly inside the warmed `x.com` WebView context (~250-450ms, no full page reload).
+    func fetchGraphQLDirect(op: String, routeKey: String, count: Int = 40, cursor: String? = nil) async -> GoonedFeedResponse? {
+        guard let template = capturedGraphQLOps[op],
+              var comps = URLComponents(string: template.url),
+              let wv = webView else { return nil }
+        var items = comps.queryItems ?? []
+        if let varsItem = items.first(where: { $0.name == "variables" })?.value,
+           let varsData = varsItem.data(using: .utf8),
+           var varsObj = (try? JSONSerialization.jsonObject(with: varsData)) as? [String: Any] {
+            varsObj["count"] = count
+            if let cursor, cursor.hasPrefix("cursor:"), !cursor.dropFirst(7).isEmpty {
+                varsObj["cursor"] = String(cursor.dropFirst(7))
+            } else {
+                varsObj.removeValue(forKey: "cursor")
+            }
+            if let updatedData = try? JSONSerialization.data(withJSONObject: varsObj),
+               let updatedStr = String(data: updatedData, encoding: .utf8) {
+                items.removeAll { $0.name == "variables" }
+                items.append(URLQueryItem(name: "variables", value: updatedStr))
+                comps.queryItems = items
+            }
+        }
+        guard let targetURL = comps.url?.absoluteString else { return nil }
+        let js = """
+        const res = await fetch(url, { headers: headers, credentials: 'include' });
+        if (!res.ok) return null;
+        return await res.text();
+        """
+        guard let rawText = try? await wv.callAsyncJavaScript(
+            js,
+            arguments: ["url": targetURL, "headers": template.headers],
+            in: nil,
+            contentWorld: .page
+        ) as? String,
+              let data = rawText.data(using: .utf8) else {
+            return nil
+        }
+
+        let parsed = await Task.detached(priority: .userInitiated) {
+            XTweetParser.parseTweets(from: data, routeKey: routeKey)
+        }.value
+        let store = UserStore.shared
+        let filtered = parsed.filter {
+            !store.isSeen($0)
+            && !store.isBlockedByAlgorithm($0)
+            && seenIds.insert($0.canonicalDedupeKey).inserted
+        }
+        let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
+        return filtered.isEmpty ? nil : GoonedFeedResponse(posts: filtered, after: nextCursor)
     }
 
     /// Follows or unfollows an account directly on the user's real X account using authenticated CSRF headers.
@@ -1104,6 +1203,10 @@ enum XAPI {
         let tasteQueries = (store.data.algorithm.boostedTags + store.topAlgorithmTags.prefix(4).map(\.tag))
             .filter { !MediaMetaRegistry.isStopTag($0) }
 
+        if let direct = await XWebEngine.shared.fetchGraphQLDirect(op: "HomeTimeline", routeKey: "x_foryou", count: 40, cursor: after) {
+            return direct
+        }
+
         async let homeRes = XWebEngine.shared.fetchFeed(
             routeKey: "x_foryou",
             targetURL: url,
@@ -1111,7 +1214,9 @@ enum XAPI {
             isRefresh: after == nil
         )
 
-        if store.data.settings.algorithmEnabled, let pick = tasteQueries.randomElement() {
+        if store.data.settings.algorithmEnabled,
+           XWebEngine.shared.hasCapturedSearch,
+           let pick = tasteQueries.randomElement() {
             let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
                 .filter { !MediaMetaRegistry.isStopTag($0) }
                 .prefix(4)
@@ -1138,6 +1243,9 @@ enum XAPI {
     }
 
     static func following(after: String? = nil) async -> GoonedFeedResponse {
+        if let direct = await XWebEngine.shared.fetchGraphQLDirect(op: "HomeLatestTimeline", routeKey: "x_following", count: 40, cursor: after) {
+            return direct
+        }
         let url = URL(string: "https://x.com/home")!
         let store = UserStore.shared
         async let homeFollowing = XWebEngine.shared.fetchFeed(
@@ -1146,9 +1254,9 @@ enum XAPI {
             homeTabLabel: "Following",
             isRefresh: after == nil
         )
-        // Also blend recent videos from any X creators explicitly followed inside TinyTiny
+        // Also blend recent videos from any X creators explicitly followed inside TinyTiny (only when SearchTimeline is already captured so it never blocks)
         let localHandles = Array(store.data.followedXUsers.prefix(3))
-        if !localHandles.isEmpty, after == nil, let pick = localHandles.randomElement() {
+        if !localHandles.isEmpty, after == nil, XWebEngine.shared.hasCapturedSearch, let pick = localHandles.randomElement() {
             async let localCreator = XWebEngine.shared.searchFast(query: "from:\(pick)", sort: "Latest", after: nil)
             let (hf, lc) = await (homeFollowing, localCreator)
             var merged = hf.posts

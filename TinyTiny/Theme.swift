@@ -44,7 +44,7 @@ enum Theme {
 // MARK: - Liquid Glass Modifiers (Tinted vs Clear, matching gooned.app Settings)
 
 struct LiquidGlassCapsule: ViewModifier {
-    var tinted: Bool = true
+    var tinted: Bool = false
     var active: Bool = false
 
     func body(content: Content) -> some View {
@@ -69,7 +69,7 @@ struct LiquidGlassCapsule: ViewModifier {
 }
 
 struct LiquidGlassCircle: ViewModifier {
-    var tinted: Bool = true
+    var tinted: Bool = false
     var active: Bool = false
 
     func body(content: Content) -> some View {
@@ -95,7 +95,7 @@ struct LiquidGlassCircle: ViewModifier {
 
 struct LiquidGlassCard: ViewModifier {
     var cornerRadius: CGFloat = 22
-    var tinted: Bool = true
+    var tinted: Bool = false
 
     func body(content: Content) -> some View {
         content
@@ -115,15 +115,15 @@ struct LiquidGlassCard: ViewModifier {
 }
 
 extension View {
-    func liquidGlassCapsule(tinted: Bool = true, active: Bool = false) -> some View {
+    func liquidGlassCapsule(tinted: Bool = false, active: Bool = false) -> some View {
         modifier(LiquidGlassCapsule(tinted: tinted, active: active))
     }
 
-    func liquidGlassCircle(tinted: Bool = true, active: Bool = false) -> some View {
+    func liquidGlassCircle(tinted: Bool = false, active: Bool = false) -> some View {
         modifier(LiquidGlassCircle(tinted: tinted, active: active))
     }
 
-    func liquidGlassCard(cornerRadius: CGFloat = 22, tinted: Bool = true) -> some View {
+    func liquidGlassCard(cornerRadius: CGFloat = 22, tinted: Bool = false) -> some View {
         modifier(LiquidGlassCard(cornerRadius: cornerRadius, tinted: tinted))
     }
 }

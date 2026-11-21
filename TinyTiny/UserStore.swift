@@ -8,7 +8,7 @@ struct AppSettings: Codable {
     var autoScroll: Bool = false
     var autoScrollDelay: Int = 6       // 3, 6, 10, 15 seconds (matches gooned.app Settings)
     var playVideosToEnd: Bool = true   // matches gooned.app Settings
-    var tintedGlass: Bool = true       // Liquid Glass: Clear vs Tinted
+    var tintedGlass: Bool = false      // Liquid Glass: Clear (default) vs Tinted
     var videoFitScreen: Bool = true    // Fit entire video on screen by default (prevents weird cropping)
     var controlsCollapsed: Bool = false // Collapses bottom-left UI & dock down out of the way
     var algorithmEnabled: Bool = true  // Smart on-device For You personalization algorithm
@@ -27,7 +27,7 @@ struct AppSettings: Codable {
         autoScroll = (try? c.decode(Bool.self, forKey: .autoScroll)) ?? false
         autoScrollDelay = (try? c.decode(Int.self, forKey: .autoScrollDelay)) ?? 6
         playVideosToEnd = (try? c.decode(Bool.self, forKey: .playVideosToEnd)) ?? true
-        tintedGlass = (try? c.decode(Bool.self, forKey: .tintedGlass)) ?? true
+        tintedGlass = (try? c.decode(Bool.self, forKey: .tintedGlass)) ?? false
         videoFitScreen = (try? c.decode(Bool.self, forKey: .videoFitScreen)) ?? true
         controlsCollapsed = (try? c.decode(Bool.self, forKey: .controlsCollapsed)) ?? false
         algorithmEnabled = (try? c.decode(Bool.self, forKey: .algorithmEnabled)) ?? true

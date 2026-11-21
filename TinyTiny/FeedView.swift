@@ -252,33 +252,57 @@ struct RemoteImageView: View {
 final class VideoPreloader {
     static let shared = VideoPreloader()
     private var cachedAssets: [String: AVURLAsset] = [:]
+    private var preloadedItems: [String: AVPlayerItem] = [:]
     private var order: [String] = []
+    private var itemOrder: [String] = []
 
     func preload(gifs: [Gif], hd: Bool) {
-        MediaImageLoader.shared.prefetch(urls: gifs.prefix(5).map(\.posterURL))
-        for gif in gifs.prefix(5) {
+        MediaImageLoader.shared.prefetch(urls: gifs.prefix(6).map(\.posterURL))
+        for (idx, gif) in gifs.prefix(5).enumerated() {
             guard !gif.isImage, let url = gif.videoURL(hd: hd) else { continue }
             let key = url.absoluteString
-            guard cachedAssets[key] == nil else { continue }
             let asset: AVURLAsset
-            if url.isFileURL {
-                asset = AVURLAsset(url: url)
+            if let existing = cachedAssets[key] {
+                asset = existing
             } else {
-                asset = AVURLAsset(
-                    url: url,
-                    options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url)]
-                )
+                if url.isFileURL {
+                    asset = AVURLAsset(url: url)
+                } else {
+                    asset = AVURLAsset(
+                        url: url,
+                        options: ["AVURLAssetHTTPHeaderFieldsKey": MediaHeaders.headers(for: url)]
+                    )
+                }
+                cachedAssets[key] = asset
+                order.append(key)
+                if order.count > 16, let oldest = order.first {
+                    order.removeFirst()
+                    cachedAssets.removeValue(forKey: oldest)
+                }
             }
-            cachedAssets[key] = asset
-            order.append(key)
-            if order.count > 14, let oldest = order.first {
-                order.removeFirst()
-                cachedAssets.removeValue(forKey: oldest)
+            // Pre-buffer the next 3 upcoming videos as ready-to-play AVPlayerItems
+            if idx < 3, preloadedItems[key] == nil {
+                let item = AVPlayerItem(asset: asset)
+                item.preferredForwardBufferDuration = 2.0
+                preloadedItems[key] = item
+                itemOrder.append(key)
+                if itemOrder.count > 4, let oldestItemKey = itemOrder.first {
+                    itemOrder.removeFirst()
+                    preloadedItems.removeValue(forKey: oldestItemKey)
+                }
             }
             Task.detached(priority: .utility) {
                 _ = try? await asset.load(.isPlayable)
             }
         }
+    }
+
+    func popPreloadedItem(for url: URL, includeReferer: Bool = true) -> AVPlayerItem? {
+        guard includeReferer, !url.isFileURL else { return nil }
+        let key = url.absoluteString
+        guard let item = preloadedItems.removeValue(forKey: key) else { return nil }
+        itemOrder.removeAll { $0 == key }
+        return item
     }
 
     func asset(for url: URL, includeReferer: Bool = true) -> AVURLAsset {
@@ -461,8 +485,13 @@ final class PlayerModel: ObservableObject {
         let entry = candidateEntries[index]
         let url = entry.url
         let isHLS = url.absoluteString.lowercased().contains(".m3u8")
-        let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
-        let item = AVPlayerItem(asset: asset)
+        let item: AVPlayerItem
+        if let prebuffered = VideoPreloader.shared.popPreloadedItem(for: url, includeReferer: entry.includeReferer) {
+            item = prebuffered
+        } else {
+            let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
+            item = AVPlayerItem(asset: asset)
+        }
         item.preferredForwardBufferDuration = isHLS ? 2.5 : 1.5
         player.automaticallyWaitsToMinimizeStalling = isHLS
 

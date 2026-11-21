@@ -511,11 +511,25 @@ struct GoonedMainShell: View {
                 Task { await ofForYouModel.loadMore() }
             }
             if store.data.xSession.isConnected {
+                // Pre-warm TLS/HTTP connections to X media CDNs so first video/poster starts instantly
+                Task.detached(priority: .utility) {
+                    for host in ["https://video.twimg.com/", "https://pbs.twimg.com/"] {
+                        if let u = URL(string: host) {
+                            var req = URLRequest(url: u)
+                            req.httpMethod = "HEAD"
+                            req.timeoutInterval = 4
+                            _ = try? await URLSession.shared.data(for: req)
+                        }
+                    }
+                }
                 Task { @MainActor in
                     if xForYouModel.items.isEmpty {
                         await xForYouModel.loadMore()
                     } else {
                         await XWebEngine.shared.warmUp()
+                    }
+                    if xFollowingModel.items.isEmpty {
+                        await xFollowingModel.loadMore()
                     }
                 }
             }

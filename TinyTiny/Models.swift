@@ -223,9 +223,18 @@ struct Gif: Codable, Identifiable, Hashable {
             urls.append(local)
         }
         // 2. Remote stream candidates (validated so .gif/.jpg/HTML never enter AVPlayer)
-        var candidates: [String?] = hd
-            ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
-            : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
+        // Prefer adaptive HLS (.m3u8) first on X posts for near-instant startup like x.com;
+        // OfflineManager filters out .m3u8 and still downloads the highest-quality direct MP4.
+        var candidates: [String?]
+        if isXPost, let hls = hlsUrl, !hls.isEmpty {
+            candidates = hd
+                ? [hls, muxedUrlHd, muxedUrl, mediaUrl]
+                : [hls, muxedUrl, muxedUrlHd, mediaUrl]
+        } else {
+            candidates = hd
+                ? [muxedUrlHd, muxedUrl, mediaUrl, hlsUrl]
+                : [muxedUrl, muxedUrlHd, mediaUrl, hlsUrl]
+        }
         let extra = MediaMetaRegistry.extraVideoURLs(for: id)
         for u in extra { candidates.append(u) }
         var seen = Set<String>()
