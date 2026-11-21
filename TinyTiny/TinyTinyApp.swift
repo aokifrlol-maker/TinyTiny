@@ -103,9 +103,17 @@ struct RootView: View {
         .animation(.spring(response: 0.45, dampingFraction: 0.86), value: app.passcodeChoiceCompleted)
         .animation(.easeInOut(duration: 0.2), value: app.isLocked)
         .task {
-            if license.isValidAccess {
+            if license.status.isActivated {
                 await license.verifySilently()
                 app.licenseActivated = license.isValidAccess
+            }
+        }
+        .onChange(of: phase) { _, newPhase in
+            if newPhase == .active && license.status.isActivated {
+                Task {
+                    await license.verifySilently()
+                    app.licenseActivated = license.isValidAccess
+                }
             }
         }
         .onOpenURL { url in

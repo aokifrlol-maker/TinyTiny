@@ -2604,18 +2604,6 @@ struct GoonedSettingsModal: View {
                                         }
                                     }
                                     Button {
-                                        let keyPart = license.status.licenseKey.isEmpty ? "" : "?text=" + ("/extend \(license.status.licenseKey) 30d".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")
-                                        if let tgURL = URL(string: "https://t.me/JarveyIsBot\(keyPart)") {
-                                            UIApplication.shared.open(tgURL)
-                                        }
-                                    } label: {
-                                        Label("Extend (Telegram)", systemImage: "paperplane.fill")
-                                            .font(.caption.bold())
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 6)
-                                            .liquidGlassCapsule()
-                                    }
-                                    Button {
                                         Task {
                                             syncStatusMessage = "Checking license..."
                                             await license.verifySilently()
@@ -2628,6 +2616,9 @@ struct GoonedSettingsModal: View {
                                             .padding(.vertical, 6)
                                             .liquidGlassCapsule()
                                     }
+                                }
+                                .onAppear {
+                                    Task { await license.verifySilently() }
                                 }
                                 if let syncStatusMessage {
                                     Text(syncStatusMessage)

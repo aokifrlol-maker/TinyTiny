@@ -127,6 +127,7 @@ final class LicenseManager: ObservableObject {
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = ["key": cleanKey, "deviceId": deviceId]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -171,6 +172,7 @@ final class LicenseManager: ObservableObject {
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "key": status.licenseKey,
@@ -244,6 +246,7 @@ final class LicenseManager: ObservableObject {
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "key": status.licenseKey,
@@ -472,8 +475,8 @@ struct LicenseGateView: View {
                     Text(license.status.isExpiredOrRevoked ? "License Expired" : "Activate Access")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(license.status.isExpiredOrRevoked
-                         ? "Your license key expired. Enter a new key below — all likes & follows stay saved."
-                         : "Enter the license key sent by @JarveyIsBot to unlock & sync your vault.")
+                         ? "Your license key expired. Enter a valid key below — all likes & follows stay saved."
+                         : "Enter your license key to unlock & sync your vault.")
                         .font(.system(size: 13.5))
                         .foregroundStyle(.white.opacity(0.70))
                         .multilineTextAlignment(.center)
@@ -544,12 +547,17 @@ struct LicenseGateView: View {
                             }
 
                             Button {
-                                let encoded = "/extend \(license.status.licenseKey) 30d".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                                if let tgURL = URL(string: "https://t.me/JarveyIsBot?text=\(encoded)") {
-                                    UIApplication.shared.open(tgURL)
+                                Task {
+                                    await license.verifySilently()
+                                    if license.isValidAccess {
+                                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                        onActivated()
+                                    } else {
+                                        UINotificationFeedbackGenerator().notificationOccurred(.error)
+                                    }
                                 }
                             } label: {
-                                Label("Extend on Telegram", systemImage: "paperplane.fill")
+                                Label("Check Status", systemImage: "arrow.clockwise")
                                     .font(.caption.bold())
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 9)
