@@ -757,7 +757,7 @@ struct GoonedMainShell: View {
             customSource: activeChannel == .custom ? customModel.source : nil,
             customItems: activeChannel == .custom ? customModel.items : [],
             customCursor: activeChannel == .custom ? customModel.currentAfterCursor : nil,
-            customHasMore: activeChannel == .custom ? customModel.hasMore : true,
+            customHasMore: activeChannel == .custom ? customModel.canLoadMore : true,
             postID: slotPostIDs[activeChannel],
             returnTab: returnTab,
             creatorGridSource: creatorGridSource
