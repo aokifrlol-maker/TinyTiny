@@ -434,6 +434,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
     var hasCapturedSearch: Bool { capturedSearchURL != nil }
     var isRateLimited: Bool { (rateLimitedUntil ?? .distantPast) > Date() }
+    var isCurrentlyBusy: Bool { isEngineBusy }
 
     private override init() {
         super.init()
@@ -1302,7 +1303,60 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
 @MainActor
 enum XAPI {
+    private static var tasteRoundRobin: Int = 0
+
     static func forYou(after: String? = nil) async -> GoonedFeedResponse {
+        let store = UserStore.shared
+        let pinnedTags = store.data.algorithm.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
+        let learnedTags = store.topAlgorithmTags.prefix(4).map(\.tag).filter { !MediaMetaRegistry.isStopTag($0) }
+        let activeTags = !pinnedTags.isEmpty ? pinnedTags : learnedTags
+
+        // When user has tags in Edit #Tags & Taste (or learned tags) and Algorithm is on, blend matching X videos directly into X For You!
+        if store.data.settings.algorithmEnabled, !activeTags.isEmpty, !XWebEngine.isRateLimitedNow {
+            let pick = activeTags[tasteRoundRobin % activeTags.count]
+                .replacingOccurrences(of: "_", with: " ")
+            tasteRoundRobin += 1
+            let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
+                .filter { !MediaMetaRegistry.isStopTag($0) }
+                .prefix(3)
+                .map { "-\($0)" }
+                .joined(separator: " ")
+            let q = "nsfw \(pick) \(blocked)".trimmingCharacters(in: .whitespaces)
+
+            // If the Search lane is idle, fetch HomeTimeline (on .home lane) and the user's #Tag search (on .shared lane) in parallel!
+            if !XWebEngine.shared.isCurrentlyBusy {
+                let url = URL(string: "https://x.com/home")!
+                async let homeTask: GoonedFeedResponse = {
+                    if let direct = await XWebEngine.home.fetchGraphQLDirect(op: "HomeTimeline", routeKey: "x_foryou", count: 40, cursor: after) {
+                        return direct
+                    }
+                    return await XWebEngine.home.fetchFeed(
+                        routeKey: "x_foryou",
+                        targetURL: url,
+                        homeTabLabel: "For you",
+                        isRefresh: after == nil
+                    )
+                }()
+                async let tagTask = XWebEngine.shared.searchFast(query: q, sort: "Top", after: nil)
+                let (h, t) = await (homeTask, tagTask)
+                if !t.posts.isEmpty {
+                    var merged: [Gif] = []
+                    var seen = Set<String>()
+                    let maxLen = max(h.posts.count, t.posts.count)
+                    for i in 0..<maxLen {
+                        if i < t.posts.count, seen.insert(t.posts[i].canonicalDedupeKey).inserted {
+                            merged.append(t.posts[i])
+                        }
+                        if i < h.posts.count, seen.insert(h.posts[i].canonicalDedupeKey).inserted {
+                            merged.append(h.posts[i])
+                        }
+                    }
+                    return GoonedFeedResponse(posts: merged, after: h.after ?? t.after)
+                }
+                return h
+            }
+        }
+
         if let direct = await XWebEngine.home.fetchGraphQLDirect(op: "HomeTimeline", routeKey: "x_foryou", count: 40, cursor: after) {
             return direct
         }

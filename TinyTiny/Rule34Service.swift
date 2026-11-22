@@ -223,7 +223,8 @@ actor Rule34API {
                 && !pinnedLower.contains("gay") && !pinnedLower.contains("yaoi") {
                 combinedBlocked.formUnion(["gay", "yaoi", "bara", "male_only", "males_only"])
             }
-            let activeTaste = engine.activeQueryTags(pinned: algo.boostedTags, blocked: algo.blockedTags, count: 6)
+            let pinned = algo.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
+            let activeTaste = !pinned.isEmpty ? pinned : engine.activeQueryTags(pinned: algo.boostedTags, blocked: algo.blockedTags, count: 6)
             return (Array(combinedBlocked), activeTaste)
         }
         let cleanTagString = tags.joined(separator: " ")

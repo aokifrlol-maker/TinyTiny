@@ -2039,39 +2039,41 @@ struct GoonedReelCell: View {
                     }
                 }
 
-                HStack(spacing: 10) {
-                    Button {
-                        if albumIndex > 0 {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            withAnimation(.easeOut(duration: 0.2)) { albumIndex -= 1 }
+                if !collapsed {
+                    HStack(spacing: 10) {
+                        Button {
+                            if albumIndex > 0 {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                withAnimation(.easeOut(duration: 0.2)) { albumIndex -= 1 }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white.opacity(albumIndex > 0 ? 0.95 : 0.3))
                         }
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white.opacity(albumIndex > 0 ? 0.95 : 0.3))
-                    }
-                    .disabled(albumIndex <= 0)
+                        .disabled(albumIndex <= 0)
 
-                    Text("\(albumIndex + 1) / \(albumItems.count)")
-                        .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white)
+                        Text("\(albumIndex + 1) / \(albumItems.count)")
+                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white)
 
-                    Button {
-                        if albumIndex + 1 < albumItems.count {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            withAnimation(.easeOut(duration: 0.2)) { albumIndex += 1 }
+                        Button {
+                            if albumIndex + 1 < albumItems.count {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                withAnimation(.easeOut(duration: 0.2)) { albumIndex += 1 }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white.opacity(albumIndex + 1 < albumItems.count ? 0.95 : 0.3))
                         }
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white.opacity(albumIndex + 1 < albumItems.count ? 0.95 : 0.3))
+                        .disabled(albumIndex + 1 >= albumItems.count)
                     }
-                    .disabled(albumIndex + 1 >= albumItems.count)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .liquidGlassCapsule(tinted: tinted)
+                    .padding(.top, 96)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .liquidGlassCapsule(tinted: tinted)
-                .padding(.top, 96)
             }
             .frame(width: size.width, height: size.height)
         } else if let single = albumItems.first, !single.isVideo {

@@ -72,21 +72,24 @@ actor LongVideoAPI {
         let page = max(1, (Int(after ?? "1") ?? 1))
         let cleanQ = (query ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Pull user's Smart Personalization tags & guardrails
-        let (tasteTags, suppressGay) = await MainActor.run { () -> ([String], Bool) in
+        // Pull user's Smart Personalization tags & guardrails (prioritize explicit boostedTags from Edit #Tags & Taste)
+        let (boostedOnly, tasteTags, suppressGay) = await MainActor.run { () -> ([String], [String], Bool) in
             let algo = UserStore.shared.data.algorithm
             let engine = SmartTasteEngine.shared
+            let pinned = algo.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
             let tags = engine.activeQueryTags(pinned: algo.boostedTags, blocked: algo.blockedTags, count: 6)
             let blockedLower = Set(algo.blockedTags.map { $0.lowercased() }).union(engine.state.suppressedTags)
             let pinnedLower = Set(algo.boostedTags.map { $0.lowercased() })
             let noGay = (blockedLower.contains("gay") || blockedLower.contains("men") || blockedLower.contains("yaoi"))
                 && !pinnedLower.contains("gay")
-            return (tags, noGay)
+            return (pinned, tags, noGay)
         }
 
         let tasteQuery: String? = {
-            guard cleanQ.isEmpty, !tasteTags.isEmpty else { return nil }
-            let raw = tasteTags[(page - 1) % tasteTags.count]
+            guard cleanQ.isEmpty else { return nil }
+            let pool = !boostedOnly.isEmpty ? boostedOnly : tasteTags
+            guard !pool.isEmpty else { return nil }
+            let raw = pool[(page - 1) % pool.count]
             return raw.replacingOccurrences(of: "_", with: " ")
         }()
 
@@ -813,21 +816,53 @@ actor LongVideoAPI {
 
     // MARK: - 5. Erome.com Album Listing & Direct MP4 Resolver
 
+    func searchEromePreview(query: String, limit: Int = 8) async -> [Gif] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return [] }
+        let items = await fetchErome(query: trimmed, sort: "hot", page: 1)
+        return Array(items.prefix(limit))
+    }
+
     private func fetchErome(query: String, sort: String, page: Int) async -> [Gif] {
         let targetURL: URL?
-        if query.isEmpty {
+        let cleanQ = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanQ.isEmpty {
             let path = (sort == "new") ? "explore/new" : "explore"
             targetURL = URL(string: "https://www.erome.com/\(path)?page=\(page)")
         } else {
-            let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-            targetURL = URL(string: "https://www.erome.com/search?q=\(enc)&page=\(page)")
+            let enc = cleanQ.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? cleanQ
+            let orderParam = (sort == "new") ? "&o=new" : ""
+            targetURL = URL(string: "https://www.erome.com/search?q=\(enc)&page=\(page)\(orderParam)")
         }
-        guard let url = targetURL,
-              let (data, resp) = try? await desktopSession.data(from: url),
+        guard let url = targetURL else { return [] }
+        var req = URLRequest(url: url)
+        req.setValue("https://www.erome.com/", forHTTPHeaderField: "Referer")
+        guard let (data, resp) = try? await desktopSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let html = String(data: data, encoding: .utf8) else {
             return []
         }
+
+        var posts = parseEromeListingHTML(html)
+        // If a multi-word search returned 0 on page 1, fallback to the primary keyword so Erome search still delivers relevant albums
+        if posts.isEmpty && page == 1 && cleanQ.contains(" ") {
+            if let primaryWord = cleanQ.split(separator: " ").map(String.init).max(by: { $0.count < $1.count }),
+               primaryWord.count >= 3,
+               let encWord = primaryWord.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+               let fbURL = URL(string: "https://www.erome.com/search?q=\(encWord)&page=1") {
+                var fbReq = URLRequest(url: fbURL)
+                fbReq.setValue("https://www.erome.com/", forHTTPHeaderField: "Referer")
+                if let (fbData, fbResp) = try? await desktopSession.data(for: fbReq),
+                   (fbResp as? HTTPURLResponse)?.statusCode == 200,
+                   let fbHTML = String(data: fbData, encoding: .utf8) {
+                    posts = parseEromeListingHTML(fbHTML)
+                }
+            }
+        }
+        return posts
+    }
+
+    private func parseEromeListingHTML(_ html: String) -> [Gif] {
 
         var posts: [Gif] = []
         var seen = Set<String>()

@@ -4,6 +4,7 @@ import Photos
 // MARK: - 1. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
 
 struct GoonedBrowseOverlay: View {
+    var initialScope: SearchScope = .all
     var onClose: () -> Void
     var onSelectFeed: (FeedSource) -> Void
     var onOpenPost: (Gif) -> Void = { _ in }
@@ -28,6 +29,7 @@ struct GoonedBrowseOverlay: View {
     @State private var searchResults = GoonedSearchResponsePlaceholder()
     @State private var r34Suggestions: [Rule34TagSuggestion] = []
     @State private var ofCreators: [OFCreator] = []
+    @State private var eromePreview: [Gif] = []
     @State private var featuredOFCreators: [OFCreator] = []
     @State private var isSearching = false
     @State private var showReceiveDrop = false
@@ -164,6 +166,9 @@ struct GoonedBrowseOverlay: View {
                 }
             }
         }
+        .onAppear {
+            searchScope = initialScope
+        }
         .task {
             if featuredOFCreators.isEmpty {
                 featuredOFCreators = await OnlyFansAPI.shared.topCreators(limit: 12)
@@ -175,6 +180,7 @@ struct GoonedBrowseOverlay: View {
                 searchResults = GoonedSearchResponsePlaceholder()
                 r34Suggestions = []
                 ofCreators = []
+                eromePreview = []
                 return
             }
             isSearching = true
@@ -183,12 +189,14 @@ struct GoonedBrowseOverlay: View {
             async let redditTask = try? GoonedAPI.shared.search(q)
             async let r34Task = Rule34API.shared.autocomplete(q)
             async let ofTask = OnlyFansAPI.shared.searchCreators(q, limit: 25)
-            let (redditRes, r34Res, ofRes) = await (redditTask, r34Task, ofTask)
+            async let eromeTask = LongVideoAPI.shared.searchEromePreview(query: q, limit: 8)
+            let (redditRes, r34Res, ofRes, eromeRes) = await (redditTask, r34Task, ofTask, eromeTask)
             if let redditRes {
                 searchResults = GoonedSearchResponsePlaceholder(subreddits: redditRes.subreddits, users: redditRes.users)
             }
             r34Suggestions = r34Res
             ofCreators = ofRes
+            eromePreview = eromeRes
             isSearching = false
         }
         .sheet(isPresented: $showReceiveDrop) {
@@ -794,7 +802,7 @@ struct GoonedBrowseOverlay: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Search \"\(clean)\" on Erome")
                                     .font(.system(size: 15, weight: .bold))
-                                Text("Albums & MP4 videos on erome.com")
+                                Text("Open full Erome video/album scroller for \"\(clean)\"")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -807,6 +815,43 @@ struct GoonedBrowseOverlay: View {
                         .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
                     }
                     .buttonStyle(ScalePressButtonStyle())
+
+                    if !eromePreview.isEmpty {
+                        Text("EROME ALBUMS")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color(red: 0.92, green: 0.34, blue: 0.62))
+                            .padding(.horizontal, 4)
+
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                            ForEach(eromePreview.prefix(6)) { post in
+                                Button {
+                                    store.recordSearchSignal(clean)
+                                    onSelectFeed(.longSearch(.erome, clean))
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        RemoteImageView(
+                                            url: post.thumbURL,
+                                            fallbackURLs: post.posterFallbackURLs,
+                                            fill: true,
+                                            showSpinnerOnLoad: false
+                                        )
+                                        .frame(width: 44, height: 58)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                        Text(post.title ?? "Erome Album")
+                                            .font(.system(size: 12.5, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(8)
+                                    .liquidGlassCard(cornerRadius: 14, tinted: store.data.settings.tintedGlass)
+                                }
+                                .buttonStyle(ScalePressButtonStyle())
+                            }
+                        }
+                    }
                 }
 
                 if showLong && !clean.isEmpty {

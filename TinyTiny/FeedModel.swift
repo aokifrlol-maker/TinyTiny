@@ -403,6 +403,27 @@ final class FeedModel: ObservableObject {
         if let sim { seenSimKeys.insert(sim) }
     }
 
+    /// Trims unviewed tail items after the current reel and immediately fetches a fresh batch matching updated `#Tags & Taste`.
+    func refreshTailForUpdatedTaste(currentID: String?) {
+        guard !source.isList else { return }
+        if let currentID, let curIdx = items.firstIndex(where: { $0.id == currentID }) {
+            let keepCount = min(items.count, curIdx + 2)
+            let dropped = items.suffix(from: keepCount)
+            for d in dropped {
+                ids.remove(d.id)
+                mediaKeys.remove(d.canonicalDedupeKey)
+            }
+            items = Array(items.prefix(keepCount))
+        } else {
+            items.removeAll()
+            ids.removeAll()
+            mediaKeys.removeAll()
+        }
+        emptyPageStreak = 0
+        hasMore = true
+        Task { await loadMore() }
+    }
+
     func purgeSuppressedItems(afterCurrentID currentID: String?, purgeUpcomingOF: Bool) {
         let curIdx = currentID.flatMap { id in items.firstIndex(where: { $0.id == id }) } ?? -1
         let store = UserStore.shared
@@ -821,10 +842,15 @@ final class FeedModel: ObservableObject {
             guard wantReddit else { return [] }
             var tasteBatch: [Gif] = []
             if !activeTasteTags.isEmpty {
-                let tagPick = activeTasteTags[curOF % activeTasteTags.count]
+                let pinned = store.data.algorithm.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
+                let pool = !pinned.isEmpty ? pinned : activeTasteTags
+                let tagPick = pool[curOF % pool.count]
                     .replacingOccurrences(of: "_", with: "")
-                if let catResp = try? await api.category(tagPick, sort: self.sort.rawValue, after: nil, limit: 14) {
+                if let catResp = try? await api.category(tagPick, sort: self.sort.rawValue, after: nil, limit: 14),
+                   !catResp.posts.isEmpty {
                     tasteBatch.append(contentsOf: catResp.posts)
+                } else if let subResp = try? await api.subreddit(tagPick, sort: self.sort.rawValue, after: nil, limit: 14) {
+                    tasteBatch.append(contentsOf: subResp.posts)
                 }
             }
             if !topLearnedSubs.isEmpty {

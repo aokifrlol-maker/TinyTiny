@@ -572,9 +572,16 @@ final class UserStore: ObservableObject {
         for pinned in data.algorithm.boostedTags {
             let p = pinned.lowercased()
             let cleanP = p.replacingOccurrences(of: "_", with: "")
+            let spacedP = p.replacingOccurrences(of: "_", with: " ")
             let canonicalPinned = PornTagCatalog.normalize(p, categories: categories) ?? p
-            if recognizedTags.contains(canonicalPinned) || recognizedTags.contains(p) || subLower.contains(cleanP) || authorLower.contains(cleanP) || titleLower.contains(p) {
-                score += 18.0
+            if recognizedTags.contains(canonicalPinned)
+                || recognizedTags.contains(p)
+                || subLower.contains(cleanP)
+                || authorLower.contains(cleanP)
+                || titleLower.contains(p)
+                || titleLower.contains(cleanP)
+                || titleLower.contains(spacedP) {
+                score += 48.0
             }
         }
         if !post.isImage {

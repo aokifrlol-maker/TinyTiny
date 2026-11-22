@@ -367,7 +367,19 @@ struct GoonedMainShell: View {
 
             // 4. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
             if activeTab == .browse {
+                let defaultScope: GoonedBrowseOverlay.SearchScope = {
+                    switch activeChannel {
+                    case .longErome: return .erome
+                    case .xForYou, .xFollowing, .xBookmarks: return .x
+                    case .igReels, .igFollowing, .igSaved: return .ig
+                    case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return .of
+                    case .rule34: return .rule34
+                    case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return .long
+                    default: return .all
+                    }
+                }()
                 GoonedBrowseOverlay(
+                    initialScope: defaultScope,
                     onClose: {
                         withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                             activeTab = .home
@@ -583,6 +595,24 @@ struct GoonedMainShell: View {
         .onChange(of: activeChannel) { _, _ in syncOrientationLock() }
         .onChange(of: activeTab) { _, _ in syncOrientationLock() }
         .onChange(of: customModel.source) { _, _ in syncOrientationLock() }
+        .onChange(of: store.data.algorithm.boostedTags) { _, _ in
+            forYouModel.refreshTailForUpdatedTaste(currentID: slotPostIDs[.forYou])
+            if store.data.xSession.isConnected {
+                xForYouModel.refreshTailForUpdatedTaste(currentID: slotPostIDs[.xForYou])
+            }
+            ofForYouModel.refreshTailForUpdatedTaste(currentID: slotPostIDs[.ofForYou])
+            r34Model.refreshTailForUpdatedTaste(currentID: slotPostIDs[.rule34])
+            longEromeModel.refreshTailForUpdatedTaste(currentID: slotPostIDs[.longErome])
+            longAllModel.refreshTailForUpdatedTaste(currentID: slotPostIDs[.longAll])
+        }
+        .onChange(of: store.data.algorithm.blockedTags) { _, _ in
+            forYouModel.purgeSuppressedItems(afterCurrentID: slotPostIDs[.forYou], purgeUpcomingOF: false)
+            xForYouModel.purgeSuppressedItems(afterCurrentID: slotPostIDs[.xForYou], purgeUpcomingOF: false)
+            ofForYouModel.purgeSuppressedItems(afterCurrentID: slotPostIDs[.ofForYou], purgeUpcomingOF: false)
+            r34Model.purgeSuppressedItems(afterCurrentID: slotPostIDs[.rule34], purgeUpcomingOF: false)
+            longEromeModel.purgeSuppressedItems(afterCurrentID: slotPostIDs[.longErome], purgeUpcomingOF: false)
+            longAllModel.purgeSuppressedItems(afterCurrentID: slotPostIDs[.longAll], purgeUpcomingOF: false)
+        }
     }
 
     private func openSharedPost(_ post: Gif) {
