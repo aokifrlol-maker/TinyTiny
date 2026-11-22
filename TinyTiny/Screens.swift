@@ -2623,7 +2623,6 @@ struct GoonedSettingsModal: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
                 }
-            }
             .foregroundStyle(.white)
             .background(
                 RoundedRectangle(cornerRadius: 30, style: .continuous)
