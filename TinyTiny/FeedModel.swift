@@ -426,10 +426,19 @@ final class FeedModel: ObservableObject {
             var totalAddedThisCall = 0
             var attempts = 0
             var fallbackSeen: [Gif] = []
-            let maxAttempts = (source.isXFeed || source.isIGFeed) ? 4 : (source == .following ? 2 : 3)
+            let isProfileOrSearch: Bool = {
+                switch source {
+                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            let maxAttempts = isProfileOrSearch ? 2 : ((source.isXFeed || source.isIGFeed) ? 3 : (source == .following ? 2 : 3))
 
             while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
+                if source.isXFeed && XWebEngine.isRateLimitedNow { break }
                 attempts += 1
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
 
@@ -481,7 +490,7 @@ final class FeedModel: ObservableObject {
                     guard ids.insert(post.id).inserted else { continue }
                     guard mediaKeys.insert(post.canonicalDedupeKey).inserted else { continue }
                     if let sim = post.contentSimilarityKey, !seenSimKeys.insert(sim).inserted { continue }
-                    if store.isSeen(post) {
+                    if !isProfileOrSearch && store.isSeen(post) {
                         fallbackSeen.append(post)
                     } else {
                         batchUnseen.append(post)
@@ -575,6 +584,8 @@ final class FeedModel: ObservableObject {
 
             if items.isEmpty && source.isXFeed && !store.data.xSession.isConnected {
                 errorText = "Connect your personal X account to load X videos."
+            } else if items.isEmpty && source.isXFeed && XWebEngine.isRateLimitedNow {
+                errorText = "X rate limit reached — wait ~30s and tap Retry."
             } else if items.isEmpty && source.isIGFeed && !store.data.igSession.isConnected {
                 errorText = "Connect your personal Instagram account to load Instagram Reels."
             } else if items.isEmpty && (source == .xFollowing || source == .igFollowing || source == .following) {

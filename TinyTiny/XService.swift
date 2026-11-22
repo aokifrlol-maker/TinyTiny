@@ -404,13 +404,21 @@ enum XTweetParser {
 
 @MainActor
 final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate {
+    /// Search / creator profiles / bookmarks / likes lane.
     static let shared = XWebEngine()
+    /// Dedicated lane for X Home (For You + Following) so background home loading never kicks a search or profile off the page.
+    static let home = XWebEngine()
+
+    static var isRateLimitedNow: Bool { shared.isRateLimited || home.isRateLimited }
 
     private var webView: WKWebView?
+    private var webViewCreationTask: Task<WKWebView, Never>?
     private var activeRouteKey: String = ""
     private var routeBuffers: [String: [Gif]] = [:]
     private var seenIds = Set<String>()
-    private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
+    private var seenIdsByRoute: [String: Set<String>] = [:]
+    private var routePayloadCounts: [String: Int] = [:]
+    private var waiters: [(routeKey: String, token: UUID, cont: CheckedContinuation<[Gif], Never>)] = []
     private var pageCounter: Int = 0
     private var dryPayloadCount: Int = 0
     private var adultSupplementIndex: Int = 0
@@ -421,11 +429,82 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private var capturedSearchURL: String?
     private var capturedSearchHeaders: [String: String] = [:]
     private var capturedGraphQLOps: [String: (url: String, headers: [String: String])] = [:]
+    private var directDisabledOps = Set<String>()
+    private var rateLimitedUntil: Date?
 
     var hasCapturedSearch: Bool { capturedSearchURL != nil }
+    var isRateLimited: Bool { (rateLimitedUntil ?? .distantPast) > Date() }
 
     private override init() {
         super.init()
+    }
+
+    /// Per-route dedupe so revisiting a search or creator never returns an empty feed.
+    private func insertSeen(_ key: String, route: String) -> Bool {
+        var set = seenIdsByRoute[route] ?? []
+        let inserted = set.insert(key).inserted
+        seenIdsByRoute[route] = set
+        return inserted
+    }
+
+    /// Search, creator and saved-list routes show every post (even ones already watched in For You).
+    private static func routeAllowsSeen(_ route: String) -> Bool {
+        route.hasPrefix("x_user_") || route.hasPrefix("x_search_") || route == "x_bookmarks" || route.hasPrefix("x_likes_")
+    }
+
+    private func resolveWaiter(token: UUID) {
+        guard let idx = waiters.firstIndex(where: { $0.token == token }) else { return }
+        let w = waiters.remove(at: idx)
+        let buf = routeBuffers[w.routeKey] ?? []
+        routeBuffers[w.routeKey] = []
+        w.cont.resume(returning: buf)
+    }
+
+    /// Recovers automatically if iOS kills the hidden X WebView process (memory pressure) instead of hanging on "Loading X".
+    func webViewWebContentProcessDidTerminate(_ terminatedView: WKWebView) {
+        guard terminatedView === webView else { return }
+        pumpTask?.cancel()
+        pumpTask = nil
+        terminatedView.removeFromSuperview()
+        webView = nil
+        activeRouteKey = ""
+        lastLoadedTab = ""
+        let pending = waiters
+        waiters.removeAll()
+        for w in pending {
+            let buf = routeBuffers[w.routeKey] ?? []
+            routeBuffers[w.routeKey] = []
+            w.cont.resume(returning: buf)
+        }
+    }
+
+    /// Navigates X's own single-page app to a new route without reloading the whole site (~0.3-0.6s vs 2-4s).
+    private func softNavigate(_ wv: WKWebView, to url: URL) async -> Bool {
+        guard !wv.isLoading,
+              let host = wv.url?.host?.lowercased(),
+              host == "x.com" || host.hasSuffix(".x.com") else { return false }
+        var path = url.path.isEmpty ? "/" : url.path
+        if let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery, !q.isEmpty {
+            path += "?" + q
+        }
+        let escaped = path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let js = """
+        (function(p) {
+            try {
+                if (!document.getElementById('react-root')) return false;
+                if ((location.pathname + location.search) === p) return false;
+                window.history.pushState({}, '', p);
+                window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+                window.scrollTo(0, 0);
+                return true;
+            } catch (e) { return false; }
+        })('\(escaped)')
+        """
+        let result = try? await wv.evaluateJavaScript(js)
+        if let b = result as? Bool { return b }
+        return (result as? NSNumber)?.boolValue ?? false
     }
 
     private func acquireLock() async {
@@ -500,7 +579,20 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             await injectStoredCookies(into: existing.configuration.websiteDataStore.httpCookieStore)
             return existing
         }
+        // Prevent two concurrent callers (warm-up + feed fetch) from creating two hidden WebViews
+        if let pending = webViewCreationTask {
+            return await pending.value
+        }
+        let task = Task { @MainActor [unowned self] in
+            await self.buildWebView()
+        }
+        webViewCreationTask = task
+        let wv = await task.value
+        webViewCreationTask = nil
+        return wv
+    }
 
+    private func buildWebView() async -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = false
@@ -562,7 +654,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                         const clone = resp.clone();
                         clone.text().then(function(body) {
                             if (body && body.length > 10 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: body });
+                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: body, status: resp.status });
                             }
                         }).catch(function(){});
                     }
@@ -583,7 +675,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                         const url = xhr.__goonedUrl || '';
                         if (shouldCapture(url) && xhr.responseText && xhr.responseText.length > 10) {
                             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: xhr.responseText });
+                                window.webkit.messageHandlers.xBridge.postMessage({ type: 'payload', url: url, pageUrl: location.href, body: xhr.responseText, status: xhr.status });
                             }
                         }
                     } catch (e) {}
@@ -676,6 +768,11 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
     func warmUp() async {
         guard UserStore.shared.data.xSession.isConnected else { return }
+        if self === Self.shared {
+            await Self.home.warmUp()
+            await warmUpSearchLane()
+            return
+        }
         let wv = await ensureWebView()
         if wv.url == nil || wv.url?.absoluteString == "about:blank" {
             if activeRouteKey.isEmpty {
@@ -685,6 +782,16 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             if let url = URL(string: "https://x.com/home") {
                 wv.load(URLRequest(url: url))
             }
+        }
+    }
+
+    /// Hydrates the search/profile lane once so the first search can use instant in-app navigation.
+    func warmUpSearchLane() async {
+        guard UserStore.shared.data.xSession.isConnected else { return }
+        let wv = await ensureWebView()
+        guard wv.url == nil || wv.url?.absoluteString == "about:blank" else { return }
+        if let url = URL(string: "https://x.com/explore") {
+            wv.load(URLRequest(url: url))
         }
     }
 
@@ -717,7 +824,19 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
               let data = jsonText.data(using: .utf8) else { return }
 
         let routeAtCapture = activeRouteKey
+        guard !routeAtCapture.isEmpty else { return }
         let pageUrl = (body["pageUrl"] as? String ?? "").lowercased()
+        let status = (body["status"] as? Int) ?? (body["status"] as? NSNumber)?.intValue ?? 200
+
+        // X rate limit: stop hammering, release anyone waiting, and surface a clear message
+        if status == 429 || (status >= 400 && jsonText.contains("\"code\":88")) {
+            rateLimitedUntil = Date().addingTimeInterval(45)
+            for w in waiters where w.routeKey == routeAtCapture {
+                resolveWaiter(token: w.token)
+            }
+            return
+        }
+        if status >= 400 { return }
 
         // Strict route isolation before dispatching off-main parse
         if routeAtCapture == "x_following" {
@@ -726,11 +845,17 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             if isForYouTimeline || isSearchResult {
                 return
             }
+        } else if routeAtCapture == "x_foryou" && url.contains("HomeLatestTimeline") {
+            return
         } else if routeAtCapture == "x_bookmarks" && !url.contains("Bookmarks") && !pageUrl.contains("/bookmarks") && url != "ssr_x" {
             return
-        } else if routeAtCapture.hasPrefix("x_search_") && (url.contains("HomeTimeline") || url.contains("HomeLatestTimeline")) {
+        } else if routeAtCapture.hasPrefix("x_search_") && !(url.contains("SearchTimeline") || url.contains("adaptive.json") || url == "ssr_x") {
+            return
+        } else if routeAtCapture.hasPrefix("x_user_") && !(url.contains("UserMedia") || url.contains("UserTweets") || url.contains("UserVideo") || url == "ssr_x") {
             return
         }
+        routePayloadCounts[routeAtCapture, default: 0] += 1
+        let allowSeen = Self.routeAllowsSeen(routeAtCapture)
 
         let blockedSnapshot = Set(UserStore.shared.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
         let followedXSnapshot = Set(UserStore.shared.data.followedXUsers.map { $0.lowercased() })
@@ -762,9 +887,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 }
                 let store = UserStore.shared
                 let fresh = filteredPre.filter { post in
-                    guard !store.isSeen(post),
+                    guard allowSeen || !store.isSeen(post),
                           !store.isBlockedByAlgorithm(post) else { return false }
-                    return self.seenIds.insert(post.canonicalDedupeKey).inserted
+                    return self.insertSeen(post.canonicalDedupeKey, route: routeAtCapture)
                 }
                 if !fresh.isEmpty {
                     self.dryPayloadCount = 0
@@ -874,6 +999,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     """
 
     private func scheduleBackgroundPump(for routeKey: String, wv: WKWebView) {
+        // Only Home timelines pre-scroll in the background. Search/creator pages paginate on demand
+        // so they don't burn through X's search rate limit in the background.
+        guard routeKey == "x_foryou" || routeKey == "x_following" else { return }
         guard pumpTask == nil || pumpTask?.isCancelled == true else { return }
         pumpTask = Task { @MainActor [weak self] in
             defer { self?.pumpTask = nil }
@@ -882,7 +1010,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 guard let self,
                       !Task.isCancelled,
                       self.activeRouteKey == routeKey,
-                      (self.routeBuffers[routeKey]?.count ?? 0) < 24 else { return }
+                      (self.routeBuffers[routeKey]?.count ?? 0) < 16 else { return }
                 _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
             }
         }
@@ -919,6 +1047,13 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         guard UserStore.shared.data.xSession.isConnected else {
             return GoonedFeedResponse(posts: [], after: nil)
         }
+        if isRateLimited {
+            return GoonedFeedResponse(posts: routeBuffers[routeKey] ?? [], after: nil)
+        }
+
+        if isRefresh {
+            seenIdsByRoute[routeKey] = []
+        }
 
         if !isRefresh, let existing = routeBuffers[routeKey], !existing.isEmpty {
             routeBuffers[routeKey] = []
@@ -945,6 +1080,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
         let wv = await ensureWebView()
         var didLoadNewURL = false
+        var usedSoftNav = false
+        let beforePayloadCount = routePayloadCounts[routeKey, default: 0]
 
         if isRefresh || activeRouteKey != routeKey {
             pumpTask?.cancel()
@@ -960,6 +1097,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             if let homeTabLabel, onHomeAlready, lastLoadedTab != homeTabLabel {
                 lastLoadedTab = homeTabLabel
                 _ = try? await wv.evaluateJavaScript(Self.selectHomeTabJS(homeTabLabel))
+            } else if homeTabLabel == nil, await softNavigate(wv, to: targetURL) {
+                lastLoadedTab = ""
+                usedSoftNav = true
             } else {
                 let alreadyLoadingSameHome = onHomeAlready && homeTabLabel != nil && !isRefresh
                 if !alreadyLoadingSameHome {
@@ -975,30 +1115,30 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
         }
 
-        let nudgeDelayNs: UInt64 = didLoadNewURL ? 450_000_000 : 250_000_000
-        let maxRemainingNs: UInt64 = didLoadNewURL ? 1_800_000_000 : 1_000_000_000
+        let nudgeDelayNs: UInt64 = didLoadNewURL ? 450_000_000 : (usedSoftNav ? 300_000_000 : 220_000_000)
+        let maxRemainingNs: UInt64 = didLoadNewURL ? 1_700_000_000 : (usedSoftNav ? 1_100_000_000 : 900_000_000)
 
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
-            self.waiters.append((routeKey: routeKey, cont: cont))
+            let token = UUID()
+            self.waiters.append((routeKey: routeKey, token: token, cont: cont))
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: nudgeDelayNs)
                 guard let self else { return }
-                if self.waiters.contains(where: { $0.routeKey == routeKey }) {
+                if self.waiters.contains(where: { $0.token == token }) {
                     _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
                     if let homeTabLabel {
                         _ = try? await wv.evaluateJavaScript(Self.selectHomeTabJS(homeTabLabel))
                     }
-                }
-                try? await Task.sleep(nanoseconds: maxRemainingNs)
-                let pending = self.waiters.filter { $0.routeKey == routeKey }
-                if !pending.isEmpty {
-                    self.waiters.removeAll { $0.routeKey == routeKey }
-                    let fallback = self.routeBuffers[routeKey] ?? []
-                    self.routeBuffers[routeKey] = []
-                    for p in pending {
-                        p.cont.resume(returning: fallback)
+                    // If X already delivered a timeline payload for this route that simply had 0 video tweets,
+                    // wait briefly for the scroll nudge and then return cleanly instead of hanging.
+                    if self.routePayloadCounts[routeKey, default: 0] > beforePayloadCount {
+                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        self.resolveWaiter(token: token)
+                        return
                     }
                 }
+                try? await Task.sleep(nanoseconds: maxRemainingNs)
+                self.resolveWaiter(token: token)
             }
         }
 
@@ -1007,72 +1147,17 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
     }
 
-    /// Fast authenticated X Search: uses captured live SearchTimeline GraphQL endpoint when available (~250ms),
-    /// and otherwise loads X search directly in the warmed WebView without wasting time on deprecated REST endpoints.
+    /// Fast authenticated X Search on the dedicated search/profile lane using in-app SPA navigation (no full reload, fresh transaction headers).
     func searchFast(query: String, sort: String, after: String?) async -> GoonedFeedResponse {
         let session = UserStore.shared.data.xSession
-        guard session.isConnected else { return GoonedFeedResponse(posts: [], after: nil) }
+        guard session.isConnected, !isRateLimited else { return GoonedFeedResponse(posts: [], after: nil) }
 
         let cleaned = query
             .replacingOccurrences(of: "x:", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let baseQuery = cleaned.isEmpty ? "nsfw" : cleaned
-        let product = (sort == "Latest") ? "Latest" : "Top"
 
-        // Fast path: reuse captured SearchTimeline GraphQL URL + headers directly via URLSession
-        if let templateURL = capturedSearchURL,
-           var comps = URLComponents(string: templateURL) {
-            for qVariant in ["\(baseQuery) filter:videos", baseQuery] {
-                var vars: [String: Any] = [
-                    "rawQuery": qVariant,
-                    "count": 30,
-                    "querySource": "typed_query",
-                    "product": product
-                ]
-                if let after, after.hasPrefix("cursor:"), !after.dropFirst(7).isEmpty {
-                    vars["cursor"] = String(after.dropFirst(7))
-                }
-                if let varsData = try? JSONSerialization.data(withJSONObject: vars),
-                   let varsStr = String(data: varsData, encoding: .utf8) {
-                    var items = comps.queryItems ?? []
-                    items.removeAll { $0.name == "variables" }
-                    items.append(URLQueryItem(name: "variables", value: varsStr))
-                    comps.queryItems = items
-                    if let url = comps.url {
-                        var req = URLRequest(url: url)
-                        req.timeoutInterval = 5
-                        req.setValue(Config.userAgent, forHTTPHeaderField: "User-Agent")
-                        for (k, v) in capturedSearchHeaders {
-                            req.setValue(v, forHTTPHeaderField: k)
-                        }
-                        if req.value(forHTTPHeaderField: "authorization") == nil {
-                            req.setValue("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA", forHTTPHeaderField: "Authorization")
-                        }
-                        req.setValue(session.ct0, forHTTPHeaderField: "x-csrf-token")
-                        req.setValue("auth_token=\(session.authToken); ct0=\(session.ct0)", forHTTPHeaderField: "Cookie")
-                        req.setValue("https://x.com/search", forHTTPHeaderField: "Referer")
-
-                        if let (data, resp) = try? await URLSession.shared.data(for: req),
-                           (resp as? HTTPURLResponse)?.statusCode == 200 {
-                            let parsed = XTweetParser.parseTweets(from: data, routeKey: "x_search_fast")
-                            let store = UserStore.shared
-                            let filtered = parsed.filter {
-                                !store.isSeen($0)
-                                && !store.isBlockedByAlgorithm($0)
-                                && seenIds.insert($0.canonicalDedupeKey).inserted
-                            }
-                            let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
-                            if !filtered.isEmpty {
-                                return GoonedFeedResponse(posts: filtered, after: nextCursor)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Direct warmed WebView search (use filter:native_video so every returned post has playable video)
-        let encoded = "\(baseQuery) filter:native_video".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
+        let encoded = "\(baseQuery) filter:videos".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
         let tab = (sort == "Latest") ? "live" : "top"
         let searchURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
         let res = await fetchFeed(
@@ -1080,7 +1165,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             targetURL: searchURL,
             isRefresh: after == nil
         )
-        if !res.posts.isEmpty { return res }
+        if !res.posts.isEmpty || isRateLimited { return res }
 
         let broadEncoded = baseQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
         let broadURL = URL(string: "https://x.com/search?q=\(broadEncoded)&src=typed_query&f=\(tab)")!
@@ -1093,7 +1178,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
     /// Executes a captured X GraphQL query directly inside the warmed `x.com` WebView context (~250-450ms, no full page reload).
     func fetchGraphQLDirect(op: String, routeKey: String, count: Int = 40, cursor: String? = nil) async -> GoonedFeedResponse? {
-        guard let template = capturedGraphQLOps[op],
+        guard !isRateLimited,
+              !directDisabledOps.contains(op),
+              let template = capturedGraphQLOps[op],
               var comps = URLComponents(string: template.url),
               let wv = webView else { return nil }
         var items = comps.queryItems ?? []
@@ -1116,7 +1203,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         guard let targetURL = comps.url?.absoluteString else { return nil }
         let js = """
         const res = await fetch(url, { headers: headers, credentials: 'include' });
-        if (!res.ok) return null;
+        if (res.status === 429) return '__RATE_LIMIT__';
+        if (!res.ok) return '__ERR__';
         return await res.text();
         """
         guard let rawText = try? await wv.callAsyncJavaScript(
@@ -1124,19 +1212,29 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             arguments: ["url": targetURL, "headers": template.headers],
             in: nil,
             contentWorld: .page
-        ) as? String,
-              let data = rawText.data(using: .utf8) else {
+        ) as? String else {
             return nil
         }
+        if rawText == "__RATE_LIMIT__" {
+            rateLimitedUntil = Date().addingTimeInterval(45)
+            return nil
+        }
+        if rawText == "__ERR__" {
+            // X rejected replayed transaction header for this op; disable direct replay so we don't trigger rate limits
+            directDisabledOps.insert(op)
+            return nil
+        }
+        guard let data = rawText.data(using: .utf8) else { return nil }
 
         let parsed = await Task.detached(priority: .userInitiated) {
             XTweetParser.parseTweets(from: data, routeKey: routeKey)
         }.value
         let store = UserStore.shared
+        let allowSeen = Self.routeAllowsSeen(routeKey)
         let filtered = parsed.filter {
-            !store.isSeen($0)
+            (allowSeen || !store.isSeen($0))
             && !store.isBlockedByAlgorithm($0)
-            && seenIds.insert($0.canonicalDedupeKey).inserted
+            && insertSeen($0.canonicalDedupeKey, route: routeKey)
         }
         let nextCursor = XTweetParser.extractBottomCursor(from: data).map { "cursor:\($0)" }
         return filtered.isEmpty ? nil : GoonedFeedResponse(posts: filtered, after: nextCursor)
@@ -1183,7 +1281,14 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         lastLoadedTab = ""
         routeBuffers.removeAll()
         seenIds.removeAll()
+        seenIdsByRoute.removeAll()
+        routePayloadCounts.removeAll()
+        directDisabledOps.removeAll()
+        rateLimitedUntil = nil
         dryPayloadCount = 0
+        if self === Self.shared {
+            await Self.home.resetSession()
+        }
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
         for c in cookies where c.domain.contains("x.com") || c.domain.contains("twitter.com") {
@@ -1198,75 +1303,29 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 @MainActor
 enum XAPI {
     static func forYou(after: String? = nil) async -> GoonedFeedResponse {
-        let url = URL(string: "https://x.com/home")!
-        let store = UserStore.shared
-        let tasteQueries = (store.data.algorithm.boostedTags + store.topAlgorithmTags.prefix(4).map(\.tag))
-            .filter { !MediaMetaRegistry.isStopTag($0) }
-
-        if let direct = await XWebEngine.shared.fetchGraphQLDirect(op: "HomeTimeline", routeKey: "x_foryou", count: 40, cursor: after) {
+        if let direct = await XWebEngine.home.fetchGraphQLDirect(op: "HomeTimeline", routeKey: "x_foryou", count: 40, cursor: after) {
             return direct
         }
-
-        async let homeRes = XWebEngine.shared.fetchFeed(
+        let url = URL(string: "https://x.com/home")!
+        return await XWebEngine.home.fetchFeed(
             routeKey: "x_foryou",
             targetURL: url,
             homeTabLabel: "For you",
             isRefresh: after == nil
         )
-
-        if store.data.settings.algorithmEnabled,
-           XWebEngine.shared.hasCapturedSearch,
-           let pick = tasteQueries.randomElement() {
-            let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
-                .filter { !MediaMetaRegistry.isStopTag($0) }
-                .prefix(4)
-                .map { "-\($0)" }
-                .joined(separator: " ")
-            let q = "\(pick) \(blocked)".trimmingCharacters(in: .whitespaces)
-            async let tasteRes = XWebEngine.shared.searchFast(query: q, sort: "Top", after: nil)
-            let (h, t) = await (homeRes, tasteRes)
-            var merged: [Gif] = []
-            var seen = Set<String>()
-            let maxLen = max(h.posts.count, t.posts.count)
-            for i in 0..<maxLen {
-                if i < h.posts.count, seen.insert(h.posts[i].canonicalDedupeKey).inserted {
-                    merged.append(h.posts[i])
-                }
-                if i < t.posts.count, seen.insert(t.posts[i].canonicalDedupeKey).inserted {
-                    merged.append(t.posts[i])
-                }
-            }
-            return GoonedFeedResponse(posts: merged, after: h.after ?? t.after)
-        }
-
-        return await homeRes
     }
 
     static func following(after: String? = nil) async -> GoonedFeedResponse {
-        if let direct = await XWebEngine.shared.fetchGraphQLDirect(op: "HomeLatestTimeline", routeKey: "x_following", count: 40, cursor: after) {
+        if let direct = await XWebEngine.home.fetchGraphQLDirect(op: "HomeLatestTimeline", routeKey: "x_following", count: 40, cursor: after) {
             return direct
         }
         let url = URL(string: "https://x.com/home")!
-        let store = UserStore.shared
-        async let homeFollowing = XWebEngine.shared.fetchFeed(
+        return await XWebEngine.home.fetchFeed(
             routeKey: "x_following",
             targetURL: url,
             homeTabLabel: "Following",
             isRefresh: after == nil
         )
-        // Also blend recent videos from any X creators explicitly followed inside TinyTiny (only when SearchTimeline is already captured so it never blocks)
-        let localHandles = Array(store.data.followedXUsers.prefix(3))
-        if !localHandles.isEmpty, after == nil, XWebEngine.shared.hasCapturedSearch, let pick = localHandles.randomElement() {
-            async let localCreator = XWebEngine.shared.searchFast(query: "from:\(pick)", sort: "Latest", after: nil)
-            let (hf, lc) = await (homeFollowing, localCreator)
-            var merged = hf.posts
-            var seen = Set(merged.map(\.canonicalDedupeKey))
-            for item in lc.posts where seen.insert(item.canonicalDedupeKey).inserted {
-                merged.append(item)
-            }
-            return GoonedFeedResponse(posts: merged, after: hf.after)
-        }
-        return await homeFollowing
     }
 
     static func bookmarks(after: String? = nil) async -> GoonedFeedResponse {
