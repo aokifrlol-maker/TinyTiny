@@ -262,9 +262,178 @@ function keyActionKeyboard(rec) {
         rec.revoked
           ? { text: "Unrevoke", callback_data: `k:unrev:${rec.key}` }
           : { text: "Revoke", callback_data: `k:rev:${rec.key}` },
-        { text: "Refresh", callback_data: `k:ref:${rec.key}` },
+      ],
+      [
+        { text: "📝 Set Note", callback_data: `k:note:${rec.key}` },
+        { text: "🔄 Refresh", callback_data: `k:ref:${rec.key}` },
+      ],
+      [
+        { text: "🔑 All Keys", callback_data: "keys:all:1" },
+        { text: "🏠 Menu", callback_data: "menu:home" },
       ],
     ],
+  };
+}
+
+async function buildHomeMenu(env) {
+  const alertsOn = (await env.LICENSES.get("alerts:enabled")) === "1";
+  const cfg = await getRemoteConfig(env);
+  const statusBits = [];
+  if (cfg.maintenance) statusBits.push("🛠 Maintenance: <b>ON</b>");
+  if (cfg.minVersion) statusBits.push(`📱 Min Ver: <b>v${escapeHtmlTg(cfg.minVersion)}</b>`);
+  if (cfg.announcement) statusBits.push(`📢 Banner: <i>${escapeHtmlTg(cfg.announcement)}</i>`);
+  const text = [
+    `<b>TinyTiny Admin Panel</b>`,
+    `Tap any button below — no typing needed.`,
+    statusBits.length ? `\n${statusBits.join("\n")}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "📊 Fleet & Users", callback_data: "stats:ref" },
+        { text: "🔑 All Keys", callback_data: "keys:all:1" },
+      ],
+      [
+        { text: "➕ New Key", callback_data: "menu:new" },
+        { text: "👑 New Admin Key", callback_data: "menu:newadmin" },
+      ],
+      [
+        { text: "🔍 Search Keys", callback_data: "menu:find" },
+        { text: "⚙️ Config & Gates", callback_data: "menu:config" },
+      ],
+      [
+        { text: "⚠️ Error Log", callback_data: "menu:errors" },
+        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "menu:alerts" },
+      ],
+      [
+        { text: "📥 Sync Watchit", callback_data: "menu:watchit" },
+        { text: "❓ Commands", callback_data: "menu:help" },
+      ],
+    ],
+  };
+  return { text, keyboard };
+}
+
+function buildCreateKeyMenu(isAdmin) {
+  const tag = isAdmin ? "adm" : "std";
+  const label = isAdmin ? "👑 New ADMIN Key" : "➕ New Standard Key";
+  const text = `<b>${label}</b>\nChoose a duration (starts on first activation):`;
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "12 Hours", callback_data: `gen:${tag}:12h` },
+        { text: "7 Days", callback_data: `gen:${tag}:7d` },
+        { text: "30 Days", callback_data: `gen:${tag}:30d` },
+      ],
+      [
+        { text: "1 Year", callback_data: `gen:${tag}:1y` },
+        { text: "Lifetime", callback_data: `gen:${tag}:lifetime` },
+      ],
+      ...(isAdmin ? [] : [[{ text: "📦 Generate 5× 30d Batch", callback_data: "gen:batch:30d" }]]),
+      [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
+    ],
+  };
+  return { text, keyboard };
+}
+
+async function buildConfigMenu(env) {
+  const cfg = await getRemoteConfig(env);
+  const alertsOn = (await env.LICENSES.get("alerts:enabled")) === "1";
+  const text = [
+    `<b>⚙️ Remote App Config</b>`,
+    `📢 Banner: ${cfg.announcement ? escapeHtmlTg(cfg.announcement) : "<i>None</i>"}`,
+    `🛠 Maintenance: ${cfg.maintenance ? `<b>ON</b> (${escapeHtmlTg(cfg.maintenance)})` : "<i>OFF</i>"}`,
+    `📱 Min Version: ${cfg.minVersion ? `<b>v${escapeHtmlTg(cfg.minVersion)}</b>` : "<i>OFF</i>"}`,
+    `🔔 Alerts: <b>${alertsOn ? "ON" : "OFF"}</b>`,
+  ].join("\n");
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "📢 Set Banner", callback_data: "cfg:ann" },
+        { text: "🗑 Clear Banner", callback_data: "cfg:clearann" },
+      ],
+      [
+        { text: "🛠 Maintenance ON", callback_data: "cfg:maint" },
+        { text: "✅ Maintenance OFF", callback_data: "cfg:maint_off" },
+      ],
+      [
+        { text: "📱 Set Min Ver", callback_data: "cfg:minver" },
+        { text: "🔓 Clear Min Ver", callback_data: "cfg:minver_off" },
+      ],
+      [
+        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "menu:alerts" },
+        { text: "🏠 Menu", callback_data: "menu:home" },
+      ],
+    ],
+  };
+  return { text, keyboard };
+}
+
+async function buildErrorsText(env) {
+  const raw = await env.LICENSES.get("errors:recent");
+  const list = raw ? JSON.parse(raw) : [];
+  if (!list.length) return "<b>⚠️ Recent Error Reports</b>\nNo recent anonymous error reports.";
+  const lines = list.slice(0, 15).map((e) => {
+    const ago = Math.max(0, Math.floor((nowSec() - (e.at || 0)) / 60));
+    return `• <b>${escapeHtmlTg(e.source)}</b> — ${escapeHtmlTg(e.model || "iPhone")} (iOS ${escapeHtmlTg(e.ios || "?")}, v${escapeHtmlTg(e.app || "1.0")}) · ${ago}m ago\n  <i>${escapeHtmlTg(e.detail || "")}</i>`;
+  });
+  return `<b>⚠️ Recent Anonymous Error Reports</b>\n${lines.join("\n")}`;
+}
+
+async function createAndSaveKey(env, { isAdmin = false, durSpec, maxDevices = 1, note = "" }) {
+  const key = generateLicenseKey();
+  const rec = {
+    key,
+    admin: isAdmin,
+    lifetime: durSpec.lifetime,
+    durationSeconds: durSpec.seconds,
+    durationLabel: durSpec.label,
+    maxDevices,
+    note,
+    createdAt: nowSec(),
+    activatedAt: null,
+    expiresAt: null,
+    deviceIds: [],
+    revoked: false,
+  };
+  await saveLicense(env, rec);
+  const idxRaw = await env.LICENSES.get("index:recent");
+  const idx = idxRaw ? JSON.parse(idxRaw) : [];
+  idx.unshift(key);
+  await env.LICENSES.put("index:recent", JSON.stringify(idx.slice(0, 60)));
+  return rec;
+}
+
+async function searchKeysResult(env, qRaw) {
+  const q = qRaw.trim().toLowerCase();
+  const all = await listAllLicenses(env);
+  const hits = all.filter((rec) => {
+    if ((rec.key || "").toLowerCase().includes(q)) return true;
+    if ((rec.note || "").toLowerCase().includes(q)) return true;
+    if (rec.devices) {
+      for (const info of Object.values(rec.devices)) {
+        const hay = `${info.model || ""} ${info.modelId || ""} ios ${info.ios || ""}`.toLowerCase();
+        if (hay.includes(q)) return true;
+      }
+    }
+    return false;
+  });
+  const top = hits.slice(0, 8);
+  const lines = top.map((rec) => {
+    const devs = rec.devices ? Object.values(rec.devices) : [];
+    const devTag = devs.length ? ` · ${escapeHtmlTg(devs[0].model || "")} (${escapeHtmlTg(devs[0].ios || "?")})` : "";
+    return `<code>${rec.key}</code> — ${formatRemaining(rec)}${devTag}${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}`;
+  });
+  const keyButtons = top.map((rec) => [
+    { text: `🔧 ${rec.key} (${formatRemaining(rec)})`, callback_data: `k:open:${rec.key}` },
+  ]);
+  keyButtons.push([{ text: "🏠 Menu", callback_data: "menu:home" }]);
+  return {
+    text: `<b>🔍 Search "${escapeHtmlTg(q)}" (${hits.length} match${hits.length === 1 ? "" : "es"})</b>\n` + (lines.length ? lines.join("\n") : "No matches."),
+    keyboard: { inline_keyboard: keyButtons },
   };
 }
 
@@ -333,7 +502,7 @@ async function buildAllKeysPage(env, filter = "all", page = 1) {
     if (filter === "admin") return Boolean(rec.admin);
     return classifyLicenseState(rec) === filter;
   });
-  const perPage = 10;
+  const perPage = 6;
   const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   const p = Math.min(totalPages, Math.max(1, page));
   const slice = filtered.slice((p - 1) * perPage, p * perPage);
@@ -345,22 +514,32 @@ async function buildAllKeysPage(env, filter = "all", page = 1) {
   });
 
   const text = [
-    `<b>All Keys (${filter.toUpperCase()})</b> · ${filtered.length} total · Page ${p}/${totalPages}`,
+    `<b>🔑 All Keys (${filter.toUpperCase()})</b> · ${filtered.length} total · Page ${p}/${totalPages}`,
     lines.length ? lines.join("\n") : "No keys match this filter.",
     ``,
-    `Tip: send <code>/info KEY</code> to Extend, Unbind, or Revoke with buttons.`,
+    `Tap a key button below to Extend, Unbind, or Revoke:`,
   ].join("\n");
+
+  const keyRows = slice.map((rec) => [
+    {
+      text: `${rec.revoked ? "🚫 " : rec.admin ? "👑 " : "🔑 "}${rec.key} · ${formatRemaining(rec)}`,
+      callback_data: `k:open:${rec.key}`,
+    },
+  ]);
 
   const navRow = [];
   if (p > 1) navRow.push({ text: "◀ Prev", callback_data: `keys:${filter}:${p - 1}` });
   if (p < totalPages) navRow.push({ text: "Next ▶", callback_data: `keys:${filter}:${p + 1}` });
+  navRow.push({ text: "🏠 Menu", callback_data: "menu:home" });
+
   const filterRow = [
     { text: filter === "all" ? "• All •" : "All", callback_data: "keys:all:1" },
     { text: filter === "active" ? "• Active •" : "Active", callback_data: "keys:active:1" },
     { text: filter === "unused" ? "• Unused •" : "Unused", callback_data: "keys:unused:1" },
     { text: filter === "expired" ? "• Expired •" : "Expired", callback_data: "keys:expired:1" },
+    { text: filter === "admin" ? "• Admin •" : "Admin", callback_data: "keys:admin:1" },
   ];
-  const keyboard = { inline_keyboard: navRow.length ? [navRow, filterRow] : [filterRow] };
+  const keyboard = { inline_keyboard: [...keyRows, filterRow, navRow] };
   return { text, keyboard };
 }
 
@@ -386,10 +565,160 @@ async function handleTelegramUpdate(env, update) {
       return new Response("ok");
     }
 
+    if (parts[0] === "menu" && chatId && msgId) {
+      const sub = parts[1];
+      if (sub === "home") {
+        const home = await buildHomeMenu(env);
+        await editTelegramMessage(env, chatId, msgId, home.text, home.keyboard);
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "new" || sub === "newadmin") {
+        const m = buildCreateKeyMenu(sub === "newadmin");
+        await editTelegramMessage(env, chatId, msgId, m.text, m.keyboard);
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "config") {
+        const c = await buildConfigMenu(env);
+        await editTelegramMessage(env, chatId, msgId, c.text, c.keyboard);
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "errors") {
+        const txt = await buildErrorsText(env);
+        await editTelegramMessage(env, chatId, msgId, txt, {
+          inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "menu:errors" }, { text: "🏠 Menu", callback_data: "menu:home" }]],
+        });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "alerts") {
+        const cur = (await env.LICENSES.get("alerts:enabled")) === "1";
+        await env.LICENSES.put("alerts:enabled", cur ? "0" : "1");
+        const home = await buildHomeMenu(env);
+        await editTelegramMessage(env, chatId, msgId, home.text, home.keyboard);
+        await answerCallbackQuery(env, cq.id, `Alerts ${cur ? "OFF" : "ON"}`);
+        return new Response("ok");
+      }
+      if (sub === "find") {
+        await sendTelegram(env, chatId, "🔍 <b>Search Keys</b>\nReply to this message with a key, note, or iPhone model (e.g. <code>iPhone 15</code>):", {
+          force_reply: true,
+          input_field_placeholder: "iPhone 15, Friend, TT-...",
+        });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "watchit") {
+        await answerCallbackQuery(env, cq.id, "Syncing Watchit...");
+        const res = await syncWatchitFolder(env, getPublicBaseUrl(env), true);
+        if (!res.ok) {
+          await sendTelegram(env, chatId, `Watchit sync error: ${res.error}`);
+        } else if (res.sent === 0) {
+          await sendTelegram(env, chatId, `Seedr <code>/Watchit/</code> is ready (${res.total} video${res.total === 1 ? "" : "s"} tracked, no new uploads).`);
+        }
+        return new Response("ok");
+      }
+      if (sub === "help") {
+        const helpText = [
+          "<b>TinyTiny Slash Commands</b>",
+          "<code>/menu</code> — Open button panel",
+          "<code>/users</code> — Fleet &amp; iPhone/iOS breakdown",
+          "<code>/allkeys</code> — Browse all keys",
+          "<code>/info KEY</code> · <code>/find query</code>",
+          "<code>/gen 30d [maxDevices] [note]</code> · <code>/genadmin ...</code>",
+          "<code>/genbatch 5 30d [maxDevices] [note]</code>",
+          "<code>/extend KEY 30d</code> · <code>/unbind KEY</code> · <code>/revoke KEY</code> · <code>/unrevoke KEY</code>",
+          "<code>/note KEY text</code> · <code>/announce text</code> · <code>/maintenance text|off</code> · <code>/minversion 1.2|off</code>",
+        ].join("\n");
+        await editTelegramMessage(env, chatId, msgId, helpText, {
+          inline_keyboard: [[{ text: "🏠 Back to Menu", callback_data: "menu:home" }]],
+        });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+    }
+
+    if (parts[0] === "gen" && chatId && msgId) {
+      const kind = parts[1];
+      const dur = parts[2] || "30d";
+      const durSpec = parseDuration(dur);
+      if (!durSpec) {
+        await answerCallbackQuery(env, cq.id, "Invalid duration");
+        return new Response("ok");
+      }
+      if (kind === "batch") {
+        const keys = [];
+        for (let i = 0; i < 5; i++) {
+          const r = await createAndSaveKey(env, { isAdmin: false, durSpec, maxDevices: 1, note: "" });
+          keys.push(r.key);
+        }
+        await editTelegramMessage(
+          env,
+          chatId,
+          msgId,
+          `<b>📦 Generated 5 Keys (${durSpec.label})</b>\n` + keys.map((k) => `<code>${k}</code>`).join("\n"),
+          { inline_keyboard: [[{ text: "🔑 All Keys", callback_data: "keys:all:1" }, { text: "🏠 Menu", callback_data: "menu:home" }]] }
+        );
+        await answerCallbackQuery(env, cq.id, "Created 5 keys");
+        return new Response("ok");
+      }
+      const isAdmin = kind === "adm";
+      const rec = await createAndSaveKey(env, { isAdmin, durSpec, maxDevices: 1, note: "" });
+      await editTelegramMessage(env, chatId, msgId, formatKeyDetails(rec), keyActionKeyboard(rec));
+      await answerCallbackQuery(env, cq.id, `Created ${rec.key}`);
+      return new Response("ok");
+    }
+
+    if (parts[0] === "cfg" && chatId && msgId) {
+      const action = parts[1];
+      const cfg = await getRemoteConfig(env);
+      if (action === "clearann") {
+        cfg.announcement = null;
+        cfg.announcementId = null;
+        await saveRemoteConfig(env, cfg);
+        const c = await buildConfigMenu(env);
+        await editTelegramMessage(env, chatId, msgId, c.text, c.keyboard);
+        await answerCallbackQuery(env, cq.id, "Banner cleared");
+        return new Response("ok");
+      }
+      if (action === "maint_off") {
+        cfg.maintenance = null;
+        await saveRemoteConfig(env, cfg);
+        const c = await buildConfigMenu(env);
+        await editTelegramMessage(env, chatId, msgId, c.text, c.keyboard);
+        await answerCallbackQuery(env, cq.id, "Maintenance OFF");
+        return new Response("ok");
+      }
+      if (action === "minver_off") {
+        cfg.minVersion = null;
+        await saveRemoteConfig(env, cfg);
+        const c = await buildConfigMenu(env);
+        await editTelegramMessage(env, chatId, msgId, c.text, c.keyboard);
+        await answerCallbackQuery(env, cq.id, "Min Version cleared");
+        return new Response("ok");
+      }
+      if (action === "ann") {
+        await sendTelegram(env, chatId, "📢 <b>Set In-App Banner</b>\nReply to this message with the announcement text:", { force_reply: true });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (action === "maint") {
+        await sendTelegram(env, chatId, "🛠 <b>Enable Maintenance Gate</b>\nReply to this message with the maintenance notice:", { force_reply: true });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (action === "minver") {
+        await sendTelegram(env, chatId, "📱 <b>Set Minimum App Version</b>\nReply to this message with the version (e.g. <code>1.2</code>):", { force_reply: true });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+    }
+
     if (parts[0] === "stats" && chatId && msgId) {
       const text = await buildUsersStatsMessage(env);
       await editTelegramMessage(env, chatId, msgId, text, {
-        inline_keyboard: [[{ text: "Refresh", callback_data: "stats:ref" }]],
+        inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "stats:ref" }, { text: "🔑 All Keys", callback_data: "keys:all:1" }, { text: "🏠 Menu", callback_data: "menu:home" }]],
       });
       await answerCallbackQuery(env, cq.id, "Refreshed");
       return new Response("ok");
@@ -403,8 +732,15 @@ async function handleTelegramUpdate(env, update) {
         await answerCallbackQuery(env, cq.id, "Key not found");
         return new Response("ok");
       }
+      if (action === "note") {
+        await sendTelegram(env, chatId, `📝 <b>Set Note for ${rec.key}</b>\nReply to this message with the note:`, { force_reply: true });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
       let toast = "Updated";
-      if (action === "ext7" || action === "ext30") {
+      if (action === "open") {
+        toast = "";
+      } else if (action === "ext7" || action === "ext30") {
         const days = action === "ext7" ? 7 : 30;
         const sec = days * DAY_SEC;
         if (rec.activatedAt) {
@@ -476,26 +812,75 @@ async function handleTelegramUpdate(env, update) {
     return new Response("ok");
   }
 
-  if (cmd === "/start" || cmd === "/help") {
+  // Handle Force-Reply prompts from inline buttons (no slash commands needed!)
+  const replyPrompt = msg.reply_to_message?.text || "";
+  if (replyPrompt && !text.startsWith("/")) {
+    if (replyPrompt.includes("Search Keys")) {
+      const res = await searchKeysResult(env, text);
+      await sendTelegram(env, chatId, res.text, res.keyboard);
+      return new Response("ok");
+    }
+    if (replyPrompt.includes("Set In-App Banner")) {
+      const cfg = await getRemoteConfig(env);
+      cfg.announcement = text;
+      cfg.announcementId = `ann_${nowSec()}`;
+      await saveRemoteConfig(env, cfg);
+      const c = await buildConfigMenu(env);
+      await sendTelegram(env, chatId, c.text, c.keyboard);
+      return new Response("ok");
+    }
+    if (replyPrompt.includes("Enable Maintenance Gate")) {
+      const cfg = await getRemoteConfig(env);
+      cfg.maintenance = text;
+      await saveRemoteConfig(env, cfg);
+      const c = await buildConfigMenu(env);
+      await sendTelegram(env, chatId, c.text, c.keyboard);
+      return new Response("ok");
+    }
+    if (replyPrompt.includes("Set Minimum App Version")) {
+      const cfg = await getRemoteConfig(env);
+      cfg.minVersion = text;
+      await saveRemoteConfig(env, cfg);
+      const c = await buildConfigMenu(env);
+      await sendTelegram(env, chatId, c.text, c.keyboard);
+      return new Response("ok");
+    }
+    const noteMatch = replyPrompt.match(/Set Note for (TT-[A-Z0-9-]+)/i);
+    if (noteMatch) {
+      const rec = await getLicense(env, noteMatch[1]);
+      if (rec) {
+        rec.note = text;
+        await saveLicense(env, rec);
+        await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
+      } else {
+        await sendTelegram(env, chatId, "Key not found.");
+      }
+      return new Response("ok");
+    }
+  }
+
+  if (cmd === "/start" || cmd === "/menu") {
+    const home = await buildHomeMenu(env);
+    await sendTelegram(env, chatId, home.text, home.keyboard);
+    return new Response("ok");
+  }
+
+  if (cmd === "/help") {
     await sendTelegram(
       env,
       chatId,
       [
-        "<b>TinyTiny License Admin</b>",
-        "<code>/users</code> or <code>/stats</code> — Active user count &amp; iPhone/iOS breakdown",
-        "<code>/allkeys [page|active|unused|expired|revoked|admin]</code> — Browse all keys",
-        "<code>/info TT-XXXX-XXXX-XXXX</code> — Inspect key + Extend/Revoke buttons",
-        "<code>/find query</code> — Search keys by note, key, or iPhone model",
-        "<code>/gen 30d [maxDevices] [note]</code> — Create key (12h, 7d, 30d, 1y, lifetime)",
-        "<code>/genadmin 30d [maxDevices] [note]</code> — Create Admin key",
-        "<code>/genbatch 5 30d [maxDevices] [note]</code> — Batch generate keys",
-        "<code>/extend TT-XXXX 30d</code> · <code>/unbind TT-XXXX</code> · <code>/revoke TT-XXXX</code> · <code>/unrevoke TT-XXXX</code>",
-        "<code>/note TT-XXXX text</code> — Update key note",
-        "<code>/announce text</code> · <code>/clearannounce</code> — In-app banner",
-        "<code>/maintenance text|off</code> · <code>/minversion 1.2|off</code> — Remote gate",
-        "<code>/alerts on|off</code> · <code>/errors</code> · <code>/config</code>",
-        "<code>/watchit</code> · <code>/directig</code>",
-      ].join("\n")
+        "<b>TinyTiny Slash Commands</b>",
+        "<code>/menu</code> — Open button panel",
+        "<code>/users</code> — Fleet &amp; iPhone/iOS breakdown",
+        "<code>/allkeys</code> — Browse all keys",
+        "<code>/info KEY</code> · <code>/find query</code>",
+        "<code>/gen 30d [maxDevices] [note]</code> · <code>/genadmin ...</code>",
+        "<code>/genbatch 5 30d [maxDevices] [note]</code>",
+        "<code>/extend KEY 30d</code> · <code>/unbind KEY</code> · <code>/revoke KEY</code> · <code>/unrevoke KEY</code>",
+        "<code>/note KEY text</code> · <code>/announce text</code> · <code>/maintenance text|off</code> · <code>/minversion 1.2|off</code>",
+      ].join("\n"),
+      { inline_keyboard: [[{ text: "🏠 Open Button Panel", callback_data: "menu:home" }]] }
     );
     return new Response("ok");
   }
@@ -503,7 +888,7 @@ async function handleTelegramUpdate(env, update) {
   if (cmd === "/users" || cmd === "/stats") {
     const statsText = await buildUsersStatsMessage(env);
     await sendTelegram(env, chatId, statsText, {
-      inline_keyboard: [[{ text: "Refresh", callback_data: "stats:ref" }]],
+      inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "stats:ref" }, { text: "🔑 All Keys", callback_data: "keys:all:1" }, { text: "🏠 Menu", callback_data: "menu:home" }]],
     });
     return new Response("ok");
   }
@@ -536,35 +921,9 @@ async function handleTelegramUpdate(env, update) {
       noteStart = 3;
     }
     const note = parts.slice(noteStart).join(" ");
-    const key = generateLicenseKey();
-    const rec = {
-      key,
-      admin: isAdminKey,
-      lifetime: durSpec.lifetime,
-      durationSeconds: durSpec.seconds,
-      durationLabel: durSpec.label,
-      maxDevices,
-      note,
-      createdAt: nowSec(),
-      activatedAt: null,
-      expiresAt: null,
-      deviceIds: [],
-      revoked: false,
-    };
-    await saveLicense(env, rec);
+    const rec = await createAndSaveKey(env, { isAdmin: isAdminKey, durSpec, maxDevices, note });
 
-    const idxRaw = await env.LICENSES.get("index:recent");
-    const idx = idxRaw ? JSON.parse(idxRaw) : [];
-    idx.unshift(key);
-    await env.LICENSES.put("index:recent", JSON.stringify(idx.slice(0, 60)));
-
-    await sendTelegram(
-      env,
-      chatId,
-      `<b>New ${isAdminKey ? "ADMIN " : ""}License Key</b>\nKey: <code>${key}</code>\nDuration: <b>${durSpec.label}</b> (starts on first activation)\nMax Devices: ${maxDevices}` +
-        (isAdminKey ? `\nRole: <b>Admin (Direct IG MP4 enabled)</b>` : "") +
-        (note ? `\nNote: ${note}` : "")
-    );
+    await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
     return new Response("ok");
   }
 
