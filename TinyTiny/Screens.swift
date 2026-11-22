@@ -2090,64 +2090,6 @@ struct GoonedFollowsView: View {
             }
         }
     }
-
-    @State private var expandedSection: FollowsSection? = .accounts
-
-    enum FollowsSection: String, Hashable {
-        case accounts, x, of, ig, subreddits, redditUsers
-    }
-
-    private func followsDropdown<Content: View>(
-        _ section: FollowsSection,
-        icon: String,
-        title: String,
-        summary: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        let isOpen = expandedSection == section
-        return VStack(alignment: .leading, spacing: 0) {
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                    expandedSection = isOpen ? nil : section
-                }
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: icon)
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Theme.accentBright)
-                        .frame(width: 28, height: 28)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                        Text(summary)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.65))
-                            .lineLimit(1)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .rotationEffect(.degrees(isOpen ? 180 : 0))
-                }
-                .padding(14)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isOpen {
-                Divider().overlay(Color.white.opacity(0.14))
-                    .padding(.horizontal, 14)
-                VStack(alignment: .leading, spacing: 10) {
-                    content()
-                }
-                .padding(14)
-            }
-        }
-        .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
-    }
 }
 
 // MARK: - 4. Settings Modal (X, Instagram, Rule34, Offline Vault, Autoplay, Video Fit, Appearance, Security)
