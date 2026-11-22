@@ -638,6 +638,7 @@ final class FeedModel: ObservableObject {
                 errorText = "No recent videos from accounts you follow yet. Follow creators in For You / Reels or tap Retry."
             } else if items.isEmpty {
                 errorText = "Couldn't load \(source.displayTitle) yet. Tap Retry."
+                LicenseManager.shared.reportError(source: source.displayTitle, detail: "Empty feed load (\(source.swipeKey.kind))")
             } else {
                 errorText = nil
             }

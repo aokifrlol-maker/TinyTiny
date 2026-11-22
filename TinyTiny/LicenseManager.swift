@@ -1,8 +1,56 @@
 import Foundation
 import SwiftUI
+import UIKit
 import Security
 import CryptoKit
 import WebKit
+
+struct RemoteAppConfig: Codable, Equatable {
+    var announcement: String?
+    var announcementId: String?
+    var minVersion: String?
+    var maintenance: String?
+}
+
+enum DeviceTelemetry {
+    static var modelIdentifier: String {
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        return withUnsafePointer(to: &sysinfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    static var friendlyModel: String {
+        let id = modelIdentifier
+        let map: [String: String] = [
+            "iPhone12,1": "iPhone 11", "iPhone12,3": "iPhone 11 Pro", "iPhone12,5": "iPhone 11 Pro Max",
+            "iPhone12,8": "iPhone SE (2nd)",
+            "iPhone13,1": "iPhone 12 mini", "iPhone13,2": "iPhone 12", "iPhone13,3": "iPhone 12 Pro", "iPhone13,4": "iPhone 12 Pro Max",
+            "iPhone14,2": "iPhone 13 Pro", "iPhone14,3": "iPhone 13 Pro Max", "iPhone14,4": "iPhone 13 mini", "iPhone14,5": "iPhone 13",
+            "iPhone14,6": "iPhone SE (3rd)", "iPhone14,7": "iPhone 14", "iPhone14,8": "iPhone 14 Plus",
+            "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max",
+            "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus",
+            "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
+            "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
+            "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,5": "iPhone 16e",
+            "x86_64": "Simulator", "arm64": "Simulator"
+        ]
+        return map[id] ?? id
+    }
+
+    @MainActor
+    static var payload: [String: String] {
+        [
+            "model": friendlyModel,
+            "modelId": modelIdentifier,
+            "ios": UIDevice.current.systemVersion,
+            "app": (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0"
+        ]
+    }
+}
 
 // MARK: - Persistent License + Encrypted Profile Backup Manager
 
@@ -40,6 +88,74 @@ final class LicenseManager: ObservableObject {
     }
     @Published var isChecking: Bool = false
     @Published var errorMessage: String?
+    @Published var remoteConfig: RemoteAppConfig?
+    @Published var dismissedAnnouncementId: String = UserDefaults.standard.string(forKey: "tinytiny.dismissed.announcement") ?? ""
+
+    private var lastErrorReportAt: [String: Date] = [:]
+
+    var activeAnnouncement: (id: String, text: String)? {
+        guard let text = remoteConfig?.announcement?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        let id = remoteConfig?.announcementId ?? text
+        guard id != dismissedAnnouncementId else { return nil }
+        return (id, text)
+    }
+
+    var isUpdateRequired: Bool {
+        guard let minVer = remoteConfig?.minVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !minVer.isEmpty else { return false }
+        let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0"
+        return Self.compareVersions(current, minVer) < 0
+    }
+
+    func dismissAnnouncement(_ id: String) {
+        dismissedAnnouncementId = id
+        UserDefaults.standard.set(id, forKey: "tinytiny.dismissed.announcement")
+    }
+
+    private static func compareVersions(_ a: String, _ b: String) -> Int {
+        let pa = a.split(separator: ".").compactMap { Int($0) }
+        let pb = b.split(separator: ".").compactMap { Int($0) }
+        let n = max(pa.count, pb.count)
+        for i in 0..<n {
+            let va = i < pa.count ? pa[i] : 0
+            let vb = i < pb.count ? pb[i] : 0
+            if va != vb { return va < vb ? -1 : 1 }
+        }
+        return 0
+    }
+
+    private func applyRemoteConfig(from json: [String: Any]) {
+        guard let cfgDict = json["config"] as? [String: Any],
+              let data = try? JSONSerialization.data(withJSONObject: cfgDict),
+              let cfg = try? JSONDecoder().decode(RemoteAppConfig.self, from: data) else {
+            return
+        }
+        remoteConfig = cfg
+    }
+
+    func reportError(source: String, detail: String) {
+        let now = Date()
+        if let prev = lastErrorReportAt[source], now.timeIntervalSince(prev) < 300 { return }
+        lastErrorReportAt[source] = now
+        guard let url = URL(string: "\(normalizedBaseURL)/v1/report-error") else { return }
+        let devInfo = DeviceTelemetry.payload
+        let key = status.licenseKey
+        let devId = deviceId
+        Task.detached(priority: .utility) { [session] in
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "key": key,
+                "deviceId": devId,
+                "deviceInfo": devInfo,
+                "source": String(source.prefix(40)),
+                "detail": String(detail.prefix(240))
+            ])
+            _ = try? await session.data(for: req)
+        }
+    }
 
     let deviceId: String
 
@@ -129,7 +245,11 @@ final class LicenseManager: ObservableObject {
         req.httpMethod = "POST"
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["key": cleanKey, "deviceId": deviceId]
+        let body: [String: Any] = [
+            "key": cleanKey,
+            "deviceId": deviceId,
+            "deviceInfo": DeviceTelemetry.payload
+        ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
@@ -141,6 +261,7 @@ final class LicenseManager: ObservableObject {
             }
 
             if (json["valid"] as? Bool) == true {
+                applyRemoteConfig(from: json)
                 var next = LicenseStatus()
                 next.licenseKey = cleanKey
                 next.isAdmin = (json["admin"] as? Bool) ?? false
@@ -176,7 +297,8 @@ final class LicenseManager: ObservableObject {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "key": status.licenseKey,
-            "deviceId": deviceId
+            "deviceId": deviceId,
+            "deviceInfo": DeviceTelemetry.payload
         ])
 
         guard let (data, resp) = try? await session.data(for: req),
@@ -185,6 +307,7 @@ final class LicenseManager: ObservableObject {
             return
         }
 
+        applyRemoteConfig(from: json)
         var next = status
         next.lastVerifiedAt = Date().timeIntervalSince1970
         if let valid = json["valid"] as? Bool {

@@ -115,21 +115,339 @@ function validateRecordAccess(rec, deviceId) {
   return { ok: true };
 }
 
-async function sendTelegram(env, chatId, text) {
+async function sendTelegram(env, chatId, text, replyMarkup = null) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
+  const payload = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
   await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
+    body: JSON.stringify(payload),
   });
 }
 
+async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
+  const payload = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+async function answerCallbackQuery(env, callbackQueryId, text = "") {
+  if (!env.TELEGRAM_BOT_TOKEN || !callbackQueryId) return;
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+  }).catch(() => null);
+}
+
+async function getRemoteConfig(env) {
+  const raw = await env.LICENSES.get("config:app");
+  if (!raw) return { announcement: null, announcementId: null, minVersion: null, maintenance: null };
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { announcement: null, announcementId: null, minVersion: null, maintenance: null };
+  }
+}
+
+async function saveRemoteConfig(env, cfg) {
+  await env.LICENSES.put("config:app", JSON.stringify(cfg));
+}
+
+async function listAllLicenses(env) {
+  const keys = [];
+  let cursor = undefined;
+  do {
+    const res = await env.LICENSES.list({ prefix: "lic:", cursor, limit: 1000 });
+    for (const k of res.keys || []) keys.push(k.name);
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+
+  const records = [];
+  for (let i = 0; i < keys.length; i += 20) {
+    const chunk = keys.slice(i, i + 20);
+    const vals = await Promise.all(chunk.map((k) => env.LICENSES.get(k)));
+    for (const raw of vals) {
+      if (raw) {
+        try {
+          records.push(JSON.parse(raw));
+        } catch {}
+      }
+    }
+  }
+  records.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return records;
+}
+
+function recordDeviceTelemetry(rec, deviceId, deviceInfo) {
+  const dev = String(deviceId || "").trim();
+  if (!dev || !deviceInfo || typeof deviceInfo !== "object") return false;
+  if (!rec.devices || typeof rec.devices !== "object") rec.devices = {};
+  const prev = rec.devices[dev] || {};
+  const model = String(deviceInfo.model || prev.model || "Unknown").slice(0, 48);
+  const modelId = String(deviceInfo.modelId || prev.modelId || "").slice(0, 32);
+  const ios = String(deviceInfo.ios || prev.ios || "?").slice(0, 20);
+  const app = String(deviceInfo.app || prev.app || "1.0").slice(0, 20);
+  const now = nowSec();
+  const changed =
+    !prev.lastSeenAt ||
+    prev.model !== model ||
+    prev.ios !== ios ||
+    prev.app !== app ||
+    now - prev.lastSeenAt >= 3600;
+  rec.devices[dev] = {
+    model,
+    modelId,
+    ios,
+    app,
+    firstSeenAt: prev.firstSeenAt || now,
+    lastSeenAt: now,
+  };
+  return changed;
+}
+
+function classifyLicenseState(rec) {
+  if (rec.revoked) return "revoked";
+  if (!rec.activatedAt) return "unused";
+  if (!rec.lifetime && rec.expiresAt && nowSec() >= rec.expiresAt) return "expired";
+  return "active";
+}
+
+function formatKeyDetails(rec) {
+  const devs = rec.devices && typeof rec.devices === "object" ? Object.entries(rec.devices) : [];
+  const devLines = devs.map(([, info]) => {
+    const agoMin = Math.max(0, Math.floor((nowSec() - (info.lastSeenAt || 0)) / 60));
+    const agoStr = agoMin < 60 ? `${agoMin}m ago` : agoMin < 1440 ? `${Math.floor(agoMin / 60)}h ago` : `${Math.floor(agoMin / 1440)}d ago`;
+    return `  • ${escapeHtmlTg(info.model || "iPhone")} (iOS ${escapeHtmlTg(info.ios || "?")}, v${escapeHtmlTg(info.app || "1.0")}) · ${agoStr}`;
+  });
+  return [
+    `<b>${rec.key}</b>`,
+    rec.admin ? `Role: <b>ADMIN</b>` : `Role: Standard`,
+    `Status: <b>${formatRemaining(rec)}</b>`,
+    `Devices: ${(rec.deviceIds || []).length}/${rec.maxDevices || 1}`,
+    ...devLines,
+    rec.note ? `Note: ${escapeHtmlTg(rec.note)}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function keyActionKeyboard(rec) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "+7d", callback_data: `k:ext7:${rec.key}` },
+        { text: "+30d", callback_data: `k:ext30:${rec.key}` },
+        { text: "Lifetime", callback_data: `k:life:${rec.key}` },
+      ],
+      [
+        { text: "Unbind Devices", callback_data: `k:unb:${rec.key}` },
+        rec.revoked
+          ? { text: "Unrevoke", callback_data: `k:unrev:${rec.key}` }
+          : { text: "Revoke", callback_data: `k:rev:${rec.key}` },
+        { text: "Refresh", callback_data: `k:ref:${rec.key}` },
+      ],
+    ],
+  };
+}
+
+async function buildUsersStatsMessage(env) {
+  const all = await listAllLicenses(env);
+  let active = 0, unused = 0, expired = 0, revoked = 0, admins = 0;
+  let active24h = 0, active7d = 0;
+  const now = nowSec();
+  const modelCounts = {};
+  const iosCounts = {};
+  const appCounts = {};
+
+  for (const rec of all) {
+    if (rec.admin) admins++;
+    const st = classifyLicenseState(rec);
+    if (st === "active") active++;
+    else if (st === "unused") unused++;
+    else if (st === "expired") expired++;
+    else if (st === "revoked") revoked++;
+
+    if (rec.devices && typeof rec.devices === "object") {
+      for (const [, info] of Object.entries(rec.devices)) {
+        const last = info.lastSeenAt || 0;
+        if (now - last <= DAY_SEC) active24h++;
+        if (now - last <= 7 * DAY_SEC) active7d++;
+        if (st === "active" || now - last <= 7 * DAY_SEC) {
+          const m = info.model || "Unknown iPhone";
+          const ios = `iOS ${info.ios || "?"}`;
+          const app = `v${info.app || "1.0"}`;
+          modelCounts[m] = (modelCounts[m] || 0) + 1;
+          iosCounts[ios] = (iosCounts[ios] || 0) + 1;
+          appCounts[app] = (appCounts[app] || 0) + 1;
+        }
+      }
+    }
+  }
+
+  const fmtTop = (obj, limit = 10) =>
+    Object.entries(obj)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([k, v]) => `  • ${escapeHtmlTg(k)}: <b>${v}</b>`)
+      .join("\n") || "  • No device telemetry yet";
+
+  return [
+    `<b>TinyTiny Fleet &amp; Users</b>`,
+    `Total Keys: <b>${all.length}</b> (${admins} admin)`,
+    `Active: <b>${active}</b> · Unused: <b>${unused}</b> · Expired: <b>${expired}</b> · Revoked: <b>${revoked}</b>`,
+    `Active Devices: <b>${active24h}</b> (24h) · <b>${active7d}</b> (7d)`,
+    ``,
+    `<b>iPhone Models (Active / 7d)</b>`,
+    fmtTop(modelCounts, 12),
+    ``,
+    `<b>iOS Versions</b>`,
+    fmtTop(iosCounts, 8),
+    ``,
+    `<b>App Builds</b>`,
+    fmtTop(appCounts, 6),
+  ].join("\n");
+}
+
+async function buildAllKeysPage(env, filter = "all", page = 1) {
+  const all = await listAllLicenses(env);
+  const filtered = all.filter((rec) => {
+    if (filter === "all") return true;
+    if (filter === "admin") return Boolean(rec.admin);
+    return classifyLicenseState(rec) === filter;
+  });
+  const perPage = 10;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
+  const p = Math.min(totalPages, Math.max(1, page));
+  const slice = filtered.slice((p - 1) * perPage, p * perPage);
+
+  const lines = slice.map((rec) => {
+    const devs = rec.devices ? Object.values(rec.devices) : [];
+    const devTag = devs.length > 0 ? ` · ${escapeHtmlTg(devs[0].model || "")} (${escapeHtmlTg(devs[0].ios || "?")})` : "";
+    return `<code>${rec.key}</code> — ${formatRemaining(rec)}${devTag}${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}`;
+  });
+
+  const text = [
+    `<b>All Keys (${filter.toUpperCase()})</b> · ${filtered.length} total · Page ${p}/${totalPages}`,
+    lines.length ? lines.join("\n") : "No keys match this filter.",
+    ``,
+    `Tip: send <code>/info KEY</code> to Extend, Unbind, or Revoke with buttons.`,
+  ].join("\n");
+
+  const navRow = [];
+  if (p > 1) navRow.push({ text: "◀ Prev", callback_data: `keys:${filter}:${p - 1}` });
+  if (p < totalPages) navRow.push({ text: "Next ▶", callback_data: `keys:${filter}:${p + 1}` });
+  const filterRow = [
+    { text: filter === "all" ? "• All •" : "All", callback_data: "keys:all:1" },
+    { text: filter === "active" ? "• Active •" : "Active", callback_data: "keys:active:1" },
+    { text: filter === "unused" ? "• Unused •" : "Unused", callback_data: "keys:unused:1" },
+    { text: filter === "expired" ? "• Expired •" : "Expired", callback_data: "keys:expired:1" },
+  ];
+  const keyboard = { inline_keyboard: navRow.length ? [navRow, filterRow] : [filterRow] };
+  return { text, keyboard };
+}
+
 async function handleTelegramUpdate(env, update) {
+  if (update?.callback_query) {
+    const cq = update.callback_query;
+    const senderId = String(cq.from?.id || "");
+    if (!env.ADMIN_USER_ID || String(env.ADMIN_USER_ID) !== senderId) {
+      await answerCallbackQuery(env, cq.id, "Unauthorized");
+      return new Response("ok");
+    }
+    const chatId = cq.message?.chat?.id;
+    const msgId = cq.message?.message_id;
+    const data = String(cq.data || "");
+    const parts = data.split(":");
+
+    if (parts[0] === "keys" && chatId && msgId) {
+      const filter = parts[1] || "all";
+      const page = parseInt(parts[2] || "1", 10) || 1;
+      const res = await buildAllKeysPage(env, filter, page);
+      await editTelegramMessage(env, chatId, msgId, res.text, res.keyboard);
+      await answerCallbackQuery(env, cq.id);
+      return new Response("ok");
+    }
+
+    if (parts[0] === "stats" && chatId && msgId) {
+      const text = await buildUsersStatsMessage(env);
+      await editTelegramMessage(env, chatId, msgId, text, {
+        inline_keyboard: [[{ text: "Refresh", callback_data: "stats:ref" }]],
+      });
+      await answerCallbackQuery(env, cq.id, "Refreshed");
+      return new Response("ok");
+    }
+
+    if (parts[0] === "k" && parts.length >= 3 && chatId && msgId) {
+      const action = parts[1];
+      const key = parts.slice(2).join(":");
+      const rec = await getLicense(env, key);
+      if (!rec) {
+        await answerCallbackQuery(env, cq.id, "Key not found");
+        return new Response("ok");
+      }
+      let toast = "Updated";
+      if (action === "ext7" || action === "ext30") {
+        const days = action === "ext7" ? 7 : 30;
+        const sec = days * DAY_SEC;
+        if (rec.activatedAt) {
+          const base = Math.max(nowSec(), rec.expiresAt || nowSec());
+          rec.lifetime = false;
+          rec.expiresAt = base + sec;
+        } else {
+          rec.lifetime = false;
+          rec.durationSeconds = (rec.durationSeconds || 0) + sec;
+        }
+        rec.durationLabel = `${rec.durationLabel} + ${days}d`;
+        await saveLicense(env, rec);
+        toast = `Extended +${days}d`;
+      } else if (action === "life") {
+        rec.lifetime = true;
+        rec.expiresAt = null;
+        rec.durationLabel = "Lifetime";
+        await saveLicense(env, rec);
+        toast = "Set to Lifetime";
+      } else if (action === "unb") {
+        rec.deviceIds = [];
+        await saveLicense(env, rec);
+        toast = "Devices unbound";
+      } else if (action === "rev") {
+        rec.revoked = true;
+        await saveLicense(env, rec);
+        toast = "Key revoked";
+      } else if (action === "unrev") {
+        rec.revoked = false;
+        await saveLicense(env, rec);
+        toast = "Key unrevoked";
+      } else if (action === "ref") {
+        toast = "Refreshed";
+      }
+      await editTelegramMessage(env, chatId, msgId, formatKeyDetails(rec), keyActionKeyboard(rec));
+      await answerCallbackQuery(env, cq.id, toast);
+      return new Response("ok");
+    }
+
+    await answerCallbackQuery(env, cq.id);
+    return new Response("ok");
+  }
+
   const msg = update?.message;
   if (!msg || !msg.text) return new Response("ok");
   const chatId = msg.chat.id;
@@ -164,17 +482,39 @@ async function handleTelegramUpdate(env, update) {
       chatId,
       [
         "<b>TinyTiny License Admin</b>",
-        "<code>/gen 30d [maxDevices] [note]</code> — Create key (e.g. 12h, 7d, 30d, 1y, lifetime)",
-        "<code>/genadmin 30d [maxDevices] [note]</code> — Create Admin key (unlocks Direct IG MP4)",
-        "<code>/info TT-XXXX-XXXX-XXXX</code> — Inspect key",
-        "<code>/list</code> — Recent license keys",
-        "<code>/extend TT-XXXX-XXXX-XXXX 30d</code> — Add duration",
-        "<code>/unbind TT-XXXX-XXXX-XXXX</code> — Reset device lock",
-        "<code>/revoke TT-XXXX-XXXX-XXXX</code> — Revoke key",
-        "<code>/watchit</code> — Sync Seedr Watchit folder",
-        "<code>/directig</code> — Send last XVideos MP4 to IG DM/Group",
+        "<code>/users</code> or <code>/stats</code> — Active user count &amp; iPhone/iOS breakdown",
+        "<code>/allkeys [page|active|unused|expired|revoked|admin]</code> — Browse all keys",
+        "<code>/info TT-XXXX-XXXX-XXXX</code> — Inspect key + Extend/Revoke buttons",
+        "<code>/find query</code> — Search keys by note, key, or iPhone model",
+        "<code>/gen 30d [maxDevices] [note]</code> — Create key (12h, 7d, 30d, 1y, lifetime)",
+        "<code>/genadmin 30d [maxDevices] [note]</code> — Create Admin key",
+        "<code>/genbatch 5 30d [maxDevices] [note]</code> — Batch generate keys",
+        "<code>/extend TT-XXXX 30d</code> · <code>/unbind TT-XXXX</code> · <code>/revoke TT-XXXX</code> · <code>/unrevoke TT-XXXX</code>",
+        "<code>/note TT-XXXX text</code> — Update key note",
+        "<code>/announce text</code> · <code>/clearannounce</code> — In-app banner",
+        "<code>/maintenance text|off</code> · <code>/minversion 1.2|off</code> — Remote gate",
+        "<code>/alerts on|off</code> · <code>/errors</code> · <code>/config</code>",
+        "<code>/watchit</code> · <code>/directig</code>",
       ].join("\n")
     );
+    return new Response("ok");
+  }
+
+  if (cmd === "/users" || cmd === "/stats") {
+    const statsText = await buildUsersStatsMessage(env);
+    await sendTelegram(env, chatId, statsText, {
+      inline_keyboard: [[{ text: "Refresh", callback_data: "stats:ref" }]],
+    });
+    return new Response("ok");
+  }
+
+  if (cmd === "/allkeys") {
+    const arg = (parts[1] || "all").toLowerCase();
+    const validFilters = new Set(["all", "active", "unused", "expired", "revoked", "admin"]);
+    const filter = validFilters.has(arg) ? arg : "all";
+    const page = validFilters.has(arg) ? (parseInt(parts[2] || "1", 10) || 1) : (parseInt(arg, 10) || 1);
+    const res = await buildAllKeysPage(env, filter, page);
+    await sendTelegram(env, chatId, res.text, res.keyboard);
     return new Response("ok");
   }
 
@@ -228,25 +568,13 @@ async function handleTelegramUpdate(env, update) {
     return new Response("ok");
   }
 
-  if (cmd === "/info") {
+  if (cmd === "/info" || cmd === "/key") {
     const rec = await getLicense(env, parts[1]);
     if (!rec) {
       await sendTelegram(env, chatId, "Key not found.");
       return new Response("ok");
     }
-    await sendTelegram(
-      env,
-      chatId,
-      [
-        `<b>${rec.key}</b>`,
-        rec.admin ? `Role: <b>ADMIN</b>` : `Role: Standard`,
-        `Status: <b>${formatRemaining(rec)}</b>`,
-        `Devices: ${(rec.deviceIds || []).length}/${rec.maxDevices || 1}`,
-        rec.note ? `Note: ${rec.note}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n")
-    );
+    await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
     return new Response("ok");
   }
 
@@ -314,7 +642,206 @@ async function handleTelegramUpdate(env, update) {
     }
     rec.revoked = true;
     await saveLicense(env, rec);
-    await sendTelegram(env, chatId, `Revoked <code>${rec.key}</code>.`);
+    await sendTelegram(env, chatId, `Revoked <code>${rec.key}</code>.`, keyActionKeyboard(rec));
+    return new Response("ok");
+  }
+
+  if (cmd === "/unrevoke") {
+    const rec = await getLicense(env, parts[1]);
+    if (!rec) {
+      await sendTelegram(env, chatId, "Key not found.");
+      return new Response("ok");
+    }
+    rec.revoked = false;
+    await saveLicense(env, rec);
+    await sendTelegram(env, chatId, `Restored <code>${rec.key}</code> -> <b>${formatRemaining(rec)}</b>`, keyActionKeyboard(rec));
+    return new Response("ok");
+  }
+
+  if (cmd === "/genbatch") {
+    const count = Math.min(25, Math.max(1, parseInt(parts[1] || "5", 10) || 5));
+    const durSpec = parseDuration(parts[2] || "30d");
+    if (!durSpec) {
+      await sendTelegram(env, chatId, "Usage: <code>/genbatch 5 30d [maxDevices] [note]</code>");
+      return new Response("ok");
+    }
+    let maxDevices = 1;
+    let noteStart = 3;
+    if (parts[3] && /^\d+$/.test(parts[3])) {
+      maxDevices = Math.min(10, Math.max(1, parseInt(parts[3], 10)));
+      noteStart = 4;
+    }
+    const note = parts.slice(noteStart).join(" ");
+    const generated = [];
+    for (let i = 0; i < count; i++) {
+      const key = generateLicenseKey();
+      const rec = {
+        key,
+        admin: false,
+        lifetime: durSpec.lifetime,
+        durationSeconds: durSpec.seconds,
+        durationLabel: durSpec.label,
+        maxDevices,
+        note,
+        createdAt: nowSec(),
+        activatedAt: null,
+        expiresAt: null,
+        deviceIds: [],
+        revoked: false,
+      };
+      await saveLicense(env, rec);
+      generated.push(key);
+    }
+    const idxRaw = await env.LICENSES.get("index:recent");
+    const idx = idxRaw ? JSON.parse(idxRaw) : [];
+    await env.LICENSES.put("index:recent", JSON.stringify([...generated, ...idx].slice(0, 60)));
+    await sendTelegram(
+      env,
+      chatId,
+      `<b>Generated ${generated.length} Keys (${durSpec.label})</b>\n` +
+        generated.map((k) => `<code>${k}</code>`).join("\n")
+    );
+    return new Response("ok");
+  }
+
+  if (cmd === "/note") {
+    const rec = await getLicense(env, parts[1]);
+    if (!rec) {
+      await sendTelegram(env, chatId, "Usage: <code>/note TT-XXXX-XXXX-XXXX new note</code>");
+      return new Response("ok");
+    }
+    rec.note = parts.slice(2).join(" ");
+    await saveLicense(env, rec);
+    await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
+    return new Response("ok");
+  }
+
+  if (cmd === "/find") {
+    const q = parts.slice(1).join(" ").trim().toLowerCase();
+    if (!q) {
+      await sendTelegram(env, chatId, "Usage: <code>/find iPhone 15</code> or <code>/find note</code>");
+      return new Response("ok");
+    }
+    const all = await listAllLicenses(env);
+    const hits = all.filter((rec) => {
+      if ((rec.key || "").toLowerCase().includes(q)) return true;
+      if ((rec.note || "").toLowerCase().includes(q)) return true;
+      if (rec.devices) {
+        for (const info of Object.values(rec.devices)) {
+          const hay = `${info.model || ""} ${info.modelId || ""} ios ${info.ios || ""}`.toLowerCase();
+          if (hay.includes(q)) return true;
+        }
+      }
+      return false;
+    });
+    const lines = hits.slice(0, 20).map((rec) => {
+      const devs = rec.devices ? Object.values(rec.devices) : [];
+      const devTag = devs.length ? ` · ${escapeHtmlTg(devs[0].model || "")} (${escapeHtmlTg(devs[0].ios || "?")})` : "";
+      return `<code>${rec.key}</code> — ${formatRemaining(rec)}${devTag}${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}`;
+    });
+    await sendTelegram(
+      env,
+      chatId,
+      `<b>Search "${escapeHtmlTg(q)}" (${hits.length} match${hits.length === 1 ? "" : "es"})</b>\n` +
+        (lines.length ? lines.join("\n") : "No matches.")
+    );
+    return new Response("ok");
+  }
+
+  if (cmd === "/announce") {
+    const message = parts.slice(1).join(" ").trim();
+    if (!message) {
+      await sendTelegram(env, chatId, "Usage: <code>/announce New update available!</code>");
+      return new Response("ok");
+    }
+    const cfg = await getRemoteConfig(env);
+    cfg.announcement = message;
+    cfg.announcementId = `ann_${nowSec()}`;
+    await saveRemoteConfig(env, cfg);
+    await sendTelegram(env, chatId, `In-app announcement set:\n<i>${escapeHtmlTg(message)}</i>`);
+    return new Response("ok");
+  }
+
+  if (cmd === "/clearannounce") {
+    const cfg = await getRemoteConfig(env);
+    cfg.announcement = null;
+    cfg.announcementId = null;
+    await saveRemoteConfig(env, cfg);
+    await sendTelegram(env, chatId, "In-app announcement cleared.");
+    return new Response("ok");
+  }
+
+  if (cmd === "/maintenance") {
+    const val = parts.slice(1).join(" ").trim();
+    const cfg = await getRemoteConfig(env);
+    if (!val || val.toLowerCase() === "off") {
+      cfg.maintenance = null;
+      await saveRemoteConfig(env, cfg);
+      await sendTelegram(env, chatId, "Maintenance mode turned <b>OFF</b>.");
+    } else {
+      cfg.maintenance = val;
+      await saveRemoteConfig(env, cfg);
+      await sendTelegram(env, chatId, `Maintenance mode <b>ON</b>:\n<i>${escapeHtmlTg(val)}</i>`);
+    }
+    return new Response("ok");
+  }
+
+  if (cmd === "/minversion") {
+    const val = (parts[1] || "").trim();
+    const cfg = await getRemoteConfig(env);
+    if (!val || val.toLowerCase() === "off") {
+      cfg.minVersion = null;
+      await saveRemoteConfig(env, cfg);
+      await sendTelegram(env, chatId, "Minimum app version gate turned <b>OFF</b>.");
+    } else {
+      cfg.minVersion = val;
+      await saveRemoteConfig(env, cfg);
+      await sendTelegram(env, chatId, `Minimum app version set to <b>v${escapeHtmlTg(val)}</b>.`);
+    }
+    return new Response("ok");
+  }
+
+  if (cmd === "/alerts") {
+    const mode = (parts[1] || "").toLowerCase();
+    if (mode === "on" || mode === "off") {
+      await env.LICENSES.put("alerts:enabled", mode === "on" ? "1" : "0");
+      await sendTelegram(env, chatId, `Activation &amp; error alerts: <b>${mode.toUpperCase()}</b>`);
+    } else {
+      const cur = (await env.LICENSES.get("alerts:enabled")) === "1" ? "ON" : "OFF";
+      await sendTelegram(env, chatId, `Alerts are currently <b>${cur}</b>. Use <code>/alerts on</code> or <code>/alerts off</code>.`);
+    }
+    return new Response("ok");
+  }
+
+  if (cmd === "/errors") {
+    const raw = await env.LICENSES.get("errors:recent");
+    const list = raw ? JSON.parse(raw) : [];
+    if (!list.length) {
+      await sendTelegram(env, chatId, "No recent anonymous error reports.");
+      return new Response("ok");
+    }
+    const lines = list.slice(0, 15).map((e) => {
+      const ago = Math.max(0, Math.floor((nowSec() - (e.at || 0)) / 60));
+      return `• <b>${escapeHtmlTg(e.source)}</b> — ${escapeHtmlTg(e.model || "iPhone")} (iOS ${escapeHtmlTg(e.ios || "?")}, v${escapeHtmlTg(e.app || "1.0")}) · ${ago}m ago\n  <i>${escapeHtmlTg(e.detail || "")}</i>`;
+    });
+    await sendTelegram(env, chatId, `<b>Recent Anonymous Error Reports</b>\n${lines.join("\n")}`);
+    return new Response("ok");
+  }
+
+  if (cmd === "/config") {
+    const cfg = await getRemoteConfig(env);
+    const alerts = (await env.LICENSES.get("alerts:enabled")) === "1" ? "ON" : "OFF";
+    await sendTelegram(
+      env,
+      chatId,
+      [
+        `<b>Remote App Config</b>`,
+        `Announcement: ${cfg.announcement ? escapeHtmlTg(cfg.announcement) : "<i>None</i>"}`,
+        `Maintenance: ${cfg.maintenance ? escapeHtmlTg(cfg.maintenance) : "<i>OFF</i>"}`,
+        `Min Version: ${cfg.minVersion ? `<b>v${escapeHtmlTg(cfg.minVersion)}</b>` : "<i>OFF</i>"}`,
+        `Telegram Alerts: <b>${alerts}</b>`,
+      ].join("\n")
+    );
     return new Response("ok");
   }
 
@@ -847,23 +1374,39 @@ export default {
 
       const dev = String(body.deviceId || "").trim();
       let changed = false;
+      let isFirstActivation = false;
       if (!rec.activatedAt) {
         rec.activatedAt = nowSec();
         rec.expiresAt = rec.lifetime ? null : rec.activatedAt + (rec.durationSeconds || 30 * DAY_SEC);
         changed = true;
+        isFirstActivation = true;
       }
       if (dev && !(rec.deviceIds || []).includes(dev)) {
         rec.deviceIds = [...(rec.deviceIds || []), dev];
         changed = true;
       }
+      if (recordDeviceTelemetry(rec, dev, body.deviceInfo)) {
+        changed = true;
+      }
       if (changed) await saveLicense(env, rec);
 
+      if (isFirstActivation && env.ADMIN_USER_ID && (await env.LICENSES.get("alerts:enabled")) === "1") {
+        const d = body.deviceInfo || {};
+        await sendTelegram(
+          env,
+          env.ADMIN_USER_ID,
+          `🔑 <b>Key Activated</b>\n<code>${rec.key}</code>${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}\nDevice: ${escapeHtmlTg(d.model || "iPhone")} · iOS ${escapeHtmlTg(d.ios || "?")} · v${escapeHtmlTg(d.app || "1.0")}`
+        ).catch(() => null);
+      }
+
+      const config = await getRemoteConfig(env);
       return json({
         valid: true,
         admin: Boolean(rec.admin),
         lifetime: Boolean(rec.lifetime),
         expiresAt: rec.expiresAt,
         durationLabel: rec.durationLabel,
+        config,
       });
     }
 
@@ -873,13 +1416,59 @@ export default {
       const rec = await getLicense(env, body.key);
       const check = validateRecordAccess(rec, body.deviceId);
       if (!check.ok) return json({ valid: false, error: check.error }, 200);
+
+      if (recordDeviceTelemetry(rec, body.deviceId, body.deviceInfo)) {
+        await saveLicense(env, rec);
+      }
+
+      const config = await getRemoteConfig(env);
       return json({
         valid: true,
         admin: Boolean(rec.admin),
         lifetime: Boolean(rec.lifetime),
         expiresAt: rec.expiresAt,
         durationLabel: rec.durationLabel,
+        config,
       });
+    }
+
+    // 3b. Remote Config & Anonymous Error Telemetry
+    if (request.method === "GET" && path === "/v1/config") {
+      return json(await getRemoteConfig(env));
+    }
+
+    if (request.method === "POST" && path === "/v1/report-error") {
+      const body = await request.json().catch(() => ({}));
+      const source = String(body.source || "Unknown").slice(0, 40);
+      const detail = String(body.detail || "").slice(0, 240);
+      const devId = String(body.deviceId || "anon").slice(0, 48);
+      const d = body.deviceInfo || {};
+      const rlKey = `err_rl:${devId}:${source}`;
+      if (await env.LICENSES.get(rlKey)) {
+        return json({ ok: true, throttled: true });
+      }
+      await env.LICENSES.put(rlKey, "1", { expirationTtl: 300 });
+
+      const raw = await env.LICENSES.get("errors:recent");
+      const list = raw ? JSON.parse(raw) : [];
+      list.unshift({
+        source,
+        detail,
+        model: String(d.model || "iPhone").slice(0, 48),
+        ios: String(d.ios || "?").slice(0, 20),
+        app: String(d.app || "1.0").slice(0, 20),
+        at: nowSec(),
+      });
+      await env.LICENSES.put("errors:recent", JSON.stringify(list.slice(0, 25)));
+
+      if (env.ADMIN_USER_ID && (await env.LICENSES.get("alerts:enabled")) === "1") {
+        await sendTelegram(
+          env,
+          env.ADMIN_USER_ID,
+          `⚠️ <b>${escapeHtmlTg(source)} Error</b>\n${escapeHtmlTg(d.model || "iPhone")} (iOS ${escapeHtmlTg(d.ios || "?")}, v${escapeHtmlTg(d.app || "1.0")})\n<i>${escapeHtmlTg(detail)}</i>`
+        ).catch(() => null);
+      }
+      return json({ ok: true });
     }
 
     // 4. Zero-Knowledge Encrypted Profile Sync (Client-encrypted Likes/Follows/Seedr Key)

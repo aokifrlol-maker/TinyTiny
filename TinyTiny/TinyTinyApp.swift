@@ -89,6 +89,60 @@ struct RootView: View {
                     GoonedMainShell()
                         .transition(.opacity)
                 }
+                if let ann = license.activeAnnouncement {
+                    VStack {
+                        HStack(spacing: 10) {
+                            Image(systemName: "megaphone.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(Theme.accentBright)
+                            Text(ann.text)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(3)
+                            Spacer(minLength: 4)
+                            Button {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                                    license.dismissAnnouncement(ann.id)
+                                }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .frame(width: 24, height: 24)
+                                    .liquidGlassCircle()
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 54)
+                        Spacer()
+                    }
+                    .zIndex(8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                if !license.isAdmin, let maint = license.remoteConfig?.maintenance, !maint.isEmpty {
+                    RemoteGateOverlay(
+                        icon: "wrench.and.screwdriver.fill",
+                        title: "Maintenance",
+                        message: maint,
+                        tinted: store.data.settings.tintedGlass
+                    ) {
+                        await license.verifySilently()
+                    }
+                    .zIndex(9)
+                } else if !license.isAdmin, license.isUpdateRequired {
+                    RemoteGateOverlay(
+                        icon: "arrow.down.app.fill",
+                        title: "Update Required",
+                        message: "Please install TinyTiny v\(license.remoteConfig?.minVersion ?? "") or newer to continue.",
+                        tinted: store.data.settings.tintedGlass
+                    ) {
+                        await license.verifySilently()
+                    }
+                    .zIndex(9)
+                }
                 if app.isLocked {
                     LockView().transition(.opacity).zIndex(10)
                 }
@@ -162,6 +216,55 @@ enum HomeChannel: Hashable {
     case ofForYou, ofTrending, ofLatest, ofDMs
     case longAll, longEporner, longXVideos, longPornhub, longXHamster, longSpankBang, longErome
     case custom
+}
+
+private struct RemoteGateOverlay: View {
+    let icon: String
+    let title: String
+    let message: String
+    let tinted: Bool
+    let onRetry: () async -> Void
+    @State private var checking = false
+
+    var body: some View {
+        ZStack {
+            Color.clear.liquidGlassBackground(tinted: tinted)
+            VStack(spacing: 18) {
+                Image(systemName: icon)
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundStyle(Theme.accentBright)
+                    .frame(width: 68, height: 68)
+                    .liquidGlassCircle()
+                Text(title)
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Button {
+                    Task {
+                        checking = true
+                        await onRetry()
+                        checking = false
+                    }
+                } label: {
+                    Group {
+                        if checking { ProgressView().tint(.white) }
+                        else { Text("Check Again").font(.system(size: 15, weight: .bold)) }
+                    }
+                    .frame(maxWidth: 180)
+                    .padding(.vertical, 12)
+                    .liquidGlassCapsule(active: true)
+                }
+                .disabled(checking)
+            }
+            .padding(24)
+            .liquidGlassCard(cornerRadius: 24, tinted: tinted)
+            .padding(.horizontal, 24)
+        }
+    }
 }
 
 struct GoonedMainShell: View {
