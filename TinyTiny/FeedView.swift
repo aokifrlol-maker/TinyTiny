@@ -1461,7 +1461,10 @@ struct GoonedReelCell: View {
                         if !album.isEmpty {
                             albumItems = album
                         }
-                        if !resolved.isEmpty {
+                        if album.first?.isVideo == false {
+                            player.pause()
+                            player.allFailed = false
+                        } else if !resolved.isEmpty {
                             player.updateCandidateURLs(resolved)
                             if shouldPlay { player.play() }
                         } else if !album.isEmpty {

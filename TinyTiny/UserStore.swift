@@ -1101,8 +1101,8 @@ enum AdultContentClassifier {
         if post.isIGPost {
             return !containsSFWBlockedTerm(combinedText)
         }
-        if post.isOnlyFansPost {
-            return true
+        if post.isOnlyFansPost || post.isLongVideoPost {
+            return !containsSFWBlockedTerm(combinedText)
         }
 
         // Personal saved lists (Liked / Offline Vault) were explicitly chosen by user

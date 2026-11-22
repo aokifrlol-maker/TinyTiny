@@ -875,7 +875,8 @@ actor LongVideoAPI {
         var seenURLs = Set<String>()
 
         // Extract only media belonging to this specific album code (excludes related albums at bottom of page)
-        let vidPat = #"https?://v\d*\.erome\.com/[^"'\s>]+/\(albumCode)/[^"'\s>]+\.(?:mp4|m4v|mov)(?:\?[^"'\s>]*)?"#
+        let escCode = NSRegularExpression.escapedPattern(for: albumCode)
+        let vidPat = #"https?://v\d*\.erome\.com/[^"'\s>]+/\#(escCode)/[^"'\s>]+\.(?:mp4|m4v|mov)(?:\?[^"'\s>]*)?"#
         if let regex = try? NSRegularExpression(pattern: vidPat, options: [.caseInsensitive]) {
             let ns = cleaned as NSString
             for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
@@ -888,7 +889,7 @@ actor LongVideoAPI {
         }
 
         // Also extract full-size photos in this album (ignoring /thumbs/ and avatars)
-        let imgPat = #"https?://s\d*\.erome\.com/[^"'\s>]+/\(albumCode)/(?!thumbs/)[^"'\s>]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s>]*)?"#
+        let imgPat = #"https?://s\d*\.erome\.com/[^"'\s>]+/\#(escCode)/(?!thumbs/)[^"'\s>]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s>]*)?"#
         if let regex = try? NSRegularExpression(pattern: imgPat, options: [.caseInsensitive]) {
             let ns = cleaned as NSString
             for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
