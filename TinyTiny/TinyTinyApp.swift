@@ -296,6 +296,8 @@ struct GoonedMainShell: View {
         let channel: HomeChannel
         let customSource: FeedSource?
         let customItems: [Gif]
+        let customCursor: String?
+        let customHasMore: Bool
         let postID: String?
         let returnTab: GoonedDockTab
         let creatorGridSource: FeedSource?
@@ -753,7 +755,9 @@ struct GoonedMainShell: View {
         let item = CustomBackHistoryItem(
             channel: activeChannel,
             customSource: activeChannel == .custom ? customModel.source : nil,
-            customItems: activeChannel == .custom && customModel.source.isList ? customModel.items : [],
+            customItems: activeChannel == .custom ? customModel.items : [],
+            customCursor: activeChannel == .custom ? customModel.currentAfterCursor : nil,
+            customHasMore: activeChannel == .custom ? customModel.hasMore : true,
             postID: slotPostIDs[activeChannel],
             returnTab: returnTab,
             creatorGridSource: creatorGridSource
@@ -768,7 +772,12 @@ struct GoonedMainShell: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         if let prev = customBackStack.popLast() {
             if prev.channel == .custom {
-                customModel.switchSource(prev.customSource ?? .forYou, initialItems: prev.customItems)
+                customModel.switchSource(
+                    prev.customSource ?? .forYou,
+                    initialItems: prev.customItems,
+                    cursor: prev.customCursor,
+                    allowLoadMore: prev.customHasMore
+                )
                 slotPostIDs[.custom] = prev.postID
                 activeChannel = .custom
             } else {
@@ -932,8 +941,8 @@ struct GoonedMainShell: View {
                 Task { await model.refresh(rotateCursor: true) }
             }
         default:
-            if activeChannel != .custom || customModel.source != src {
-                pushCustomBackHistory(returnTab: .home)
+            if activeChannel != .custom || customModel.source != src || activeTab != .home {
+                pushCustomBackHistory(returnTab: activeTab)
             }
             activeChannel = .custom
             if customModel.source != src || forceReload {

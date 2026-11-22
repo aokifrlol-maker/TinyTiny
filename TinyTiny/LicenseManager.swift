@@ -439,6 +439,9 @@ final class LicenseManager: ObservableObject {
             if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
                 UserStore.shared.data.igSession = backup.userData.igSession
             }
+            for seenId in backup.userData.seenIDs {
+                UserStore.shared.markSeen(seenId)
+            }
         }
         SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
         CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey)

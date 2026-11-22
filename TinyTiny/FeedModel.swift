@@ -216,6 +216,8 @@ final class FeedModel: ObservableObject {
         }
     }
 
+    var currentAfterCursor: String? { afterCursor }
+
     var canLoadMore: Bool {
         if case .list = source { return false }
         return hasMore
@@ -337,8 +339,11 @@ final class FeedModel: ObservableObject {
         let store = UserStore.shared
         if items.count > 2 {
             let unseen = items.filter { !store.isSeen($0) }.shuffled()
-            let seen = items.filter { store.isSeen($0) }.shuffled()
-            items = unseen + seen
+            if !unseen.isEmpty {
+                items = unseen
+            } else {
+                items = items.shuffled()
+            }
         }
         Task { await loadMore() }
     }
@@ -474,8 +479,10 @@ final class FeedModel: ObservableObject {
             var fallbackSeen: [Gif] = []
             let isProfileOrSearch: Bool = {
                 switch source {
-                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit:
+                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit, .longSearch:
                     return true
+                case .rule34(let tag):
+                    return !tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 default:
                     return false
                 }
@@ -623,8 +630,8 @@ final class FeedModel: ObservableObject {
                 }
             }
 
-            // Never fall back to seen items on personal X/IG/Following/Search feeds
-            if items.isEmpty && !fallbackSeen.isEmpty && !source.isIGFeed && !source.isXFeed && source != .following {
+            // Never fall back to seen items on discovery / For You / main feeds (prevents repeating videos)
+            if items.isEmpty && !fallbackSeen.isEmpty && (isProfileOrSearch || source == .following) && !source.isIGFeed && !source.isXFeed {
                 items.append(contentsOf: fallbackSeen.shuffled())
             }
 

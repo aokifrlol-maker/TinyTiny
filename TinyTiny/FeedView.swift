@@ -1666,7 +1666,11 @@ struct GoonedReelCell: View {
                 } else if gif.isIGPost, let u = gif.author {
                     onSelectIGUser(u)
                 } else if gif.isRule34Post {
-                    onSelectRule34Tag("")
+                    if let u = gif.author, !u.isEmpty, u.lowercased() != "rule34" {
+                        onSelectRule34Tag(u.hasPrefix("user:") ? u : "user:\(u)")
+                    } else {
+                        onSelectRule34Tag("")
+                    }
                 } else if gif.isLongVideoPost {
                     showMoreSheet = true
                 } else if let sub = gif.subreddit {
@@ -1894,9 +1898,28 @@ struct GoonedReelCell: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
                     if let author = gif.author {
-                        Text((gif.isXPost || gif.isIGPost || gif.isOnlyFansPost) ? "@\(author)" : author)
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
+                        Button {
+                            if gif.isOnlyFansPost, let cid = gif.onlyFansCreatorId {
+                                onSelectOFCreator(cid, author)
+                            } else if gif.isXPost {
+                                onSelectXUser(author)
+                            } else if gif.isIGPost {
+                                onSelectIGUser(author)
+                            } else if gif.isRule34Post {
+                                if !author.isEmpty, author.lowercased() != "rule34" {
+                                    onSelectRule34Tag(author.hasPrefix("user:") ? author : "user:\(author)")
+                                } else {
+                                    onSelectRule34Tag("")
+                                }
+                            } else if !gif.isLongVideoPost {
+                                onSelectUser(author)
+                            }
+                        } label: {
+                            Text((gif.isXPost || gif.isIGPost || gif.isOnlyFansPost) ? "@\(author)" : author)
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
                     }
                     if gif.isOnlyFansPost {
                         Text("·").foregroundStyle(.white.opacity(0.65))
@@ -2415,7 +2438,11 @@ struct PostMoreSheet: View {
                                 } else if gif.isIGPost {
                                     onSelectIGUser(u)
                                 } else if gif.isRule34Post {
-                                    onSelectRule34Tag(u)
+                                    if !u.isEmpty, u.lowercased() != "rule34" {
+                                        onSelectRule34Tag(u.hasPrefix("user:") ? u : "user:\(u)")
+                                    } else {
+                                        onSelectRule34Tag("")
+                                    }
                                 } else {
                                     onSelectUser(u)
                                 }
