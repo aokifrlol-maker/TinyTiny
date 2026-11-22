@@ -463,6 +463,13 @@ enum MediaMetaRegistry {
                 viewerFollowsByKey["user:\(creatorName.lowercased())"] = followedByViewer
             }
         }
+        if fingerprints.count > 4000 {
+            fingerprints.removeAll(keepingCapacity: true)
+            extraVideos.removeAll(keepingCapacity: true)
+            postTags.removeAll(keepingCapacity: true)
+            postCreatorIds.removeAll(keepingCapacity: true)
+            postCreatorGender.removeAll(keepingCapacity: true)
+        }
     }
 
     static func registerCreatorGender(creatorId: String?, creatorName: String?, gender: String?, tags: [String] = []) {

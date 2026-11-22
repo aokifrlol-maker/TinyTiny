@@ -194,6 +194,7 @@ struct GoonedMainShell: View {
         let customItems: [Gif]
         let postID: String?
         let returnTab: GoonedDockTab
+        let creatorGridSource: FeedSource?
     }
 
     @State private var activeChannel: HomeChannel = .forYou
@@ -271,7 +272,7 @@ struct GoonedMainShell: View {
             // 1. Main Full-Screen Feed Scroller (persistent per-channel models + instant horizontal swipe)
             FeedView(
                 model: activeModel,
-                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet,
+                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet && creatorGridSource == nil,
                 currentID: currentPostIDBinding,
                 onOpenCategories: {
                     withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
@@ -312,7 +313,8 @@ struct GoonedMainShell: View {
                         && !showSettingsModal
                         && !showXLoginSheet
                         && !showIGLoginSheet
-                        && !showR34KeySheet,
+                        && !showR34KeySheet
+                        && creatorGridSource == nil,
                     onSwipeLeft: { handleHorizontalFeedSwipe(dx: -100) },
                     onSwipeRight: { handleHorizontalFeedSwipe(dx: 100) }
                 )
@@ -476,7 +478,7 @@ struct GoonedMainShell: View {
                         }
                     },
                     onSelectPost: { post, loadedItems, cursor, canLoadMore in
-                        pushCustomBackHistory(returnTab: .home)
+                        pushCustomBackHistory(returnTab: activeTab, creatorGridSource: gridSrc)
                         customModel.switchSource(
                             gridSrc,
                             initialItems: loadedItems,
@@ -612,13 +614,14 @@ struct GoonedMainShell: View {
         }
     }
 
-    private func pushCustomBackHistory(returnTab: GoonedDockTab = .home) {
+    private func pushCustomBackHistory(returnTab: GoonedDockTab = .home, creatorGridSource: FeedSource? = nil) {
         let item = CustomBackHistoryItem(
             channel: activeChannel,
             customSource: activeChannel == .custom ? customModel.source : nil,
             customItems: activeChannel == .custom && customModel.source.isList ? customModel.items : [],
             postID: slotPostIDs[activeChannel],
-            returnTab: returnTab
+            returnTab: returnTab,
+            creatorGridSource: creatorGridSource
         )
         customBackStack.append(item)
         if customBackStack.count > 16 {
@@ -642,6 +645,11 @@ struct GoonedMainShell: View {
             if activeTab != prev.returnTab {
                 withAnimation(.easeOut(duration: 0.16)) {
                     activeTab = prev.returnTab
+                }
+            }
+            if let gridSrc = prev.creatorGridSource {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    creatorGridSource = gridSrc
                 }
             }
         } else {

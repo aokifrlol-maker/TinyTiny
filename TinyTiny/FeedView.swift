@@ -206,7 +206,7 @@ struct RemoteImageView: View {
                             .foregroundStyle(.white.opacity(0.8))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .liquidGlassCapsule(tinted: true)
+                            .liquidGlassCapsule()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -760,7 +760,7 @@ struct FeedView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .liquidGlassCapsule(tinted: true)
+                .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                 .padding(.top, 114)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -1859,7 +1859,7 @@ struct GoonedReelCell: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 20, tinted: true)
+            .liquidGlassCard(cornerRadius: 20, tinted: tinted)
             .padding(.horizontal, 14)
             .padding(.bottom, 92)
         }
@@ -2003,7 +2003,7 @@ struct GoonedReelCell: View {
                                 .foregroundStyle(.white.opacity(0.85))
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 7)
-                                .liquidGlassCapsule(tinted: true)
+                                .liquidGlassCapsule(tinted: tinted)
                         }
                     }
                 }

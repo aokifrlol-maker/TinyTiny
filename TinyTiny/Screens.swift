@@ -1692,13 +1692,12 @@ struct GridThumb: View {
         Color(red: 0.25, green: 0.06, blue: 0.14)
             .aspectRatio(9.0 / 16.0, contentMode: .fit)
             .overlay(
-                AsyncImage(url: gif.thumbURL) { phase in
-                    if let img = phase.image {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        ShimmerPlaceholder()
-                    }
-                }
+                RemoteImageView(
+                    url: gif.thumbURL,
+                    fallbackURLs: gif.posterFallbackURLs,
+                    fill: true,
+                    showSpinnerOnLoad: false
+                )
             )
             .clipped()
             .overlay(alignment: .topTrailing) {
@@ -3393,7 +3392,7 @@ struct CreatorProfileGridView: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 18)
                             .padding(.vertical, 9)
-                            .liquidGlassCapsule(tinted: true)
+                            .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                             .padding(.vertical, 14)
                         }
                     }

@@ -237,7 +237,40 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
     private var activeRouteKey: String = ""
     private var routeBuffers: [String: [Gif]] = [:]
     private var seenIds = Set<String>()
+    private var seenIdsByRoute: [String: Set<String>] = [:]
     private var waiters: [(routeKey: String, cont: CheckedContinuation<[Gif], Never>)] = []
+
+    private func insertSeen(_ key: String, route: String) -> Bool {
+        var set = seenIdsByRoute[route] ?? []
+        let inserted = set.insert(key).inserted
+        seenIdsByRoute[route] = set
+        return inserted
+    }
+
+    private static func routeAllowsSeen(_ route: String) -> Bool {
+        route.hasPrefix("ig_user_") || route == "ig_saved"
+    }
+
+    func webViewWebContentProcessDidTerminate(_ terminatedView: WKWebView) {
+        if terminatedView === webView {
+            pumpTask?.cancel()
+            pumpTask = nil
+            terminatedView.removeFromSuperview()
+            webView = nil
+            activeRouteKey = ""
+            isWarmedUp = false
+            let pending = waiters
+            waiters.removeAll()
+            for w in pending {
+                let buf = routeBuffers[w.routeKey] ?? []
+                routeBuffers[w.routeKey] = []
+                w.cont.resume(returning: buf)
+            }
+        } else if terminatedView === directWebView {
+            terminatedView.removeFromSuperview()
+            directWebView = nil
+        }
+    }
     private var pageCounter: Int = 0
     private var nextMaxIdByRoute: [String: String] = [:]
     private var dryPayloadCountByRoute: [String: Int] = [:]
@@ -461,6 +494,18 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         config.userContentController.addUserScript(script)
         config.userContentController.add(self, name: "igBridge")
 
+        let blockRulesJSON = """
+        [
+          {"trigger":{"url-filter":".*","resource-type":["image","font","media"]},"action":{"type":"block"}}
+        ]
+        """
+        if let ruleList = try? await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "tinytiny-ig-scraper-fast",
+            encodedContentRuleList: blockRulesJSON
+        ) {
+            config.userContentController.add(ruleList)
+        }
+
         let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
         wv.customUserAgent = Config.userAgent
         wv.navigationDelegate = self
@@ -532,42 +577,53 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             }
         }
 
-        if !activeRouteKey.isEmpty, let maxId = extractMaxId(from: data) {
-            nextMaxIdByRoute[activeRouteKey] = maxId
-        }
+        let routeAtCapture = activeRouteKey
+        guard !routeAtCapture.isEmpty else { return }
+        let allowSeen = Self.routeAllowsSeen(routeAtCapture)
+        let followedIGSnapshot = Set(UserStore.shared.data.followedIGUsers.map { $0.lowercased() })
 
-        let reels = InstagramParser.parseReels(from: data, routeKey: activeRouteKey)
-            .filter {
-                AdultContentClassifier.isEligibleIGReel(
-                    caption: $0.title ?? "",
-                    author: $0.author ?? "",
-                    routeKey: activeRouteKey
-                )
-            }
-        guard !reels.isEmpty else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let maxId = self?.extractMaxId(from: data)
+            let reels = InstagramParser.parseReels(from: data, routeKey: routeAtCapture)
+                .filter {
+                    AdultContentClassifier.isEligibleIGReel(
+                        caption: $0.title ?? "",
+                        author: $0.author ?? "",
+                        routeKey: routeAtCapture
+                    )
+                }
+            guard !reels.isEmpty else { return }
 
-        let store = UserStore.shared
-        let fresh = reels.filter { post in
-            guard !store.isSeen(post),
-                  !store.isBlockedByAlgorithm(post) else { return false }
-            if activeRouteKey == "ig_following" {
-                let author = post.author ?? ""
-                let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
-                if viewerFollows == false && !store.isFollowingIGUser(author) {
-                    return false
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let maxId {
+                    self.nextMaxIdByRoute[routeAtCapture] = maxId
+                }
+                let store = UserStore.shared
+                let fresh = reels.filter { post in
+                    guard allowSeen || !store.isSeen(post),
+                          !store.isBlockedByAlgorithm(post) else { return false }
+                    if routeAtCapture == "ig_following" {
+                        let author = post.author ?? ""
+                        let viewerFollows = MediaMetaRegistry.isFollowedByViewer(postId: post.id, author: author)
+                        if viewerFollows == false && !followedIGSnapshot.contains(author.lowercased()) {
+                            return false
+                        }
+                    }
+                    return self.insertSeen(post.canonicalDedupeKey, route: routeAtCapture)
+                }
+                guard !fresh.isEmpty else { return }
+
+                self.dryPayloadCountByRoute[routeAtCapture] = 0
+                var buf = self.routeBuffers[routeAtCapture] ?? []
+                buf.append(contentsOf: fresh)
+                self.routeBuffers[routeAtCapture] = buf
+                self.flushWaitersIfNeeded(for: routeAtCapture)
+                if buf.count < 18, let wv = self.webView, self.activeRouteKey == routeAtCapture,
+                   routeAtCapture == "ig_reels" || routeAtCapture == "ig_following" {
+                    self.scheduleBackgroundPump(for: routeAtCapture, wv: wv, apiTriggerJS: nil)
                 }
             }
-            return seenIds.insert(post.canonicalDedupeKey).inserted
-        }
-        guard !fresh.isEmpty else { return }
-
-        dryPayloadCountByRoute[activeRouteKey] = 0
-        var buf = routeBuffers[activeRouteKey] ?? []
-        buf.append(contentsOf: fresh)
-        routeBuffers[activeRouteKey] = buf
-        flushWaitersIfNeeded(for: activeRouteKey)
-        if buf.count < 18, let wv = webView {
-            scheduleBackgroundPump(for: activeRouteKey, wv: wv, apiTriggerJS: nil)
         }
     }
 
@@ -644,6 +700,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
             if isRefresh {
                 pageCounter = 0
                 nextMaxIdByRoute[routeKey] = nil
+                seenIdsByRoute[routeKey] = []
             }
             dryPayloadCountByRoute[routeKey] = 0
 
