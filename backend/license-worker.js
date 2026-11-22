@@ -658,10 +658,15 @@ function b64ToUint8(str) {
 }
 
 function isDirectAuthorized(request, env) {
-  const secret = env.DIRECT_UPLOAD_SECRET || env.WEBHOOK_SECRET;
+  const secret = env.DIRECT_UPLOAD_SECRET;
   if (!secret) return false;
   const provided = request.headers.get("X-Direct-Secret") || "";
-  return provided.length > 0 && provided === secret;
+  if (provided.length !== secret.length || provided.length === 0) return false;
+  const a = new TextEncoder().encode(provided);
+  const b = new TextEncoder().encode(secret);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 function parseByteRange(rangeHeader, totalSize) {

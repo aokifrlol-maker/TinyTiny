@@ -1045,7 +1045,11 @@ struct LockView: View {
     @State private var code = ""
     @State private var shakes = 0
     @State private var failures = 0
-    @State private var lockedUntil: Date?
+    @State private var lockedUntil: Date? = {
+        let ts = UserDefaults.standard.double(forKey: "tt.passcode.lockedUntil")
+        let d = Date(timeIntervalSince1970: ts)
+        return (ts > 0 && d > Date()) ? d : nil
+    }()
     @State private var message: String?
     @State private var showKeyRecovery = false
     @State private var recoveryKeyInput = ""
@@ -1106,6 +1110,8 @@ struct LockView: View {
         }
         if Passcode.verify(c) {
             failures = 0
+            lockedUntil = nil
+            UserDefaults.standard.removeObject(forKey: "tt.passcode.lockedUntil")
             message = nil
             app.unlock()
         } else {
@@ -1114,7 +1120,9 @@ struct LockView: View {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             if failures >= 5 {
                 failures = 0
-                lockedUntil = Date().addingTimeInterval(30)
+                let until = Date().addingTimeInterval(30)
+                lockedUntil = until
+                UserDefaults.standard.set(until.timeIntervalSince1970, forKey: "tt.passcode.lockedUntil")
                 message = "Too many attempts. Wait 30 seconds."
             } else {
                 message = "Incorrect passcode"

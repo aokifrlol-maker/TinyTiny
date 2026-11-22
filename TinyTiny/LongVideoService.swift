@@ -569,9 +569,8 @@ actor LongVideoAPI {
         }
 
         // Direct HLS master.m3u8 fallback
-        let regex = try? NSRegularExpression(pattern: #"https://[^"'\s\\]+?master\.m3u8[^"'\s\\]*"#)
         let ns = cleaned as NSString
-        let matches = regex?.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) ?? []
+        let matches = Self.masterM3U8Regex?.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) ?? []
         for m in matches {
             let s = ns.substring(with: m.range)
             if seen.insert(s).inserted, let u = URL(string: s) {
@@ -582,7 +581,9 @@ actor LongVideoAPI {
         return urls
     }
 
-    // MARK: - 3. xHamster Listing & Stream Extractor
+    private static let masterM3U8Regex = try? NSRegularExpression(pattern: #"https://[^"'\s\\]+?master\.m3u8[^"'\s\\]*"#)
+    private static let xHamsterCardRegex = try? NSRegularExpression(pattern: #"<a[^>]+href="(https://xhamster\.com/videos/[^"]+)"[^>]*>[\s\S]{0,600}?<img[^>]+src="(https://[^"]+xhcdn\.com[^"]+)"[^>]*alt="([^"]+)""#)
+    private static let eromeCardRegex = try? NSRegularExpression(pattern: #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[^>]*>[\s\S]{0,600}?<img[^>]*?(?:alt="([^"]*)")?[^>]*?(?:data-src|src)="(https?://[^"]+)""#, options: [.caseInsensitive])
 
     private func fetchXHamster(query: String, sort: String, page: Int) async -> [Gif] {
         let targetURL: URL?
@@ -610,8 +611,7 @@ actor LongVideoAPI {
         }
 
         if posts.isEmpty {
-            let pattern = #"<a[^>]+href="(https://xhamster\.com/videos/[^"]+)"[^>]*>[\s\S]{0,600}?<img[^>]+src="(https://[^"]+xhcdn\.com[^"]+)"[^>]*alt="([^"]+)""#
-            if let regex = try? NSRegularExpression(pattern: pattern) {
+            if let regex = Self.xHamsterCardRegex {
                 let ns = html as NSString
                 for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
                     let vUrl = ns.substring(with: m.range(at: 1))
@@ -868,9 +868,7 @@ actor LongVideoAPI {
         var seen = Set<String>()
         // Real erome.com explore/search card HTML:
         // <a class="album-link" href="https://www.erome.com/a/YdXBszjR" ><img ... alt="Title" ... src="https://s91.erome.com/...jpg">
-        let pattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[^>]*>[\s\S]{0,600}?<img[^>]*?(?:alt="([^"]*)")?[^>]*?(?:data-src|src)="(https?://[^"]+)""#
-
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+        if let regex = Self.eromeCardRegex {
             let ns = html as NSString
             for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
                 let rel = ns.substring(with: m.range(at: 1))

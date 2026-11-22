@@ -83,18 +83,19 @@ enum CryptoBox {
     // MARK: - Keychain Helpers
 
     private static func saveKeychain(_ data: Data, account: String) {
-        let del: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(del as CFDictionary)
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
+        let attrs: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        SecItemAdd(add as CFDictionary, nil)
+        let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
+        if status == errSecItemNotFound {
+            let add = query.merging(attrs) { _, new in new }
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
     private static func readKeychain(account: String) -> Data? {

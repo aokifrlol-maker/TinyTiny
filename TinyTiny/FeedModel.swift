@@ -187,9 +187,13 @@ final class FeedModel: ObservableObject {
 
     init(source: FeedSource = .forYou, items: [Gif] = []) {
         self.source = source
-        if !items.isEmpty {
-            self.items = items
-        } else if !source.isList {
+        self.items = items
+        self.ids = Set(self.items.map(\.id))
+        self.mediaKeys = Set(self.items.map(\.canonicalDedupeKey))
+        self.seenSimKeys = Set(self.items.compactMap(\.contentSimilarityKey))
+        if case .list = source { hasMore = false }
+
+        if items.isEmpty && !source.isList {
             let key = "\(source.swipeKey.kind):\(source.swipeKey.name.lowercased()):\(FeedSort.hot.rawValue)"
             let keepSeen: Bool = {
                 switch source {
@@ -199,15 +203,17 @@ final class FeedModel: ObservableObject {
                     return false
                 }
             }()
-            let cached = Self.loadDiskCache(for: key).filter { keepSeen || !UserStore.shared.isSeen($0) }
-            self.items = cached
-        } else {
-            self.items = []
+            Task { @MainActor [weak self] in
+                let rawCached = await Self.loadDiskCacheAsync(for: key)
+                guard let self, self.items.isEmpty else { return }
+                let cached = rawCached.filter { keepSeen || !UserStore.shared.isSeen($0) }
+                guard !cached.isEmpty else { return }
+                self.items = cached
+                self.ids = Set(cached.map(\.id))
+                self.mediaKeys = Set(cached.map(\.canonicalDedupeKey))
+                self.seenSimKeys = Set(cached.compactMap(\.contentSimilarityKey))
+            }
         }
-        self.ids = Set(self.items.map(\.id))
-        self.mediaKeys = Set(self.items.map(\.canonicalDedupeKey))
-        self.seenSimKeys = Set(self.items.compactMap(\.contentSimilarityKey))
-        if case .list = source { hasMore = false }
     }
 
     var canLoadMore: Bool {
@@ -233,6 +239,17 @@ final class FeedModel: ObservableObject {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
         let safe = String(key.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }.prefix(80))
         return cacheDirectory.appendingPathComponent("\(safe).json")
+    }
+
+    private static func loadDiskCacheAsync(for key: String) async -> [Gif] {
+        let url = cacheFileURL(for: key)
+        return await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode([Gif].self, from: data) else {
+                return []
+            }
+            return decoded
+        }.value
     }
 
     private static func loadDiskCache(for key: String) -> [Gif] {

@@ -203,15 +203,20 @@ final class LicenseManager: ObservableObject {
 
     func verifyPasscodeRecovery(rawKey: String) async -> Bool {
         let entered = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        if !status.licenseKey.isEmpty && entered == status.licenseKey {
-            return true
-        }
+        guard !entered.isEmpty else { return false }
         return await activate(rawKey: entered)
     }
 
     // MARK: - Zero-Knowledge Encrypted Profile Sync (Likes, Follows, Taste)
 
     private func backupKey(for licenseKey: String) -> SymmetricKey {
+        let input = SymmetricKey(data: Data(licenseKey.uppercased().utf8))
+        let salt = Data("tinytiny.backup.v2.salt".utf8)
+        let info = Data("tinytiny.profile.backup".utf8)
+        return HKDF<SHA256>.deriveKey(inputKeyMaterial: input, salt: salt, info: info, outputByteCount: 32)
+    }
+
+    private func legacyBackupKey(for licenseKey: String) -> SymmetricKey {
         let digest = SHA256.hash(data: Data(("tinytiny.backup.v1." + licenseKey.uppercased()).utf8))
         return SymmetricKey(data: digest)
     }
@@ -266,13 +271,20 @@ final class LicenseManager: ObservableObject {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let b64 = json["blob"] as? String,
               let cipher = Data(base64Encoded: b64),
-              let plain = try? CryptoBox.open(cipher, using: backupKey(for: status.licenseKey)),
+              let plain = (try? CryptoBox.open(cipher, using: backupKey(for: status.licenseKey)))
+                ?? (try? CryptoBox.open(cipher, using: legacyBackupKey(for: status.licenseKey))),
               let backup = try? JSONDecoder().decode(EncryptedProfileBackup.self, from: plain) else {
             return false
         }
 
-        // Merge non-destructively so existing local likes/follows aren't overwritten if newer
-        if UserStore.shared.data.liked.isEmpty && !backup.userData.liked.isEmpty {
+        // Merge non-destructively so existing local likes/follows/sessions aren't overwritten if newer
+        let local = UserStore.shared.data
+        let isTrulyEmpty = local.liked.isEmpty && local.downloaded.isEmpty
+            && !local.xSession.isConnected && !local.igSession.isConnected
+            && local.followedUsers.isEmpty && local.followedXUsers.isEmpty
+            && local.followedIGUsers.isEmpty && local.followedSubreddits.isEmpty
+            && local.followedOFCreators.isEmpty
+        if isTrulyEmpty && !backup.userData.liked.isEmpty {
             UserStore.shared.data = backup.userData
         } else {
             var existingIds = Set(UserStore.shared.data.liked.map(\.id))
@@ -407,15 +419,15 @@ final class LicenseManager: ObservableObject {
     // MARK: - Keychain Persistence
 
     private static func saveRawKeychain(_ str: String, account: String) {
-        let del: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
-        SecItemDelete(del as CFDictionary)
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
+        let attrs: [String: Any] = [
             kSecValueData as String: Data(str.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        SecItemAdd(add as CFDictionary, nil)
+        if SecItemUpdate(query as CFDictionary, attrs as CFDictionary) == errSecItemNotFound {
+            let add = query.merging(attrs) { _, new in new }
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
     private static func readRawKeychain(account: String) -> String? {
@@ -433,16 +445,16 @@ final class LicenseManager: ObservableObject {
     }
 
     private func saveKeychainCodable<T: Encodable>(_ val: T, account: String) {
-        let del: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
-        SecItemDelete(del as CFDictionary)
         guard let d = try? JSONEncoder().encode(val) else { return }
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
+        let attrs: [String: Any] = [
             kSecValueData as String: d,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        SecItemAdd(add as CFDictionary, nil)
+        if SecItemUpdate(query as CFDictionary, attrs as CFDictionary) == errSecItemNotFound {
+            let add = query.merging(attrs) { _, new in new }
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
     private static func loadKeychainCodable<T: Decodable>(account: String) -> T? {

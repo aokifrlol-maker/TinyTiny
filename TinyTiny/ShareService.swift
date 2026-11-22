@@ -251,11 +251,18 @@ final class ShareService: ObservableObject {
             return nil
         }
 
-        if let blobStr = payload.encryptedBlobUrl, let blobURL = URL(string: blobStr),
+        if let blobStr = payload.encryptedBlobUrl,
+           let blobURL = URL(string: blobStr),
+           blobURL.scheme == "https",
+           let expectedHost = URL(string: LicenseManager.shared.normalizedBaseURL)?.host,
+           blobURL.host == expectedHost,
+           blobURL.path.hasPrefix("/v1/blob/"),
            let (cipher, resp) = try? await session.data(from: blobURL),
-           (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
+           (resp as? HTTPURLResponse)?.statusCode == 200,
            let plainBytes = try? CryptoBox.open(cipher, using: key) {
-            let ext = (payload.fileExtension?.isEmpty == false) ? payload.fileExtension! : "mp4"
+            let rawExt = (payload.fileExtension ?? "mp4").lowercased()
+            let safeExt = rawExt.filter { $0.isLetter || $0.isNumber }
+            let ext = safeExt.isEmpty ? "mp4" : String(safeExt.prefix(8))
             let local = FileManager.default.temporaryDirectory
                 .appendingPathComponent("tt_drop_\(UUID().uuidString.prefix(8)).\(ext)")
             try? plainBytes.write(to: local, options: [.atomic])
