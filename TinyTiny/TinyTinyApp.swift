@@ -848,6 +848,9 @@ struct GoonedMainShell: View {
     }
 
     private func handleHorizontalFeedSwipe(dx: CGFloat) {
+        if let pid = slotPostIDs[activeChannel], MediaMetaRegistry.albumItems(for: pid).count > 1 {
+            return
+        }
         let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofForYou, .longVideos(.all), .longVideos(.erome)]
         let cur = homeChannelIndex
         // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF -> Long Videos
