@@ -842,7 +842,7 @@ struct GoonedMainShell: View {
         case .rule34: return 3
         case .igReels, .igFollowing, .igSaved: return 4
         case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return 5
-        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return 6
+        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang, .longErome: return 6
         }
     }
 
