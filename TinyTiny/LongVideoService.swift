@@ -8,6 +8,7 @@ enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
     case pornhub
     case xhamster
     case spankbang
+    case erome
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
         case .pornhub: return "Pornhub"
         case .xhamster: return "xHamster"
         case .spankbang: return "SpankBang"
+        case .erome: return "Erome"
         }
     }
 
@@ -30,6 +32,7 @@ enum LongVideoSite: String, CaseIterable, Identifiable, Hashable {
         case .pornhub: return Color(red: 1.0, green: 0.60, blue: 0.0)
         case .xhamster: return Color(red: 0.90, green: 0.26, blue: 0.45)
         case .spankbang: return Color(red: 0.32, green: 0.78, blue: 0.98)
+        case .erome: return Color(red: 0.92, green: 0.34, blue: 0.62)
         }
     }
 }
@@ -95,14 +98,15 @@ actor LongVideoAPI {
             async let ph = fetchPornhub(query: cleanQ, sort: sort, page: page)
             async let xh = fetchXHamster(query: cleanQ, sort: sort, page: page)
             async let sb = fetchSpankBang(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
+            async let er = fetchErome(query: cleanQ, sort: sort, page: page)
             if let tq = tasteQuery {
                 async let epTaste = fetchEporner(query: tq, sort: sort, page: page, suppressGay: suppressGay)
                 async let xvTaste = fetchXVideos(query: tq, sort: sort, page: page)
-                let (e, v, p, x, s, et, vt) = await (ep, xv, ph, xh, sb, epTaste, xvTaste)
-                rawPosts = Self.interleave([et, vt, e, v, p, x, s])
+                let (e, v, p, x, s, erRes, et, vt) = await (ep, xv, ph, xh, sb, er, epTaste, xvTaste)
+                rawPosts = Self.interleave([et, vt, erRes, e, v, p, x, s])
             } else {
-                let (e, v, p, x, s) = await (ep, xv, ph, xh, sb)
-                rawPosts = Self.interleave([e, v, p, x, s])
+                let (e, v, p, x, s, erRes) = await (ep, xv, ph, xh, sb, er)
+                rawPosts = Self.interleave([erRes, e, v, p, x, s])
             }
         case .eporner:
             if let tq = tasteQuery {
@@ -142,6 +146,15 @@ actor LongVideoAPI {
             }
         case .spankbang:
             rawPosts = await fetchSpankBang(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay, tasteQuery: tasteQuery)
+        case .erome:
+            if let tq = tasteQuery {
+                async let main = fetchErome(query: cleanQ, sort: sort, page: page)
+                async let taste = fetchErome(query: tq, sort: sort, page: page)
+                let (m, t) = await (main, taste)
+                rawPosts = Self.interleave([t, m])
+            } else {
+                rawPosts = await fetchErome(query: cleanQ, sort: sort, page: page)
+            }
         }
 
         // Pre-resolve first 3 items lazily in background for instant start
@@ -799,6 +812,96 @@ actor LongVideoAPI {
         return ordered.map(\.url)
     }
 
+    // MARK: - 5. Erome.com Album Listing & Direct MP4 Resolver
+
+    private func fetchErome(query: String, sort: String, page: Int) async -> [Gif] {
+        let targetURL: URL?
+        if query.isEmpty {
+            let path = (sort == "new") ? "explore/new" : "explore"
+            targetURL = URL(string: "https://www.erome.com/\(path)?page=\(page)")
+        } else {
+            let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+            targetURL = URL(string: "https://www.erome.com/search?q=\(enc)&page=\(page)")
+        }
+        guard let url = targetURL,
+              let (data, resp) = try? await desktopSession.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let html = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        var posts: [Gif] = []
+        var seen = Set<String>()
+        // Match Erome album cards: href="https://www.erome.com/a/XXXX" or "/a/XXXX", optional title & data-src/src thumbnail
+        let pattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[\s\S]{0,900}?(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"[\s\S]{0,400}?class="album-title[^"]*"[^>]*>([^<]+)<"#
+        let altPattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[^>]*>[\s\S]{0,800}?(?:data-src|src)="(https?://[^"]+)"#
+
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            let ns = html as NSString
+            for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
+                let rel = ns.substring(with: m.range(at: 1))
+                let code = ns.substring(with: m.range(at: 2))
+                let thumb = ns.substring(with: m.range(at: 3))
+                let title = decodeHTMLEntities(ns.substring(with: m.range(at: 4)).trimmingCharacters(in: .whitespacesAndNewlines))
+                let id = "lv_er_\(code)"
+                guard seen.insert(id).inserted else { continue }
+                let fullURL = "https://www.erome.com\(rel)"
+                posts.append(Gif(
+                    id: id,
+                    title: title.isEmpty ? "Erome Video" : title,
+                    author: "Erome",
+                    subreddit: "Erome",
+                    upvotes: nil, duration: nil, width: 720, height: 1280, mediaType: "video",
+                    mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
+                    posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
+                ))
+            }
+        }
+
+        if posts.isEmpty, let regex = try? NSRegularExpression(pattern: altPattern, options: [.caseInsensitive]) {
+            let ns = html as NSString
+            for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
+                let rel = ns.substring(with: m.range(at: 1))
+                let code = ns.substring(with: m.range(at: 2))
+                let thumb = ns.substring(with: m.range(at: 3))
+                let id = "lv_er_\(code)"
+                guard seen.insert(id).inserted else { continue }
+                let fullURL = "https://www.erome.com\(rel)"
+                posts.append(Gif(
+                    id: id, title: "Erome #\(code)", author: "Erome", subreddit: "Erome",
+                    upvotes: nil, duration: nil, width: 720, height: 1280, mediaType: "video",
+                    mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
+                    posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
+                ))
+            }
+        }
+        return posts
+    }
+
+    private func resolveErome(pageURL: String) async -> [URL] {
+        guard let url = URL(string: pageURL) else { return [] }
+        var req = URLRequest(url: url)
+        req.setValue("https://www.erome.com/", forHTTPHeaderField: "Referer")
+        guard let (data, _) = try? await desktopSession.data(for: req),
+              let html = String(data: data, encoding: .utf8) else {
+            return []
+        }
+        let cleaned = html.replacingOccurrences(of: "\\/", with: "/")
+        var urls: [URL] = []
+        var seen = Set<String>()
+        let pat = #"(?:src|data-src)="(https?://[^"'\s]+\.(?:mp4|m4v|mov)(?:\?[^"'\s]*)?)""#
+        if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) {
+            let ns = cleaned as NSString
+            for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
+                let s = ns.substring(with: m.range(at: 1))
+                if seen.insert(s).inserted, let u = URL(string: s) {
+                    urls.append(u)
+                }
+            }
+        }
+        return urls
+    }
+
     // MARK: - Unified Lazy Playable URL Resolver
 
     func resolvePlayableURLs(for gif: Gif) async -> [URL] {
@@ -830,6 +933,8 @@ actor LongVideoAPI {
             } else {
                 urls = await resolveSpankBang(pageURL: src)
             }
+        } else if gif.id.hasPrefix("lv_er_") {
+            urls = await resolveErome(pageURL: src)
         }
 
         if !urls.isEmpty {

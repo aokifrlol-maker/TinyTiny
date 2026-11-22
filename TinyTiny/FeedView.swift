@@ -680,7 +680,7 @@ struct FeedView: View {
                     ForEach(model.items) { gif in
                         GoonedReelCell(
                             gif: gif,
-                            isActive: onScreen && isVisible && currentID == gif.id,
+                            isActive: onScreen && isVisible && shareTarget == nil && currentID == gif.id,
                             sort: model.sort,
                             onSelectSort: { model.setSort($0) },
                             onOpenCategories: onOpenCategories,
@@ -1130,7 +1130,7 @@ struct GoonedReelCell: View {
     @State private var isScrubbing = false
     @State private var localFitOverride: Bool? = nil
 
-    private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused }
+    private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused && !showMoreSheet }
     private var liked: Bool { store.isLiked(gif) }
     private var downloaded: Bool { offline.isDownloaded(gif) }
     private var downloadProgress: Double? { offline.activeDownloads[gif.id] }

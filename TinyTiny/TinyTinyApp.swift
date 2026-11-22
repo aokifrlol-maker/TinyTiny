@@ -160,7 +160,7 @@ enum HomeChannel: Hashable {
     case rule34
     case igReels, igFollowing, igSaved
     case ofForYou, ofTrending, ofLatest, ofDMs
-    case longAll, longEporner, longXVideos, longPornhub, longXHamster, longSpankBang
+    case longAll, longEporner, longXVideos, longPornhub, longXHamster, longSpankBang, longErome
     case custom
 }
 
@@ -186,6 +186,7 @@ struct GoonedMainShell: View {
     @StateObject private var longPornhubModel = FeedModel(source: .longVideos(.pornhub))
     @StateObject private var longXHamsterModel = FeedModel(source: .longVideos(.xhamster))
     @StateObject private var longSpankBangModel = FeedModel(source: .longVideos(.spankbang))
+    @StateObject private var longEromeModel = FeedModel(source: .longVideos(.erome))
     @StateObject private var customModel = FeedModel(source: .forYou)
 
     private struct CustomBackHistoryItem {
@@ -228,7 +229,7 @@ struct GoonedMainShell: View {
     }
 
     private var isLongChannel: Bool {
-        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longXVideos || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang
+        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longXVideos || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang || activeChannel == .longErome
     }
 
     private var activeModel: FeedModel {
@@ -252,6 +253,7 @@ struct GoonedMainShell: View {
         case .longPornhub: return longPornhubModel
         case .longXHamster: return longXHamsterModel
         case .longSpankBang: return longSpankBangModel
+        case .longErome: return longEromeModel
         case .custom: return customModel
         }
     }
@@ -788,6 +790,7 @@ struct GoonedMainShell: View {
             case .pornhub: mapped = .longPornhub; model = longPornhubModel
             case .xhamster: mapped = .longXHamster; model = longXHamsterModel
             case .spankbang: mapped = .longSpankBang; model = longSpankBangModel
+            case .erome: mapped = .longErome; model = longEromeModel
             }
             activeChannel = mapped
             lastLongChannel = mapped
@@ -932,7 +935,8 @@ struct GoonedMainShell: View {
                     (.longVideos(.xvideos), "XVideos", .longXVideos),
                     (.longVideos(.pornhub), "Pornhub", .longPornhub),
                     (.longVideos(.xhamster), "xHamster", .longXHamster),
-                    (.longVideos(.spankbang), "SpankBang", .longSpankBang)
+                    (.longVideos(.spankbang), "SpankBang", .longSpankBang),
+                    (.longVideos(.erome), "Erome", .longErome)
                 ]) { selectFeed($0) }
             }
         }
@@ -1019,6 +1023,7 @@ struct GoonedMainShell: View {
                                 case .longPornhub: targetSite = .pornhub
                                 case .longXHamster: targetSite = .xhamster
                                 case .longSpankBang: targetSite = .spankbang
+                                case .longErome: targetSite = .erome
                                 default: targetSite = .all
                                 }
                                 selectFeed(.longVideos(targetSite))

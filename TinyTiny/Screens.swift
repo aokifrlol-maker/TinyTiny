@@ -18,6 +18,7 @@ struct GoonedBrowseOverlay: View {
         case rule34 = "Rule34"
         case x = "𝕏"
         case ig = "IG"
+        case erome = "Erome"
         case long = "Long"
     }
 
@@ -30,6 +31,7 @@ struct GoonedBrowseOverlay: View {
     @State private var featuredOFCreators: [OFCreator] = []
     @State private var isSearching = false
     @State private var showReceiveDrop = false
+    @State private var showAllCategories = false
 
     struct GoonedSearchResponsePlaceholder {
         var subreddits: [GoonedSearchItem] = []
@@ -60,7 +62,10 @@ struct GoonedBrowseOverlay: View {
 
     var body: some View {
         ZStack {
-            Theme.modalGradient.ignoresSafeArea()
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(store.data.settings.tintedGlass ? Color(red: 0.16, green: 0.04, blue: 0.09).opacity(0.65) : Color.black.opacity(0.45))
+                .ignoresSafeArea()
 
             VStack(spacing: 14) {
                 // Top Search Bar + X Close Circle
@@ -70,7 +75,7 @@ struct GoonedBrowseOverlay: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
 
-                        TextField("Search OF creators, Reddit, 𝕏, IG, R34...", text: $query)
+                        TextField("Search OF, Reddit, 𝕏, IG, R34, Erome...", text: $query)
                             .font(.system(size: 16))
                             .foregroundStyle(.white)
                             .autocorrectionDisabled()
@@ -196,337 +201,129 @@ struct GoonedBrowseOverlay: View {
         }
     }
 
-    // MARK: - Default Browse Content
+    // MARK: - Default Browse Content (Clean & Uncrowded)
 
     private var defaultBrowseContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            // Encrypted Share Drop Quick Open
+        VStack(alignment: .leading, spacing: 16) {
+            // 1. Compact Quick Platforms Strip
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    browsePill(icon: "sparkles", label: "For You") { onSelectFeed(.forYou) }
+                    browsePill(icon: "person.2.fill", label: "Following") { onSelectFeed(.following) }
+                    browsePill(icon: "flame.fill", label: "𝕏 Feed") { onSelectFeed(.xForYou) }
+                    browsePill(icon: "camera.fill", label: "IG Reels") { onSelectFeed(.igReels) }
+                    browsePill(icon: "star.fill", label: "OnlyFans") { onSelectFeed(.ofForYou) }
+                    browsePill(icon: "34.circle.fill", label: "Rule34") { onSelectFeed(.rule34("")) }
+                    browsePill(icon: "play.rectangle.fill", label: "Erome") { onSelectFeed(.longVideos(.erome)) }
+                    browsePill(icon: "film.stack", label: "Long Videos") { onSelectFeed(.longVideos(.all)) }
+                    browsePill(icon: "lock.doc.fill", label: "Share Drop") { showReceiveDrop = true }
+                }
+                .padding(.horizontal, 16)
+            }
+
+            // 2. Pick Up Where You Left Off (Compact)
+            let recent = store.data.recentFeeds.first
             Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                showReceiveDrop = true
+                if let recent {
+                    switch recent.kind {
+                    case "category": onSelectFeed(.category(recent.name))
+                    case "subreddit": onSelectFeed(.subreddit(recent.name))
+                    case "user": onSelectFeed(.user(recent.name))
+                    case "xforyou": onSelectFeed(.xForYou)
+                    case "xfollowing": onSelectFeed(.xFollowing)
+                    case "xbookmarks": onSelectFeed(.xBookmarks)
+                    case "xlikes": onSelectFeed(.xLikes)
+                    case "xsearch": onSelectFeed(.xSearch(recent.name))
+                    case "xuser": onSelectFeed(.xUser(recent.name))
+                    case "igreels": onSelectFeed(.igReels)
+                    case "igfollowing": onSelectFeed(.igFollowing)
+                    case "igsaved": onSelectFeed(.igSaved)
+                    case "iguser": onSelectFeed(.igUser(recent.name))
+                    case "rule34": onSelectFeed(.rule34(recent.name == "all" ? "" : recent.name))
+                    case "offoryou": onSelectFeed(.ofForYou)
+                    case "oftrending": onSelectFeed(.ofTrending)
+                    case "oflatest": onSelectFeed(.ofLatest)
+                    case "ofdms": onSelectFeed(.ofDMs)
+                    case "ofcreator":
+                        let parts = recent.name.split(separator: "|", maxSplits: 1).map(String.init)
+                        onSelectFeed(.ofCreator(id: parts.first ?? recent.name, handle: parts.count > 1 ? parts[1] : recent.name, displayName: nil))
+                    case "ofsearch": onSelectFeed(.ofSearch(recent.name))
+                    default: onSelectFeed(.forYou)
+                    }
+                } else {
+                    onSelectFeed(.forYou)
+                }
             } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "lock.doc.fill")
-                        .font(.system(size: 18, weight: .bold))
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(Theme.accentBright)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Receive Encrypted Share Drop")
-                            .font(.system(size: 14.5, weight: .bold))
-                        Text("Paste a drop link or code shared by a friend")
+                        Text("Continue: \(recent?.displayTitle ?? "For You")")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text("\(max(recent?.swipedCount ?? store.data.swipedTotal, 1)) swiped")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(.white.opacity(0.62))
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption.bold())
                         .foregroundStyle(.white.opacity(0.5))
                 }
-                .padding(13)
-                .liquidGlassCard(cornerRadius: 18)
+                .padding(14)
+                .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
             }
             .buttonStyle(ScalePressButtonStyle())
             .padding(.horizontal, 16)
 
-            // PICK UP WHERE YOU LEFT OFF
-            VStack(alignment: .leading, spacing: 8) {
-                Text("PICK UP WHERE YOU LEFT OFF")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .padding(.horizontal, 18)
-
-                let recent = store.data.recentFeeds.first
-                Button {
-                    if let recent {
-                        switch recent.kind {
-                        case "category": onSelectFeed(.category(recent.name))
-                        case "subreddit": onSelectFeed(.subreddit(recent.name))
-                        case "user": onSelectFeed(.user(recent.name))
-                        case "xforyou": onSelectFeed(.xForYou)
-                        case "xfollowing": onSelectFeed(.xFollowing)
-                        case "xbookmarks": onSelectFeed(.xBookmarks)
-                        case "xlikes": onSelectFeed(.xLikes)
-                        case "xsearch": onSelectFeed(.xSearch(recent.name))
-                        case "xuser": onSelectFeed(.xUser(recent.name))
-                        case "igreels": onSelectFeed(.igReels)
-                        case "igfollowing": onSelectFeed(.igFollowing)
-                        case "igsaved": onSelectFeed(.igSaved)
-                        case "iguser": onSelectFeed(.igUser(recent.name))
-                        case "rule34": onSelectFeed(.rule34(recent.name == "all" ? "" : recent.name))
-                        case "offoryou": onSelectFeed(.ofForYou)
-                        case "oftrending": onSelectFeed(.ofTrending)
-                        case "oflatest": onSelectFeed(.ofLatest)
-                        case "ofdms": onSelectFeed(.ofDMs)
-                        case "ofcreator":
-                            let parts = recent.name.split(separator: "|", maxSplits: 1).map(String.init)
-                            onSelectFeed(.ofCreator(id: parts.first ?? recent.name, handle: parts.count > 1 ? parts[1] : recent.name, displayName: nil))
-                        case "ofsearch": onSelectFeed(.ofSearch(recent.name))
-                        default: onSelectFeed(.forYou)
-                        }
-                    } else {
-                        onSelectFeed(.forYou)
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(recent?.displayTitle ?? "For You")
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundStyle(.white)
-
-                        Text("\(max(recent?.swipedCount ?? store.data.swipedTotal, 1)) SWIPED  ·  NOW")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.60))
-
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.16))
-                                Capsule().fill(Theme.accentBright)
-                                    .frame(width: max(32, min(geo.size.width, geo.size.width * 0.25)))
-                            }
-                        }
-                        .frame(height: 3)
-                    }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .liquidGlassCard(cornerRadius: 20)
-                }
-                .buttonStyle(ScalePressButtonStyle())
-                .padding(.horizontal, 16)
-            }
-
-            // RULE34.XXX HUB
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("RULE34.XXX")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .tracking(1.2)
-                        .foregroundStyle(Color(red: 0.72, green: 0.96, blue: 0.70))
-                    Spacer()
-                    Button(action: onSetupR34Key) {
-                        Text(store.data.r34Credentials.hasCustomCredentials ? "CUSTOM API" : "DEFAULT API ACTIVE")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.65))
-                    }
-                }
-                .padding(.horizontal, 18)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        r34Chip(label: "🔥 Rule34 Feed", tag: "")
-                        r34Chip(label: "🎬 Animated / MP4", tag: "video")
-                        r34Chip(label: "Overwatch", tag: "overwatch")
-                        r34Chip(label: "Genshin Impact", tag: "genshin_impact")
-                        r34Chip(label: "Fortnite", tag: "fortnite")
-                        r34Chip(label: "Futanari", tag: "futanari")
-                        r34Chip(label: "Cyberpunk", tag: "cyberpunk")
-                        r34Chip(label: "Pokemon", tag: "pokemon")
-                    }
-                    .padding(.horizontal, 16)
-                }
-            }
-
-            // ONLYFANS HUB
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("ONLYFANS")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .tracking(1.2)
-                        .foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
-                    Spacer()
-                    Text("SEARCH CREATORS ABOVE")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .padding(.horizontal, 18)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ofFeedChip(label: "✨ For You", source: .ofForYou)
-                        ofFeedChip(label: "🔥 Trending", source: .ofTrending)
-                        ofFeedChip(label: "⚡ Latest Videos", source: .ofLatest)
-                        ofFeedChip(label: "💬 Unlocked DMs", source: .ofDMs)
-                        ForEach(featuredOFCreators.prefix(10)) { creator in
-                            Button {
-                                onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
-                            } label: {
-                                HStack(spacing: 7) {
-                                    ofAvatar(url: creator.avatarURL, size: 22)
-                                    Text(creator.displayTitle)
-                                        .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .lineLimit(1)
-                                }
-                                .padding(.leading, 7)
-                                .padding(.trailing, 12)
-                                .padding(.vertical, 7)
-                                .liquidGlassCapsule()
-                            }
-                            .buttonStyle(ScalePressButtonStyle())
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                }
-            }
-
-            // PERSONAL X & INSTAGRAM SECTION
-            VStack(alignment: .leading, spacing: 8) {
-                Text("CONNECTED ACCOUNTS (𝕏 & INSTAGRAM)")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .padding(.horizontal, 18)
-
-                // Personal X Row
-                if store.data.xSession.isConnected {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                        quickCard(title: "𝕏 For You", subtitle: "Home video feed", icon: "sparkles") {
-                            onSelectFeed(.xForYou)
-                        }
-                        quickCard(title: "𝕏 Following", subtitle: "Creators you follow", icon: "person.2.fill") {
-                            onSelectFeed(.xFollowing)
-                        }
-                        quickCard(title: "𝕏 Bookmarks", subtitle: "Your saved X videos", icon: "bookmark.fill") {
-                            onSelectFeed(.xBookmarks)
-                        }
-                        quickCard(title: "𝕏 Likes", subtitle: "Videos you liked on X", icon: "heart.fill") {
-                            onSelectFeed(.xLikes)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                } else {
-                    Button(action: onConnectX) {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.black.opacity(0.55))
-                                    .frame(width: 42, height: 42)
-                                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
-                                Text("𝕏")
-                                    .font(.system(size: 19, weight: .black))
-                                    .foregroundStyle(.white)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Connect Personal X")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(.white)
-                                Text("Stream your X For You, Following, Bookmarks & 18+ creators")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.68))
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        .padding(13)
-                        .liquidGlassCard(cornerRadius: 18)
-                    }
-                    .buttonStyle(ScalePressButtonStyle())
-                    .padding(.horizontal, 16)
-                }
-
-                // Personal Instagram Row
-                if store.data.igSession.isConnected {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                        quickCard(title: "IG Reels", subtitle: "Personal Reels feed", icon: "film.stack") {
-                            onSelectFeed(.igReels)
-                        }
-                        quickCard(title: "IG Following", subtitle: "Accounts you follow", icon: "person.2.fill") {
-                            onSelectFeed(.igFollowing)
-                        }
-                        quickCard(title: "IG Saved", subtitle: "Bookmarked Reels", icon: "bookmark.fill") {
-                            onSelectFeed(.igSaved)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                } else {
-                    Button(action: onConnectIG) {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [
-                                                Color(red: 0.98, green: 0.35, blue: 0.35),
-                                                Color(red: 0.85, green: 0.18, blue: 0.56),
-                                                Color(red: 0.55, green: 0.22, blue: 0.85)
-                                            ],
-                                            startPoint: .bottomLeading,
-                                            endPoint: .topTrailing
-                                        )
-                                    )
-                                    .frame(width: 42, height: 42)
-                                Image(systemName: "camera.fill")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Connect Personal Instagram")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(.white)
-                                Text("Stream your personal Instagram Reels, Saved & creators")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.68))
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        .padding(13)
-                        .liquidGlassCard(cornerRadius: 18)
-                    }
-                    .buttonStyle(ScalePressButtonStyle())
-                    .padding(.horizontal, 16)
-                }
-            }
-
-            // BROWSE — 50 CATEGORIES
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("BROWSE")
+            // 3. Top OnlyFans Creators (compact strip if loaded)
+            if !featuredOFCreators.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("TRENDING CREATORS")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .tracking(1.2)
                         .foregroundStyle(.white.opacity(0.55))
-                    Spacer()
-                    Text("\(store.categories.count) CATEGORIES")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .tracking(1.2)
-                        .foregroundStyle(.white.opacity(0.45))
-                }
-                .padding(.horizontal, 18)
+                        .padding(.horizontal, 18)
 
-                if let hero = featuredCategories.first(where: { $0.name == "Gooning" }) ?? store.categories.first {
-                    Button {
-                        store.recordSearchSignal(hero.name)
-                        onSelectFeed(.category(hero.name))
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(hero.displayName)
-                                    .font(.system(size: 28, weight: .heavy))
-                                    .foregroundStyle(.white)
-
-                                subscriberBadge(hero.subscribers)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(featuredOFCreators.prefix(10)) { creator in
+                                Button {
+                                    onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
+                                } label: {
+                                    HStack(spacing: 7) {
+                                        ofAvatar(url: creator.avatarURL, size: 22)
+                                        Text(creator.displayTitle)
+                                            .font(.system(size: 12.5, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+                                    }
+                                    .padding(.leading, 7)
+                                    .padding(.trailing, 12)
+                                    .padding(.vertical, 7)
+                                    .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
+                                }
+                                .buttonStyle(ScalePressButtonStyle())
                             }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.65))
                         }
-                        .padding(20)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .liquidGlassCard(cornerRadius: 24)
+                        .padding(.horizontal, 16)
                     }
-                    .buttonStyle(ScalePressButtonStyle())
-                    .padding(.horizontal, 16)
                 }
+            }
+
+            // 4. Featured Categories (4 clean tiles)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("FEATURED")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 18)
 
                 let gridTiles: [GoonedCategory] = [
+                    store.categories.first { $0.name == "Gooning" },
                     store.categories.first { $0.name == "TikTok" },
                     store.categories.first { $0.name == "OnlyFans" },
-                    store.categories.first { $0.name == "Snapchat" },
                     store.categories.first { $0.name == "Videos" }
                 ].compactMap { $0 }
 
@@ -536,17 +333,17 @@ struct GoonedBrowseOverlay: View {
                             store.recordSearchSignal(tile.name)
                             onSelectFeed(.category(tile.name))
                         } label: {
-                            VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 8) {
                                 Text(tile.displayName)
-                                    .font(.system(size: 22, weight: .bold))
+                                    .font(.system(size: 19, weight: .bold))
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
 
                                 subscriberBadge(tile.subscribers)
                             }
-                            .padding(18)
-                            .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-                            .liquidGlassCard(cornerRadius: 22)
+                            .padding(16)
+                            .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+                            .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
                         }
                         .buttonStyle(ScalePressButtonStyle())
                     }
@@ -554,44 +351,79 @@ struct GoonedBrowseOverlay: View {
                 .padding(.horizontal, 16)
             }
 
-            // Divider: A-Z · 46 MORE
-            HStack(spacing: 12) {
-                Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1)
-                Text("A–Z  ·  \(azCategories.count) MORE")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.50))
-                    .fixedSize()
-                Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1)
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 4)
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
-                ForEach(azCategories) { cat in
-                    Button {
-                        store.recordSearchSignal(cat.name)
-                        if cat.name.caseInsensitiveCompare("Rule34") == .orderedSame {
-                            onSelectFeed(.rule34(""))
-                        } else {
-                            onSelectFeed(.category(cat.name))
-                        }
-                    } label: {
-                        Text(cat.displayName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 11)
-                            .frame(maxWidth: .infinity)
-                            .liquidGlassCapsule()
+            // 5. Collapsible All Categories Dropdown (keeps Explore clean)
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                        showAllCategories.toggle()
                     }
-                    .buttonStyle(ScalePressButtonStyle())
+                } label: {
+                    HStack {
+                        Text("All Categories (A–Z · \(azCategories.count))")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.65))
+                            .rotationEffect(.degrees(showAllCategories ? 180 : 0))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 13)
+                    .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
+                }
+                .buttonStyle(ScalePressButtonStyle())
+                .padding(.horizontal, 16)
+
+                if showAllCategories {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
+                        ForEach(azCategories) { cat in
+                            Button {
+                                store.recordSearchSignal(cat.name)
+                                if cat.name.caseInsensitiveCompare("Rule34") == .orderedSame {
+                                    onSelectFeed(.rule34(""))
+                                } else {
+                                    onSelectFeed(.category(cat.name))
+                                }
+                            } label: {
+                                Text(cat.displayName)
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .frame(maxWidth: .infinity)
+                                    .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
+                            }
+                            .buttonStyle(ScalePressButtonStyle())
+                        }
+                    }
+                    .padding(.horizontal, 16)
                 }
             }
-            .padding(.horizontal, 16)
             .padding(.bottom, 40)
         }
+    }
+
+    private func browsePill(icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.accentBright)
+                Text(label)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
+        }
+        .buttonStyle(ScalePressButtonStyle())
     }
 
     private func r34Chip(label: String, tag: String) -> some View {
@@ -713,6 +545,8 @@ struct GoonedBrowseOverlay: View {
             onSelectFeed(.igUser(clean.replacingOccurrences(of: "@", with: "").replacingOccurrences(of: "ig:", with: "", options: .caseInsensitive)))
         case .reddit:
             onSelectFeed(.subreddit(clean.replacingOccurrences(of: "r/", with: "", options: .caseInsensitive).replacingOccurrences(of: " ", with: "")))
+        case .erome:
+            onSelectFeed(.longSearch(.erome, clean))
         case .long:
             onSelectFeed(.longSearch(.all, clean))
         case .all:
@@ -757,6 +591,7 @@ struct GoonedBrowseOverlay: View {
         let showR34 = (searchScope == .all || searchScope == .rule34)
         let showX = (searchScope == .all || searchScope == .x)
         let showIG = (searchScope == .all || searchScope == .ig)
+        let showErome = (searchScope == .all || searchScope == .erome)
         let showLong = (searchScope == .all || searchScope == .long)
 
         return VStack(alignment: .leading, spacing: 14) {
@@ -947,6 +782,33 @@ struct GoonedBrowseOverlay: View {
                     .buttonStyle(ScalePressButtonStyle())
                 }
 
+                if showErome && !clean.isEmpty {
+                    Button {
+                        store.recordSearchSignal(clean)
+                        onSelectFeed(.longSearch(.erome, clean))
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(Color(red: 0.92, green: 0.34, blue: 0.62))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Search \"\(clean)\" on Erome")
+                                    .font(.system(size: 15, weight: .bold))
+                                Text("Albums & MP4 videos on erome.com")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(13)
+                        .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
+                }
+
                 if showLong && !clean.isEmpty {
                     Button {
                         store.recordSearchSignal(clean)
@@ -959,7 +821,7 @@ struct GoonedBrowseOverlay: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Search \"\(clean)\" in Long Videos")
                                     .font(.system(size: 15, weight: .bold))
-                                Text("Eporner, Pornhub, xHamster & SpankBang")
+                                Text("Erome, Eporner, Pornhub, xHamster & SpankBang")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -1579,7 +1441,9 @@ struct GoonedLikesView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showExportSheet) {
+        .sheet(isPresented: $showExportSheet, onDismiss: {
+            cleanupTempExportFiles()
+        }) {
             ActivityShareSheet(items: exportFileURLs)
         }
     }
@@ -1620,17 +1484,49 @@ struct GoonedLikesView: View {
         return tmp
     }
 
+    private func cleanupTempExportFiles() {
+        let tmpDir = FileManager.default.temporaryDirectory
+        if let files = try? FileManager.default.contentsOfDirectory(at: tmpDir, includingPropertiesForKeys: nil) {
+            for f in files where f.lastPathComponent.hasPrefix("tt_export_") {
+                try? FileManager.default.removeItem(at: f)
+            }
+        }
+    }
+
+    private func resolveLocalOrTempURLsConcurrently(for targets: [Gif]) async -> [(post: Gif, url: URL)] {
+        var results: [(Gif, URL)] = []
+        var idx = 0
+        await withTaskGroup(of: (Gif, URL?).self) { group in
+            for _ in 0..<min(4, targets.count) {
+                let post = targets[idx]
+                idx += 1
+                group.addTask {
+                    let u = await self.resolveLocalOrTempURL(for: post)
+                    return (post, u)
+                }
+            }
+            for await (post, u) in group {
+                if let u { results.append((post, u)) }
+                if idx < targets.count {
+                    let next = targets[idx]
+                    idx += 1
+                    group.addTask {
+                        let nu = await self.resolveLocalOrTempURL(for: next)
+                        return (next, nu)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
     private func exportSelectedAsFiles() async {
         let targets = selectedPosts
         guard !targets.isEmpty else { return }
         isBulkWorking = true
         showBulkToast("Preparing \(targets.count) file\(targets.count == 1 ? "" : "s")...")
-        var urls: [URL] = []
-        for post in targets {
-            if let u = await resolveLocalOrTempURL(for: post) {
-                urls.append(u)
-            }
-        }
+        let resolved = await resolveLocalOrTempURLsConcurrently(for: targets)
+        let urls = resolved.map(\.url)
         isBulkWorking = false
         if urls.isEmpty {
             showBulkToast("Could not prepare files")
@@ -1650,9 +1546,9 @@ struct GoonedLikesView: View {
         }
         isBulkWorking = true
         showBulkToast("Saving \(targets.count) to Photos...")
+        let resolved = await resolveLocalOrTempURLsConcurrently(for: targets)
         var savedCount = 0
-        for post in targets {
-            guard let fileURL = await resolveLocalOrTempURL(for: post) else { continue }
+        for (post, fileURL) in resolved {
             let isImg = post.isImage || ["jpg", "jpeg", "png", "webp"].contains(fileURL.pathExtension.lowercased())
             let createdId: String? = await withCheckedContinuation { cont in
                 var placeholderId: String?
@@ -1670,6 +1566,7 @@ struct GoonedLikesView: View {
                 savedCount += 1
             }
         }
+        cleanupTempExportFiles()
         isBulkWorking = false
         UINotificationFeedbackGenerator().notificationOccurred(savedCount > 0 ? .success : .error)
         showBulkToast("Saved \(savedCount)/\(targets.count) to Photos!")
@@ -2099,8 +1996,65 @@ struct GoonedSettingsModal: View {
     @State private var confirmErase = false
     @State private var showAlgorithmEditor = false
     @State private var syncStatusMessage: String? = nil
+    @State private var expandedSection: SettingsSection? = .accounts
+
+    enum SettingsSection: String, Hashable {
+        case accounts, algorithm, playback, appearance, vault
+    }
 
     private let delays = [3, 6, 10, 15]
+
+    private func settingsDropdown<Content: View>(
+        _ section: SettingsSection,
+        icon: String,
+        title: String,
+        summary: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let isOpen = expandedSection == section
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    expandedSection = isOpen ? nil : section
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text(summary)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .rotationEffect(.degrees(isOpen ? 180 : 0))
+                }
+                .padding(16)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                Divider().overlay(Color.white.opacity(0.14))
+                    .padding(.horizontal, 16)
+                VStack(alignment: .leading, spacing: 14) {
+                    content()
+                }
+                .padding(16)
+            }
+        }
+        .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
+    }
 
     var body: some View {
         ZStack {
@@ -2130,97 +2084,14 @@ struct GoonedSettingsModal: View {
                 .padding(.bottom, 12)
 
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        // FOR YOU ALGORITHM
-                        sectionHeader("FOR YOU ALGORITHM")
-
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Smart Personalization")
-                                        .font(.system(size: 16, weight: .bold))
-                                    Text(store.data.settings.algorithmEnabled ? store.topTasteSummary : "Off — showing unranked discovery feed")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.white.opacity(0.68))
-                                        .lineLimit(2)
-                                }
-                                Spacer()
-                                Toggle("", isOn: $store.data.settings.algorithmEnabled)
-                                    .labelsHidden()
-                                    .tint(Theme.accent)
-                            }
-
-                            if store.data.settings.algorithmEnabled {
-                                Divider().overlay(Color.white.opacity(0.14))
-
-                                if !store.data.algorithm.boostedTags.isEmpty {
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        HStack(spacing: 6) {
-                                            ForEach(store.data.algorithm.boostedTags, id: \.self) { tag in
-                                                HStack(spacing: 5) {
-                                                    Text("#\(tag)")
-                                                        .font(.system(size: 11.5, weight: .bold))
-                                                    Button {
-                                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                                        store.removeBoostedTag(tag)
-                                                    } label: {
-                                                        Image(systemName: "xmark")
-                                                            .font(.system(size: 9, weight: .bold))
-                                                            .foregroundStyle(.white.opacity(0.8))
-                                                    }
-                                                }
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 5)
-                                                .liquidGlassCapsule(active: true)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                HStack(spacing: 10) {
-                                    Button {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        showAlgorithmEditor = true
-                                    } label: {
-                                        HStack(spacing: 6) {
-                                            Image(systemName: "slider.horizontal.3")
-                                                .font(.system(size: 12, weight: .bold))
-                                            Text("Edit #Tags & Taste")
-                                                .font(.caption.bold())
-                                        }
-                                        .padding(.horizontal, 13)
-                                        .padding(.vertical, 8)
-                                        .liquidGlassCapsule(tinted: true)
-                                    }
-
-                                    Spacer()
-
-                                    if store.data.algorithm.totalSignals > 0 {
-                                        Button {
-                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                            store.resetAlgorithm()
-                                        } label: {
-                                            Text("Reset Taste")
-                                                .font(.caption.bold())
-                                                .foregroundStyle(Theme.accentBright)
-                                        }
-                                    }
-                                }
-
-                                if store.data.algorithm.totalSignals > 0 {
-                                    Text("\(store.data.algorithm.totalSignals) signals learned on-device · \(store.topAlgorithmTags.count) #tags tracked")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.white.opacity(0.5))
-                                }
-                            }
-                        }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
-
-                        // CONNECTED ACCOUNTS (X, INSTAGRAM, RULE34)
-                        sectionHeader("CONNECTED ACCOUNTS")
-
-                        VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        // 1. CONNECTED ACCOUNTS DROPDOWN
+                        settingsDropdown(
+                            .accounts,
+                            icon: "person.crop.circle.badge.checkmark",
+                            title: "Connected Accounts",
+                            summary: "\(store.data.xSession.isConnected ? "𝕏 On" : "𝕏 Off") · \(store.data.igSession.isConnected ? "IG On" : "IG Off") · R34"
+                        ) {
                             // X.com
                             HStack(spacing: 12) {
                                 ZStack {
@@ -2343,34 +2214,107 @@ struct GoonedSettingsModal: View {
                                 }
                             }
                         }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
-
-                        // GENERAL FOR YOU SOURCES
-                        sectionHeader("SOURCES IN GENERAL FOR YOU")
-
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Balanced split shaped by your likes and Not Interested feedback.")
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(.white.opacity(0.68))
-
-                            Toggle("Reddit", isOn: $taste.state.sourceSettings.includeReddit)
-                                .tint(Theme.accent)
-                            Toggle("𝕏 (When connected)", isOn: $taste.state.sourceSettings.includeX)
-                                .tint(Theme.accent)
-                            Toggle("OnlyFans", isOn: $taste.state.sourceSettings.includeOnlyFans)
-                                .tint(Theme.accent)
-                            Toggle("Instagram Reels (When connected)", isOn: $taste.state.sourceSettings.includeInstagram)
-                                .tint(Theme.accent)
                         }
-                        .font(.system(size: 15, weight: .semibold))
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
 
-                        // AUTOPLAY
-                        sectionHeader("AUTOPLAY")
+                        // 2. ALGORITHM & SOURCES DROPDOWN
+                        settingsDropdown(
+                            .algorithm,
+                            icon: "sparkles",
+                            title: "Algorithm & For You Sources",
+                            summary: store.data.settings.algorithmEnabled ? "Smart Taste On · \(store.data.algorithm.totalSignals) signals" : "Off — unranked discovery"
+                        ) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Smart Personalization")
+                                        .font(.system(size: 16, weight: .bold))
+                                    Text(store.data.settings.algorithmEnabled ? store.topTasteSummary : "Off — showing unranked discovery feed")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                        .lineLimit(2)
+                                }
+                                Spacer()
+                                Toggle("", isOn: $store.data.settings.algorithmEnabled)
+                                    .labelsHidden()
+                                    .tint(Theme.accent)
+                            }
 
-                        VStack(alignment: .leading, spacing: 14) {
+                            if store.data.settings.algorithmEnabled {
+                                Divider().overlay(Color.white.opacity(0.14))
+
+                                if !store.data.algorithm.boostedTags.isEmpty {
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(spacing: 6) {
+                                            ForEach(store.data.algorithm.boostedTags, id: \.self) { tag in
+                                                HStack(spacing: 5) {
+                                                    Text("#\(tag)")
+                                                        .font(.system(size: 11.5, weight: .bold))
+                                                    Button {
+                                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                        store.removeBoostedTag(tag)
+                                                    } label: {
+                                                        Image(systemName: "xmark")
+                                                            .font(.system(size: 9, weight: .bold))
+                                                            .foregroundStyle(.white.opacity(0.8))
+                                                    }
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 5)
+                                                .liquidGlassCapsule(active: true)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HStack(spacing: 10) {
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        showAlgorithmEditor = true
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "slider.horizontal.3")
+                                                .font(.system(size: 12, weight: .bold))
+                                            Text("Edit #Tags & Taste")
+                                                .font(.caption.bold())
+                                        }
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
+                                    }
+
+                                    Spacer()
+
+                                    if store.data.algorithm.totalSignals > 0 {
+                                        Button {
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            store.resetAlgorithm()
+                                        } label: {
+                                            Text("Reset Taste")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(Theme.accentBright)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            Group {
+                                Toggle("Reddit", isOn: $taste.state.sourceSettings.includeReddit)
+                                Toggle("𝕏 (When connected)", isOn: $taste.state.sourceSettings.includeX)
+                                Toggle("OnlyFans", isOn: $taste.state.sourceSettings.includeOnlyFans)
+                                Toggle("Instagram Reels (When connected)", isOn: $taste.state.sourceSettings.includeInstagram)
+                            }
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .tint(Theme.accent)
+                        }
+
+                        // 3. PLAYBACK & VIDEO DROPDOWN
+                        settingsDropdown(
+                            .playback,
+                            icon: "play.circle.fill",
+                            title: "Playback & Video",
+                            summary: "\(store.data.settings.hd ? "HD" : "SD") · \(store.data.settings.videoFitScreen ? "Fit" : "Fill") · \(store.data.settings.autoScrollDelay)s"
+                        ) {
                             Text("Delay")
                                 .font(.system(size: 16, weight: .bold))
                             Text("How long each post stays before the feed advances.")
@@ -2416,20 +2360,11 @@ struct GoonedSettingsModal: View {
                                     .labelsHidden()
                                     .tint(Theme.accent)
                             }
-                        }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
 
-                        // VIDEO
-                        sectionHeader("VIDEO")
+                            Divider().overlay(Color.white.opacity(0.14))
 
-                        VStack(alignment: .leading, spacing: 12) {
                             Text("Quality")
                                 .font(.system(size: 16, weight: .bold))
-                            Text("HD uses more data.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.white.opacity(0.68))
-
                             HStack(spacing: 10) {
                                 pillOption(title: "SD", active: !store.data.settings.hd) {
                                     store.data.settings.hd = false
@@ -2443,10 +2378,6 @@ struct GoonedSettingsModal: View {
 
                             Text("Screen Fit")
                                 .font(.system(size: 16, weight: .bold))
-                            Text("Fit Screen shows the entire video with zero cropping. Fill expands vertical clips edge-to-edge.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.white.opacity(0.68))
-
                             HStack(spacing: 10) {
                                 pillOption(title: "Fit Screen", active: store.data.settings.videoFitScreen) {
                                     store.data.settings.videoFitScreen = true
@@ -2456,13 +2387,14 @@ struct GoonedSettingsModal: View {
                                 }
                             }
                         }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
 
-                        // APPEARANCE
-                        sectionHeader("APPEARANCE")
-
-                        VStack(alignment: .leading, spacing: 12) {
+                        // 4. APPEARANCE DROPDOWN
+                        settingsDropdown(
+                            .appearance,
+                            icon: "drop.fill",
+                            title: "Appearance",
+                            summary: "\(store.data.settings.tintedGlass ? "Tinted" : "Clear") Glass · \(store.data.settings.controlsCollapsed ? "Collapsed" : "Expanded")"
+                        ) {
                             Text("Liquid Glass")
                                 .font(.system(size: 16, weight: .bold))
                             Text("Tinted makes buttons and panels more solid and darkens the background.")
@@ -2495,13 +2427,14 @@ struct GoonedSettingsModal: View {
                                 }
                             }
                         }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
 
-                        // OFFLINE VAULT, ROTATION & SECURITY
-                        sectionHeader("OFFLINE VAULT & SECURITY")
-
-                        VStack(alignment: .leading, spacing: 12) {
+                        // 5. VAULT, LICENSE & SECURITY DROPDOWN
+                        settingsDropdown(
+                            .vault,
+                            icon: "lock.shield.fill",
+                            title: "Vault, License & Security",
+                            summary: "\(store.data.downloaded.count) offline · \(license.expirySummary)"
+                        ) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Offline Vault Storage")
@@ -2686,8 +2619,6 @@ struct GoonedSettingsModal: View {
                                 }
                             }
                         }
-                        .padding(16)
-                        .liquidGlassCard(cornerRadius: 20)
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
@@ -2696,7 +2627,11 @@ struct GoonedSettingsModal: View {
             .foregroundStyle(.white)
             .background(
                 RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .fill(Theme.modalGradient)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 30, style: .continuous)
+                            .fill(store.data.settings.tintedGlass ? Color(red: 0.22, green: 0.06, blue: 0.12).opacity(0.62) : Color.black.opacity(0.28))
+                    )
                     .overlay(
                         RoundedRectangle(cornerRadius: 30, style: .continuous)
                             .stroke(Color.white.opacity(0.25), lineWidth: 1)

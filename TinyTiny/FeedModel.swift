@@ -191,7 +191,15 @@ final class FeedModel: ObservableObject {
             self.items = items
         } else if !source.isList {
             let key = "\(source.swipeKey.kind):\(source.swipeKey.name.lowercased()):\(FeedSort.hot.rawValue)"
-            let cached = Self.loadDiskCache(for: key).filter { !UserStore.shared.isSeen($0) }
+            let keepSeen: Bool = {
+                switch source {
+                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            let cached = Self.loadDiskCache(for: key).filter { keepSeen || !UserStore.shared.isSeen($0) }
             self.items = cached
         } else {
             self.items = []

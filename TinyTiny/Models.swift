@@ -151,6 +151,7 @@ struct Gif: Codable, Identifiable, Hashable {
         if id.hasPrefix("lv_ph_") { return "Pornhub" }
         if id.hasPrefix("lv_xh_") { return "xHamster" }
         if id.hasPrefix("lv_sb_") { return "SpankBang" }
+        if id.hasPrefix("lv_er_") { return "Erome" }
         return subreddit
     }
 
