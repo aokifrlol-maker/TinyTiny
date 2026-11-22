@@ -2090,17 +2090,7 @@ struct GoonedFollowsView: View {
             }
         }
     }
-}
 
-// MARK: - 4. Settings Modal (X, Instagram, Rule34, Offline Vault, Autoplay, Video Fit, Appearance, Security)
-
-struct GoonedSettingsModal: View {
-    @Binding var isPresented: Bool
-    var onConnectX: () -> Void
-    var onConnectIG: () -> Void
-    var onSetupR34Key: () -> Void
-    @EnvironmentObject var store: UserStore
-    @EnvironmentObject var app: AppState
     @State private var expandedSection: FollowsSection? = .accounts
 
     enum FollowsSection: String, Hashable {
@@ -2158,6 +2148,17 @@ struct GoonedSettingsModal: View {
         }
         .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
     }
+}
+
+// MARK: - 4. Settings Modal (X, Instagram, Rule34, Offline Vault, Autoplay, Video Fit, Appearance, Security)
+
+struct GoonedSettingsModal: View {
+    @Binding var isPresented: Bool
+    var onConnectX: () -> Void
+    var onConnectIG: () -> Void
+    var onSetupR34Key: () -> Void
+    @EnvironmentObject var store: UserStore
+    @EnvironmentObject var app: AppState
     @ObservedObject private var offline = OfflineManager.shared
     @ObservedObject private var taste = SmartTasteEngine.shared
     @ObservedObject private var license = LicenseManager.shared
