@@ -842,7 +842,7 @@ final class FeedModel: ObservableObject {
             guard wantReddit else { return [] }
             var tasteBatch: [Gif] = []
             if !activeTasteTags.isEmpty {
-                let pinned = store.data.algorithm.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
+                let pinned = algo.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
                 let pool = !pinned.isEmpty ? pinned : activeTasteTags
                 let tagPick = pool[curOF % pool.count]
                     .replacingOccurrences(of: "_", with: "")
