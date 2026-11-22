@@ -1118,7 +1118,7 @@ struct GoonedLikesView: View {
 
     var body: some View {
         ZStack {
-            Theme.crimsonBg.ignoresSafeArea()
+            Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
             VStack(spacing: 0) {
                 // Top Bar: Liked vs Offline Vault Switcher + Gear on Right
@@ -1257,9 +1257,9 @@ struct GoonedLikesView: View {
                     VStack(spacing: 14) {
                         ZStack {
                             Circle()
-                                .fill(Color(red: 0.42, green: 0.10, blue: 0.20).opacity(0.85))
+                                .fill(Color.white.opacity(0.08))
                                 .frame(width: 68, height: 68)
-                                .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                                .liquidGlassCircle(tinted: store.data.settings.tintedGlass)
                             Image(systemName: mode == "offline" ? "arrow.down.to.line" : "heart.fill")
                                 .font(.system(size: 28))
                                 .foregroundStyle(.white)
@@ -1515,15 +1515,21 @@ struct GoonedLikesView: View {
         if let local = offline.localMediaURL(for: post) {
             return local
         }
-        let remote = post.isImage ? (post.thumbURL ?? post.allVideoURLs(hd: true).first) : post.allVideoURLs(hd: true).first
+        var remote: URL? = post.isImage ? (post.thumbURL ?? post.allVideoURLs(hd: true).first) : post.allVideoURLs(hd: true).first
+        if remote == nil && post.isLongVideoPost {
+            let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
+            remote = resolved.first ?? MediaMetaRegistry.albumItems(for: post.id).first?.url
+        }
         guard let url = remote else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 35
-        if post.isOnlyFansPost { req.setValue("https://cum.st/", forHTTPHeaderField: "Referer") }
+        for (k, v) in MediaHeaders.headers(for: url) {
+            req.setValue(v, forHTTPHeaderField: k)
+        }
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
               !data.isEmpty else { return nil }
-        let ext = post.isImage ? "jpg" : "mp4"
+        let ext = url.pathExtension.isEmpty ? (post.isImage ? "jpg" : "mp4") : url.pathExtension
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tt_export_\(OfflineManager.safeFileStem(for: post.id)).\(ext)")
         try? data.write(to: tmp, options: [.atomic])
         return tmp
@@ -1631,7 +1637,7 @@ struct GridThumb: View {
     var isOfflineBadge: Bool = false
 
     var body: some View {
-        Color(red: 0.25, green: 0.06, blue: 0.14)
+        Color.white.opacity(0.06)
             .aspectRatio(9.0 / 16.0, contentMode: .fit)
             .overlay(
                 RemoteImageView(
@@ -1685,6 +1691,63 @@ struct GoonedFollowsView: View {
 
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
+    @State private var expandedSection: FollowsSection? = .accounts
+
+    enum FollowsSection: String, Hashable {
+        case accounts, x, of, ig, subreddits, redditUsers
+    }
+
+    private func followsDropdown<Content: View>(
+        _ section: FollowsSection,
+        icon: String,
+        title: String,
+        summary: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let isOpen = expandedSection == section
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    expandedSection = isOpen ? nil : section
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text(summary)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .rotationEffect(.degrees(isOpen ? 180 : 0))
+                }
+                .padding(14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                Divider().overlay(Color.white.opacity(0.14))
+                    .padding(.horizontal, 14)
+                VStack(alignment: .leading, spacing: 10) {
+                    content()
+                }
+                .padding(14)
+            }
+        }
+        .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
+    }
 
     private var hasAnyFollows: Bool {
         !store.data.followedSubreddits.isEmpty ||
@@ -1696,7 +1759,7 @@ struct GoonedFollowsView: View {
 
     var body: some View {
         ZStack {
-            Theme.crimsonBg.ignoresSafeArea()
+            Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
             VStack(spacing: 14) {
                 HStack {
@@ -1725,8 +1788,14 @@ struct GoonedFollowsView: View {
                 .padding(.top, 10)
 
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        // Personal X Account Card
+                    VStack(alignment: .leading, spacing: 12) {
+                        // Connected Accounts Dropdown
+                        followsDropdown(
+                            .accounts,
+                            icon: "person.crop.circle.badge.checkmark",
+                            title: "Connected Accounts",
+                            summary: "\(store.data.xSession.isConnected ? "𝕏 On" : "𝕏 Off") · \(store.data.igSession.isConnected ? "IG On" : "IG Off")"
+                        ) {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 12) {
                                 ZStack {
@@ -1778,8 +1847,8 @@ struct GoonedFollowsView: View {
                                 }
                             }
                         }
-                        .padding(14)
-                        .liquidGlassCard(cornerRadius: 20)
+
+                        Divider().overlay(Color.white.opacity(0.14))
 
                         // Personal Instagram Account Card
                         VStack(alignment: .leading, spacing: 10) {
@@ -1842,16 +1911,16 @@ struct GoonedFollowsView: View {
                                 }
                             }
                         }
-                        .padding(14)
-                        .liquidGlassCard(cornerRadius: 20)
+
+                        }
 
                         if !hasAnyFollows {
                             VStack(spacing: 12) {
                                 ZStack {
                                     Circle()
-                                        .fill(Color(red: 0.42, green: 0.10, blue: 0.20).opacity(0.85))
+                                        .fill(Color.white.opacity(0.08))
                                         .frame(width: 64, height: 64)
-                                        .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                                        .liquidGlassCircle(tinted: store.data.settings.tintedGlass)
                                     Image(systemName: "person.badge.plus")
                                         .font(.system(size: 24))
                                         .foregroundStyle(.white)
@@ -1869,148 +1938,147 @@ struct GoonedFollowsView: View {
                             .padding(.vertical, 36)
                         } else {
                             if !store.data.followedXUsers.isEmpty {
-                                Text("𝕏 CREATORS")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .padding(.horizontal, 4)
-
-                                ForEach(store.data.followedXUsers, id: \.self) { handle in
-                                    HStack {
-                                        Button { onSelectFeed(.xUser(handle)) } label: {
-                                            HStack(spacing: 10) {
-                                                Circle().fill(Color.black.opacity(0.55)).frame(width: 36, height: 36)
-                                                    .overlay(Text("𝕏").font(.system(size: 13, weight: .black)))
-                                                Text("@\(handle)").font(.system(size: 16, weight: .bold))
-                                                Spacer()
+                                followsDropdown(
+                                    .x,
+                                    icon: "flame.fill",
+                                    title: "𝕏 Creators",
+                                    summary: "\(store.data.followedXUsers.count) following"
+                                ) {
+                                    ForEach(store.data.followedXUsers, id: \.self) { handle in
+                                        HStack {
+                                            Button { onSelectFeed(.xUser(handle)) } label: {
+                                                HStack(spacing: 10) {
+                                                    Circle().fill(Color.black.opacity(0.55)).frame(width: 34, height: 34)
+                                                        .overlay(Text("𝕏").font(.system(size: 13, weight: .black)))
+                                                    Text("@\(handle)").font(.system(size: 15.5, weight: .bold))
+                                                    Spacer()
+                                                }
+                                            }
+                                            Button { store.toggleFollowXUser(handle) } label: {
+                                                Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                                             }
                                         }
-                                        Button { store.toggleFollowXUser(handle) } label: {
-                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
-                                        }
                                     }
-                                    .padding(12)
-                                    .liquidGlassCard(cornerRadius: 16)
                                 }
                             }
 
                             if !store.data.followedOFCreators.isEmpty {
-                                Text("ONLYFANS CREATORS")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(Color(red: 0.25, green: 0.80, blue: 1.0))
-                                    .padding(.horizontal, 4)
-
-                                ForEach(store.data.followedOFCreators) { creator in
-                                    HStack {
-                                        Button {
-                                            onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
-                                        } label: {
-                                            HStack(spacing: 10) {
-                                                AsyncImage(url: creator.avatarURL) { phase in
-                                                    if let img = phase.image {
-                                                        img.resizable().aspectRatio(contentMode: .fill)
-                                                    } else {
-                                                        Circle()
-                                                            .fill(Color(red: 0.0, green: 0.65, blue: 0.92).opacity(0.65))
-                                                            .overlay(Text("OF").font(.system(size: 11, weight: .black)))
+                                followsDropdown(
+                                    .of,
+                                    icon: "star.fill",
+                                    title: "OnlyFans Creators",
+                                    summary: "\(store.data.followedOFCreators.count) following"
+                                ) {
+                                    ForEach(store.data.followedOFCreators) { creator in
+                                        HStack {
+                                            Button {
+                                                onSelectFeed(.ofCreator(id: creator.id, handle: creator.name, displayName: creator.displayName))
+                                            } label: {
+                                                HStack(spacing: 10) {
+                                                    AsyncImage(url: creator.avatarURL) { phase in
+                                                        if let img = phase.image {
+                                                            img.resizable().aspectRatio(contentMode: .fill)
+                                                        } else {
+                                                            Circle()
+                                                                .fill(Color(red: 0.0, green: 0.65, blue: 0.92).opacity(0.65))
+                                                                .overlay(Text("OF").font(.system(size: 11, weight: .black)))
+                                                        }
                                                     }
-                                                }
-                                                .frame(width: 36, height: 36)
-                                                .clipShape(Circle())
+                                                    .frame(width: 34, height: 34)
+                                                    .clipShape(Circle())
 
-                                                VStack(alignment: .leading, spacing: 1) {
-                                                    Text(creator.displayName?.isEmpty == false ? creator.displayName! : "@\(creator.name)")
-                                                        .font(.system(size: 15.5, weight: .bold))
-                                                    Text("@\(creator.name)")
-                                                        .font(.caption)
-                                                        .foregroundStyle(.white.opacity(0.65))
+                                                    VStack(alignment: .leading, spacing: 1) {
+                                                        Text(creator.displayName?.isEmpty == false ? creator.displayName! : "@\(creator.name)")
+                                                            .font(.system(size: 15, weight: .bold))
+                                                        Text("@\(creator.name)")
+                                                            .font(.caption)
+                                                            .foregroundStyle(.white.opacity(0.65))
+                                                    }
+                                                    Spacer()
                                                 }
-                                                Spacer()
+                                            }
+                                            Button {
+                                                store.toggleFollowOFCreator(id: creator.id, name: creator.name, displayName: creator.displayName)
+                                            } label: {
+                                                Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                                             }
                                         }
-                                        Button {
-                                            store.toggleFollowOFCreator(id: creator.id, name: creator.name, displayName: creator.displayName)
-                                        } label: {
-                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
-                                        }
                                     }
-                                    .padding(12)
-                                    .liquidGlassCard(cornerRadius: 16)
                                 }
                             }
 
                             if !store.data.followedIGUsers.isEmpty {
-                                Text("INSTAGRAM CREATORS")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .padding(.horizontal, 4)
-
-                                ForEach(store.data.followedIGUsers, id: \.self) { handle in
-                                    HStack {
-                                        Button { onSelectFeed(.igUser(handle)) } label: {
-                                            HStack(spacing: 10) {
-                                                Circle().fill(Theme.accent.opacity(0.55)).frame(width: 36, height: 36)
-                                                    .overlay(Image(systemName: "camera.fill").font(.system(size: 12, weight: .bold)))
-                                                Text("IG @\(handle)").font(.system(size: 16, weight: .bold))
-                                                Spacer()
+                                followsDropdown(
+                                    .ig,
+                                    icon: "camera.fill",
+                                    title: "Instagram Creators",
+                                    summary: "\(store.data.followedIGUsers.count) following"
+                                ) {
+                                    ForEach(store.data.followedIGUsers, id: \.self) { handle in
+                                        HStack {
+                                            Button { onSelectFeed(.igUser(handle)) } label: {
+                                                HStack(spacing: 10) {
+                                                    Circle().fill(Theme.accent.opacity(0.55)).frame(width: 34, height: 34)
+                                                        .overlay(Image(systemName: "camera.fill").font(.system(size: 12, weight: .bold)))
+                                                    Text("IG @\(handle)").font(.system(size: 15.5, weight: .bold))
+                                                    Spacer()
+                                                }
+                                            }
+                                            Button { store.toggleFollowIGUser(handle) } label: {
+                                                Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                                             }
                                         }
-                                        Button { store.toggleFollowIGUser(handle) } label: {
-                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
-                                        }
                                     }
-                                    .padding(12)
-                                    .liquidGlassCard(cornerRadius: 16)
                                 }
                             }
 
                             if !store.data.followedSubreddits.isEmpty {
-                                Text("SUBREDDITS")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .padding(.horizontal, 4)
-
-                                ForEach(store.data.followedSubreddits, id: \.self) { sub in
-                                    HStack {
-                                        Button { onSelectFeed(.subreddit(sub)) } label: {
-                                            HStack(spacing: 10) {
-                                                Circle().fill(Theme.accent.opacity(0.5)).frame(width: 36, height: 36)
-                                                    .overlay(Text("r/").font(.system(size: 12, weight: .black)))
-                                                Text("r/\(sub)").font(.system(size: 16, weight: .bold))
-                                                Spacer()
+                                followsDropdown(
+                                    .subreddits,
+                                    icon: "number",
+                                    title: "Subreddits",
+                                    summary: "\(store.data.followedSubreddits.count) following"
+                                ) {
+                                    ForEach(store.data.followedSubreddits, id: \.self) { sub in
+                                        HStack {
+                                            Button { onSelectFeed(.subreddit(sub)) } label: {
+                                                HStack(spacing: 10) {
+                                                    Circle().fill(Theme.accent.opacity(0.5)).frame(width: 34, height: 34)
+                                                        .overlay(Text("r/").font(.system(size: 12, weight: .black)))
+                                                    Text("r/\(sub)").font(.system(size: 15.5, weight: .bold))
+                                                    Spacer()
+                                                }
+                                            }
+                                            Button { store.toggleFollowSubreddit(sub) } label: {
+                                                Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                                             }
                                         }
-                                        Button { store.toggleFollowSubreddit(sub) } label: {
-                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
-                                        }
                                     }
-                                    .padding(12)
-                                    .liquidGlassCard(cornerRadius: 16)
                                 }
                             }
 
                             if !store.data.followedUsers.isEmpty {
-                                Text("REDDIT CREATORS")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .padding(.horizontal, 4)
-                                    .padding(.top, 4)
-
-                                ForEach(store.data.followedUsers, id: \.self) { u in
-                                    HStack {
-                                        Button { onSelectFeed(.user(u)) } label: {
-                                            HStack(spacing: 10) {
-                                                Circle().fill(Color.white.opacity(0.18)).frame(width: 36, height: 36)
-                                                    .overlay(Text("u/").font(.system(size: 12, weight: .black)))
-                                                Text("u/\(u)").font(.system(size: 16, weight: .bold))
-                                                Spacer()
+                                followsDropdown(
+                                    .redditUsers,
+                                    icon: "person.fill",
+                                    title: "Reddit Creators",
+                                    summary: "\(store.data.followedUsers.count) following"
+                                ) {
+                                    ForEach(store.data.followedUsers, id: \.self) { u in
+                                        HStack {
+                                            Button { onSelectFeed(.user(u)) } label: {
+                                                HStack(spacing: 10) {
+                                                    Circle().fill(Color.white.opacity(0.18)).frame(width: 34, height: 34)
+                                                        .overlay(Text("u/").font(.system(size: 12, weight: .black)))
+                                                    Text("u/\(u)").font(.system(size: 15.5, weight: .bold))
+                                                    Spacer()
+                                                }
+                                            }
+                                            Button { store.toggleFollowUser(u) } label: {
+                                                Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
                                             }
                                         }
-                                        Button { store.toggleFollowUser(u) } label: {
-                                            Text("Unfollow").font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 6).liquidGlassCapsule()
-                                        }
                                     }
-                                    .padding(12)
-                                    .liquidGlassCard(cornerRadius: 16)
                                 }
                             }
                         }
@@ -2033,6 +2101,63 @@ struct GoonedSettingsModal: View {
     var onSetupR34Key: () -> Void
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
+    @State private var expandedSection: FollowsSection? = .accounts
+
+    enum FollowsSection: String, Hashable {
+        case accounts, x, of, ig, subreddits, redditUsers
+    }
+
+    private func followsDropdown<Content: View>(
+        _ section: FollowsSection,
+        icon: String,
+        title: String,
+        summary: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let isOpen = expandedSection == section
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    expandedSection = isOpen ? nil : section
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.accentBright)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text(summary)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .rotationEffect(.degrees(isOpen ? 180 : 0))
+                }
+                .padding(14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                Divider().overlay(Color.white.opacity(0.14))
+                    .padding(.horizontal, 14)
+                VStack(alignment: .leading, spacing: 10) {
+                    content()
+                }
+                .padding(14)
+            }
+        }
+        .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
+    }
     @ObservedObject private var offline = OfflineManager.shared
     @ObservedObject private var taste = SmartTasteEngine.shared
     @ObservedObject private var license = LicenseManager.shared
@@ -2754,7 +2879,7 @@ struct AlgorithmEditorSheet: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
             VStack(spacing: 0) {
                 HStack {
@@ -3265,7 +3390,7 @@ struct CreatorProfileGridView: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {

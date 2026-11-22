@@ -313,7 +313,7 @@ struct ShareItemSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: UserStore.shared.data.settings.tintedGlass)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -442,7 +442,7 @@ struct ShareItemSheet: View {
                     IGDirectSendSheet(
                         videoURL: mp4URL,
                         title: gif.title ?? "",
-                        referer: gif.isOnlyFansPost ? "https://cum.st/" : (gif.isLongVideoPost ? "https://www.xvideos.com/" : nil)
+                        referer: MediaHeaders.headers(for: mp4URL)["Referer"]
                     )
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
@@ -482,7 +482,7 @@ struct ReceiveDropSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: UserStore.shared.data.settings.tintedGlass)
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Text("Receive Shared Drop or File")
@@ -591,7 +591,7 @@ struct ShareCollectionSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: UserStore.shared.data.settings.tintedGlass)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -766,7 +766,7 @@ struct IGDirectSendSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: UserStore.shared.data.settings.tintedGlass)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {

@@ -115,6 +115,19 @@ struct LiquidGlassCard: ViewModifier {
 }
 
 extension View {
+    func liquidGlassBackground(tinted: Bool = false) -> some View {
+        background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    tinted
+                        ? Color(red: 0.16, green: 0.04, blue: 0.09).opacity(0.62)
+                        : Color.black.opacity(0.35)
+                )
+                .ignoresSafeArea()
+        )
+    }
+
     func liquidGlassCapsule(tinted: Bool = false, active: Bool = false) -> some View {
         modifier(LiquidGlassCapsule(tinted: tinted, active: active))
     }

@@ -94,9 +94,18 @@ final class OfflineManager: ObservableObject {
         lastDownloadError = nil
 
         let hd = UserStore.shared.data.settings.hd
-        let rawCandidates: [URL] = gif.isImage
+        var rawCandidates: [URL] = gif.isImage
             ? gif.imageFallbackURLs.filter { !$0.isFileURL }
             : gif.allVideoURLs(hd: hd).filter { !$0.isFileURL }
+
+        if rawCandidates.isEmpty && gif.isLongVideoPost {
+            let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
+            if !resolved.isEmpty {
+                rawCandidates = resolved
+            } else {
+                rawCandidates = MediaMetaRegistry.albumItems(for: gif.id).map(\.url)
+            }
+        }
 
         // Always prefer direct downloadable MP4/MOV/M4V/image URLs before any .m3u8 playlist
         let directCandidates = rawCandidates.filter { !$0.absoluteString.lowercased().contains(".m3u8") }

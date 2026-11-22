@@ -577,7 +577,7 @@ struct Rule34KeySheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {

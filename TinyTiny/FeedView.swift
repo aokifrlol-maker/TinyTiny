@@ -126,9 +126,14 @@ final class MediaImageLoader {
     func load(_ url: URL) async -> UIImage? {
         if url.isFileURL {
             if let img = cached(url) { return img }
-            if let data = try? Data(contentsOf: url), let img = UIImage(data: data) {
-                cache.setObject(img, forKey: url.absoluteString as NSString)
-                return img
+            let loaded: UIImage? = await Task.detached(priority: .utility) {
+                guard let data = try? Data(contentsOf: url),
+                      let rawImg = UIImage(data: data) else { return nil }
+                return await rawImg.byPreparingForDisplay() ?? rawImg
+            }.value
+            if let loaded {
+                cache.setObject(loaded, forKey: url.absoluteString as NSString)
+                return loaded
             }
             return nil
         }
@@ -192,7 +197,7 @@ struct RemoteImageView: View {
     var body: some View {
         Group {
             if let image {
-                let isVeryTall = allowTallScroll && !fill && image.size.width > 0 && (image.size.height / image.size.width) > 1.85
+                let isVeryTall = allowTallScroll && image.size.width > 0 && (image.size.height / image.size.width) > 1.35
                 if isVeryTall {
                     GeometryReader { geo in
                         let targetW = max(geo.size.width, 1)
@@ -1151,9 +1156,39 @@ struct GoonedReelCell: View {
     @State private var albumIndex: Int = 0
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused && !showMoreSheet }
+    private var isShowingImage: Bool {
+        if albumItems.indices.contains(albumIndex) {
+            return !albumItems[albumIndex].isVideo
+        }
+        return gif.isImage
+    }
+    private var activeDownloadGif: Gif {
+        guard albumItems.count > 1, albumItems.indices.contains(albumIndex) else { return gif }
+        let item = albumItems[albumIndex]
+        return Gif(
+            id: "\(gif.id)_item_\(albumIndex)",
+            title: "\(gif.title ?? "Erome") (\(albumIndex + 1)/\(albumItems.count))",
+            author: gif.author,
+            subreddit: gif.subreddit,
+            upvotes: gif.upvotes,
+            duration: nil,
+            width: gif.width,
+            height: gif.height,
+            mediaType: item.isVideo ? "video" : "image",
+            mediaUrl: item.url.absoluteString,
+            muxedUrl: nil,
+            muxedUrlHd: nil,
+            hlsUrl: nil,
+            posterUrl: (item.posterURL ?? gif.posterURL)?.absoluteString,
+            thumbnailUrl: (item.posterURL ?? gif.thumbURL)?.absoluteString,
+            sourceUrl: gif.sourceUrl,
+            permalink: gif.permalink,
+            createdUtc: gif.createdUtc
+        )
+    }
     private var liked: Bool { store.isLiked(gif) }
-    private var downloaded: Bool { offline.isDownloaded(gif) }
-    private var downloadProgress: Double? { offline.activeDownloads[gif.id] }
+    private var downloaded: Bool { offline.isDownloaded(activeDownloadGif) }
+    private var downloadProgress: Double? { offline.activeDownloads[activeDownloadGif.id] }
     private var tinted: Bool { store.data.settings.tintedGlass }
     private var collapsed: Bool { store.data.settings.controlsCollapsed }
 
@@ -1186,8 +1221,28 @@ struct GoonedReelCell: View {
             ZStack {
                 Color.black
                 mediaView(geo.size)
+                    .simultaneousGesture(
+                        TapGesture(count: 2).onEnded {
+                            if isShowingImage { triggerDoubleTapLike() }
+                        }
+                    )
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 30).onEnded { val in
+                            guard isShowingImage, albumItems.count > 1,
+                                  abs(val.translation.width) > abs(val.translation.height) * 1.3 else { return }
+                            if val.translation.width < -40, albumIndex + 1 < albumItems.count {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                withAnimation(.easeOut(duration: 0.2)) { albumIndex += 1 }
+                            } else if val.translation.width > 40, albumIndex > 0 {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                withAnimation(.easeOut(duration: 0.2)) { albumIndex -= 1 }
+                            }
+                        }
+                    )
 
-                gestureZones(size: geo.size)
+                if !isShowingImage {
+                    gestureZones(size: geo.size)
+                }
 
                 if userPaused && !isHolding {
                     Circle()
@@ -1769,7 +1824,7 @@ struct GoonedReelCell: View {
             // Offline Download Circle
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                offline.toggleDownload(gif)
+                offline.toggleDownload(activeDownloadGif)
             } label: {
                 ZStack {
                     if let prog = downloadProgress {
@@ -2238,7 +2293,7 @@ struct PostMoreSheet: View {
 
     var body: some View {
         ZStack {
-            Theme.modalGradient.ignoresSafeArea()
+            Color.clear.liquidGlassBackground(tinted: UserStore.shared.data.settings.tintedGlass)
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {

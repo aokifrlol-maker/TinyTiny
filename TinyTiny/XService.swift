@@ -1439,7 +1439,7 @@ struct XLoginSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.modalGradient.ignoresSafeArea()
+                Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
 
                 VStack(spacing: 0) {
                     // Top Bar
