@@ -98,15 +98,14 @@ actor LongVideoAPI {
             async let ph = fetchPornhub(query: cleanQ, sort: sort, page: page)
             async let xh = fetchXHamster(query: cleanQ, sort: sort, page: page)
             async let sb = fetchSpankBang(query: cleanQ, sort: sort, page: page, suppressGay: suppressGay)
-            async let er = fetchErome(query: cleanQ, sort: sort, page: page)
             if let tq = tasteQuery {
                 async let epTaste = fetchEporner(query: tq, sort: sort, page: page, suppressGay: suppressGay)
                 async let xvTaste = fetchXVideos(query: tq, sort: sort, page: page)
-                let (e, v, p, x, s, erRes, et, vt) = await (ep, xv, ph, xh, sb, er, epTaste, xvTaste)
-                rawPosts = Self.interleave([et, vt, erRes, e, v, p, x, s])
+                let (e, v, p, x, s, et, vt) = await (ep, xv, ph, xh, sb, epTaste, xvTaste)
+                rawPosts = Self.interleave([et, vt, e, v, p, x, s])
             } else {
-                let (e, v, p, x, s, erRes) = await (ep, xv, ph, xh, sb, er)
-                rawPosts = Self.interleave([erRes, e, v, p, x, s])
+                let (e, v, p, x, s) = await (ep, xv, ph, xh, sb)
+                rawPosts = Self.interleave([e, v, p, x, s])
             }
         case .eporner:
             if let tq = tasteQuery {
@@ -832,43 +831,26 @@ actor LongVideoAPI {
 
         var posts: [Gif] = []
         var seen = Set<String>()
-        // Match Erome album cards: href="https://www.erome.com/a/XXXX" or "/a/XXXX", optional title & data-src/src thumbnail
-        let pattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[\s\S]{0,900}?(?:data-src|src)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"[\s\S]{0,400}?class="album-title[^"]*"[^>]*>([^<]+)<"#
-        let altPattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[^>]*>[\s\S]{0,800}?(?:data-src|src)="(https?://[^"]+)"#
+        // Real erome.com explore/search card HTML:
+        // <a class="album-link" href="https://www.erome.com/a/YdXBszjR" ><img ... alt="Title" ... src="https://s91.erome.com/...jpg">
+        let pattern = #"href="(?:https?://(?:www\.)?erome\.com)?(/a/([A-Za-z0-9]+))"[^>]*>[\s\S]{0,600}?<img[^>]*?(?:alt="([^"]*)")?[^>]*?(?:data-src|src)="(https?://[^"]+)""#
 
         if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
             let ns = html as NSString
             for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
                 let rel = ns.substring(with: m.range(at: 1))
                 let code = ns.substring(with: m.range(at: 2))
-                let thumb = ns.substring(with: m.range(at: 3))
-                let title = decodeHTMLEntities(ns.substring(with: m.range(at: 4)).trimmingCharacters(in: .whitespacesAndNewlines))
+                let rawAlt = m.range(at: 3).location != NSNotFound ? ns.substring(with: m.range(at: 3)) : ""
+                let thumb = ns.substring(with: m.range(at: 4))
+                let cleanTitle = decodeHTMLEntities(rawAlt.replacingOccurrences(of: #"\s*#[A-Za-z0-9_]+\s*$"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines))
                 let id = "lv_er_\(code)"
                 guard seen.insert(id).inserted else { continue }
                 let fullURL = "https://www.erome.com\(rel)"
                 posts.append(Gif(
                     id: id,
-                    title: title.isEmpty ? "Erome Video" : title,
+                    title: cleanTitle.isEmpty ? "Erome Album" : cleanTitle,
                     author: "Erome",
                     subreddit: "Erome",
-                    upvotes: nil, duration: nil, width: 720, height: 1280, mediaType: "video",
-                    mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
-                    posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
-                ))
-            }
-        }
-
-        if posts.isEmpty, let regex = try? NSRegularExpression(pattern: altPattern, options: [.caseInsensitive]) {
-            let ns = html as NSString
-            for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).prefix(24) {
-                let rel = ns.substring(with: m.range(at: 1))
-                let code = ns.substring(with: m.range(at: 2))
-                let thumb = ns.substring(with: m.range(at: 3))
-                let id = "lv_er_\(code)"
-                guard seen.insert(id).inserted else { continue }
-                let fullURL = "https://www.erome.com\(rel)"
-                posts.append(Gif(
-                    id: id, title: "Erome #\(code)", author: "Erome", subreddit: "Erome",
                     upvotes: nil, duration: nil, width: 720, height: 1280, mediaType: "video",
                     mediaUrl: nil, muxedUrl: nil, muxedUrlHd: nil, hlsUrl: nil,
                     posterUrl: thumb, thumbnailUrl: thumb, sourceUrl: fullURL, permalink: fullURL, createdUtc: nil
@@ -880,6 +862,7 @@ actor LongVideoAPI {
 
     private func resolveErome(pageURL: String) async -> [URL] {
         guard let url = URL(string: pageURL) else { return [] }
+        let albumCode = url.lastPathComponent
         var req = URLRequest(url: url)
         req.setValue("https://www.erome.com/", forHTTPHeaderField: "Referer")
         guard let (data, _) = try? await desktopSession.data(for: req),
@@ -887,19 +870,42 @@ actor LongVideoAPI {
             return []
         }
         let cleaned = html.replacingOccurrences(of: "\\/", with: "/")
-        var urls: [URL] = []
-        var seen = Set<String>()
-        let pat = #"(?:src|data-src)="(https?://[^"'\s]+\.(?:mp4|m4v|mov)(?:\?[^"'\s]*)?)""#
-        if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) {
+        var videoURLs: [URL] = []
+        var albumItems: [AlbumMediaItem] = []
+        var seenURLs = Set<String>()
+
+        // Extract only media belonging to this specific album code (excludes related albums at bottom of page)
+        let vidPat = #"https?://v\d*\.erome\.com/[^"'\s>]+/\(albumCode)/[^"'\s>]+\.(?:mp4|m4v|mov)(?:\?[^"'\s>]*)?"#
+        if let regex = try? NSRegularExpression(pattern: vidPat, options: [.caseInsensitive]) {
             let ns = cleaned as NSString
             for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
-                let s = ns.substring(with: m.range(at: 1))
-                if seen.insert(s).inserted, let u = URL(string: s) {
-                    urls.append(u)
+                let s = ns.substring(with: m.range)
+                if seenURLs.insert(s).inserted, let u = URL(string: s) {
+                    videoURLs.append(u)
+                    albumItems.append(AlbumMediaItem(id: s, url: u, posterURL: nil, isVideo: true))
                 }
             }
         }
-        return urls
+
+        // Also extract full-size photos in this album (ignoring /thumbs/ and avatars)
+        let imgPat = #"https?://s\d*\.erome\.com/[^"'\s>]+/\(albumCode)/(?!thumbs/)[^"'\s>]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s>]*)?"#
+        if let regex = try? NSRegularExpression(pattern: imgPat, options: [.caseInsensitive]) {
+            let ns = cleaned as NSString
+            for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
+                let s = ns.substring(with: m.range)
+                // Skip poster frames that match a video's stem
+                let stem = (URL(string: s)?.deletingPathExtension().lastPathComponent) ?? ""
+                let matchesVideo = videoURLs.contains { $0.deletingPathExtension().lastPathComponent.hasPrefix(stem) && !stem.isEmpty }
+                if !matchesVideo, seenURLs.insert(s).inserted, let u = URL(string: s) {
+                    albumItems.append(AlbumMediaItem(id: s, url: u, posterURL: u, isVideo: false))
+                }
+            }
+        }
+
+        if !albumItems.isEmpty {
+            MediaMetaRegistry.registerAlbumItems(postId: "lv_er_\(albumCode)", items: albumItems)
+        }
+        return videoURLs
     }
 
     // MARK: - Unified Lazy Playable URL Resolver

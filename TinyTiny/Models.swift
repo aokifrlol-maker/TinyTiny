@@ -378,10 +378,18 @@ func shortCount(_ n: Int?) -> String {
 }
 
 /// Thread-safe registry for auxiliary playback & fingerprinting metadata that avoids bloating persisted `Gif` JSON.
+struct AlbumMediaItem: Identifiable, Hashable {
+    let id: String
+    let url: URL
+    let posterURL: URL?
+    let isVideo: Bool
+}
+
 enum MediaMetaRegistry {
     private static let lock = NSLock()
     private static var fingerprints: [String: String] = [:]
     private static var extraVideos: [String: [String]] = [:]
+    private static var albumMedia: [String: [AlbumMediaItem]] = [:]
     private static var postTags: [String: [String]] = [:]
     private static var creatorClusterTags: [String: [String]] = [:]
     private static var postCreatorGender: [String: String] = [:]
@@ -467,10 +475,25 @@ enum MediaMetaRegistry {
         if fingerprints.count > 4000 {
             fingerprints.removeAll(keepingCapacity: true)
             extraVideos.removeAll(keepingCapacity: true)
+            albumMedia.removeAll(keepingCapacity: true)
             postTags.removeAll(keepingCapacity: true)
             postCreatorIds.removeAll(keepingCapacity: true)
             postCreatorGender.removeAll(keepingCapacity: true)
         }
+    }
+
+    static func registerAlbumItems(postId: String, items: [AlbumMediaItem]) {
+        guard !items.isEmpty else { return }
+        lock.lock()
+        albumMedia[postId] = items
+        lock.unlock()
+    }
+
+    static func albumItems(for postId: String) -> [AlbumMediaItem] {
+        lock.lock()
+        let res = albumMedia[postId] ?? []
+        lock.unlock()
+        return res
     }
 
     static func registerCreatorGender(creatorId: String?, creatorName: String?, gender: String?, tags: [String] = []) {

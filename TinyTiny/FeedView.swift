@@ -91,6 +91,8 @@ enum MediaHeaders {
             h["Referer"] = "https://xhamster.com/"
         } else if host.contains("spankbang") || host.contains("sb-cd") {
             h["Referer"] = "https://spankbang.com/"
+        } else if host.contains("erome.com") {
+            h["Referer"] = "https://www.erome.com/"
         } else if host.contains("cum.st") {
             h["Referer"] = "https://cum.st/"
         } else {
@@ -168,6 +170,7 @@ struct RemoteImageView: View {
     var fallbackURLs: [URL] = []
     var fill: Bool = false
     var showSpinnerOnLoad: Bool = true
+    var allowTallScroll: Bool = false
     var onFailed: (() -> Void)? = nil
 
     @State private var image: UIImage?
@@ -189,9 +192,24 @@ struct RemoteImageView: View {
     var body: some View {
         Group {
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: fill ? .fill : .fit)
+                let isVeryTall = allowTallScroll && !fill && image.size.width > 0 && (image.size.height / image.size.width) > 1.85
+                if isVeryTall {
+                    GeometryReader { geo in
+                        let targetW = max(geo.size.width, 1)
+                        let targetH = targetW * (image.size.height / image.size.width)
+                        ScrollView(.vertical, showsIndicators: true) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: targetW, height: targetH)
+                        }
+                        .frame(width: geo.size.width, height: geo.size.height)
+                    }
+                } else {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: fill ? .fill : .fit)
+                }
             } else if didFail {
                 VStack(spacing: 10) {
                     Image(systemName: "photo.badge.exclamationmark")
@@ -1129,6 +1147,8 @@ struct GoonedReelCell: View {
     @State private var showMoreSheet = false
     @State private var isScrubbing = false
     @State private var localFitOverride: Bool? = nil
+    @State private var albumItems: [AlbumMediaItem] = []
+    @State private var albumIndex: Int = 0
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused && !showMoreSheet }
     private var liked: Bool { store.isLiked(gif) }
@@ -1437,9 +1457,16 @@ struct GoonedReelCell: View {
                 if gif.isLongVideoPost {
                     Task {
                         let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
+                        let album = MediaMetaRegistry.albumItems(for: gif.id)
+                        if !album.isEmpty {
+                            albumItems = album
+                        }
                         if !resolved.isEmpty {
                             player.updateCandidateURLs(resolved)
                             if shouldPlay { player.play() }
+                        } else if !album.isEmpty {
+                            // Photo-only album (e.g. Erome image album)
+                            player.allFailed = false
                         } else if urls.isEmpty {
                             player.allFailed = true
                         }
@@ -1457,6 +1484,8 @@ struct GoonedReelCell: View {
             isHolding = false
             speedLocked2x = false
             localFitOverride = nil
+            albumItems = []
+            albumIndex = 0
         }
         .onChange(of: shouldPlay) { _, _ in
             if !isActive { speedLocked2x = false }
@@ -1951,12 +1980,76 @@ struct GoonedReelCell: View {
 
     @ViewBuilder
     private func mediaView(_ size: CGSize) -> some View {
-        if gif.isImage {
+        if albumItems.count > 1 {
+            ZStack(alignment: .top) {
+                TabView(selection: $albumIndex) {
+                    ForEach(Array(albumItems.enumerated()), id: \.element.id) { idx, item in
+                        Group {
+                            if item.isVideo {
+                                ZStack {
+                                    Color.black
+                                    if idx == albumIndex {
+                                        PlayerLayerView(
+                                            player: player.player,
+                                            fill: fill,
+                                            onReadyForDisplay: { ready in
+                                                player.updateLayerReadyForDisplay(ready)
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                RemoteImageView(
+                                    url: item.url,
+                                    fill: fill,
+                                    showSpinnerOnLoad: true,
+                                    allowTallScroll: true
+                                )
+                            }
+                        }
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                        .tag(idx)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .onChange(of: albumIndex) { _, newIdx in
+                    guard albumItems.indices.contains(newIdx) else { return }
+                    let item = albumItems[newIdx]
+                    if item.isVideo {
+                        player.updateCandidateURLs([item.url])
+                        if shouldPlay { player.play() }
+                    } else {
+                        player.pause()
+                    }
+                }
+
+                Text("\(albumIndex + 1) / \(albumItems.count)")
+                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .liquidGlassCapsule(tinted: tinted)
+                    .padding(.top, 96)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: size.width, height: size.height)
+        } else if let single = albumItems.first, !single.isVideo {
+            RemoteImageView(
+                url: single.url,
+                fill: fill,
+                showSpinnerOnLoad: true,
+                allowTallScroll: true
+            )
+            .frame(width: size.width, height: size.height)
+            .clipped()
+        } else if gif.isImage {
             RemoteImageView(
                 url: gif.imageURL,
                 fallbackURLs: gif.imageFallbackURLs,
                 fill: fill,
-                showSpinnerOnLoad: true
+                showSpinnerOnLoad: true,
+                allowTallScroll: true
             )
             .frame(width: size.width, height: size.height)
             .clipped()

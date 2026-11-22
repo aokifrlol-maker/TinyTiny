@@ -229,7 +229,7 @@ struct GoonedMainShell: View {
     }
 
     private var isLongChannel: Bool {
-        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longXVideos || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang || activeChannel == .longErome
+        activeChannel == .longAll || activeChannel == .longEporner || activeChannel == .longXVideos || activeChannel == .longPornhub || activeChannel == .longXHamster || activeChannel == .longSpankBang
     }
 
     private var activeModel: FeedModel {
@@ -842,12 +842,13 @@ struct GoonedMainShell: View {
         case .rule34: return 3
         case .igReels, .igFollowing, .igSaved: return 4
         case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return 5
-        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang, .longErome: return 6
+        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return 6
+        case .longErome: return 7
         }
     }
 
     private func handleHorizontalFeedSwipe(dx: CGFloat) {
-        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofForYou, .longVideos(.all)]
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofForYou, .longVideos(.all), .longVideos(.erome)]
         let cur = homeChannelIndex
         // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF -> Long Videos
         // Swipe right (dx > 0) moves backward
@@ -935,8 +936,7 @@ struct GoonedMainShell: View {
                     (.longVideos(.xvideos), "XVideos", .longXVideos),
                     (.longVideos(.pornhub), "Pornhub", .longPornhub),
                     (.longVideos(.xhamster), "xHamster", .longXHamster),
-                    (.longVideos(.spankbang), "SpankBang", .longSpankBang),
-                    (.longVideos(.erome), "Erome", .longErome)
+                    (.longVideos(.spankbang), "SpankBang", .longSpankBang)
                 ]) { selectFeed($0) }
             }
         }
@@ -1023,13 +1023,18 @@ struct GoonedMainShell: View {
                                 case .longPornhub: targetSite = .pornhub
                                 case .longXHamster: targetSite = .xhamster
                                 case .longSpankBang: targetSite = .spankbang
-                                case .longErome: targetSite = .erome
                                 default: targetSite = .all
                                 }
                                 selectFeed(.longVideos(targetSite))
                             }
                         } label: {
                             BrandLogoLongVideos(active: isLongChannel)
+                        }
+
+                        brandChannelButton(id: 7, active: activeChannel == .longErome) {
+                            selectFeed(.longVideos(.erome), forceReload: activeChannel == .longErome)
+                        } label: {
+                            BrandLogoErome(active: activeChannel == .longErome)
                         }
 
                         Color.clear.frame(width: edgePad, height: 1)
@@ -1307,6 +1312,33 @@ struct BrandLogoInstagram: View {
                     .overlay(Circle().stroke(Color.black, lineWidth: 1))
                     .offset(x: 1, y: -1)
             }
+        }
+        .opacity(active ? 1.0 : 0.90)
+        .frame(width: 26, height: 26)
+    }
+}
+
+struct BrandLogoErome: View {
+    var active: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color(red: 0.94, green: 0.24, blue: 0.56), Color(red: 0.64, green: 0.14, blue: 0.42)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 26, height: 26)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.8 : 0.7)
+                )
+            Text("E")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
         }
         .opacity(active ? 1.0 : 0.90)
         .frame(width: 26, height: 26)
