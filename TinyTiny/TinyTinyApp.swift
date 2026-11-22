@@ -623,44 +623,29 @@ struct GoonedMainShell: View {
         .task {
             guard !didPrewarm else { return }
             didPrewarm = true
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            // Pre-warm Rule34 & OnlyFans (URLSession JSON, zero WebView contention)
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            // Stagger pre-warming so cold launch never spikes multiple engines/WebViews at once
             if r34Model.items.isEmpty {
-                Task { await r34Model.loadMore() }
+                await r34Model.loadMore()
             }
+            try? await Task.sleep(nanoseconds: 400_000_000)
             if ofForYouModel.items.isEmpty {
-                Task { await ofForYouModel.loadMore() }
+                await ofForYouModel.loadMore()
             }
             if store.data.xSession.isConnected {
-                // Pre-warm TLS/HTTP connections to X media CDNs so first video/poster starts instantly
-                Task.detached(priority: .utility) {
-                    for host in ["https://video.twimg.com/", "https://pbs.twimg.com/"] {
-                        if let u = URL(string: host) {
-                            var req = URLRequest(url: u)
-                            req.httpMethod = "HEAD"
-                            req.timeoutInterval = 4
-                            _ = try? await URLSession.shared.data(for: req)
-                        }
-                    }
-                }
-                Task { @MainActor in
-                    if xForYouModel.items.isEmpty {
-                        await xForYouModel.loadMore()
-                    } else {
-                        await XWebEngine.shared.warmUp()
-                    }
-                    if xFollowingModel.items.isEmpty {
-                        await xFollowingModel.loadMore()
-                    }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if xForYouModel.items.isEmpty {
+                    await xForYouModel.loadMore()
+                } else {
+                    await XWebEngine.shared.warmUp()
                 }
             }
             if store.data.igSession.isConnected {
-                Task { @MainActor in
-                    if igReelsModel.items.isEmpty {
-                        await igReelsModel.loadMore()
-                    } else {
-                        await InstagramWebEngine.shared.warmUp()
-                    }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if igReelsModel.items.isEmpty {
+                    await igReelsModel.loadMore()
+                } else {
+                    await InstagramWebEngine.shared.warmUp()
                 }
             }
         }

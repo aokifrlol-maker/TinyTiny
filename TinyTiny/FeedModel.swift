@@ -46,7 +46,15 @@ enum FeedSource: Hashable {
         case .igSaved: return "IG Saved"
         case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
         case .rule34(let tag):
-            return tag.isEmpty ? "Rule34.xxx" : "R34: \(tag)"
+            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return "Rule34.xxx" }
+            let parts = trimmed.split(separator: " ").map(String.init)
+            if let userPart = parts.first(where: { $0.lowercased().hasPrefix("user:") }) {
+                let artist = String(userPart.dropFirst(5))
+                let extra = parts.filter { !$0.lowercased().hasPrefix("user:") }.joined(separator: " ")
+                return extra.isEmpty ? "R34 @\(artist)" : "@\(artist) · \(extra)"
+            }
+            return "R34: \(trimmed)"
         case .ofForYou: return "OF For You"
         case .ofTrending: return "OF Trending"
         case .ofLatest: return "OF Latest"

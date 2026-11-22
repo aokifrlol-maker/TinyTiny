@@ -348,24 +348,30 @@ final class LicenseManager: ObservableObject {
         guard isValidAccess, !status.licenseKey.isEmpty,
               let url = URL(string: "\(normalizedBaseURL)/v1/backup") else { return }
 
+        let licKey = status.licenseKey
+        let devId = deviceId
+        let key = backupKey(for: licKey)
         let snapshot = EncryptedProfileBackup(
-            userData: UserStore.shared.data,
+            userData: UserStore.shared.exportSnapshotForBackup(),
             tasteV2: SmartTasteEngine.shared.state,
             seedrMasterKey: CryptoBox.exportSeedrMasterKeyString(),
             updatedAt: Date().timeIntervalSince1970
         )
-        guard let rawJson = try? JSONEncoder().encode(snapshot),
-              let sealed = try? CryptoBox.seal(rawJson, using: backupKey(for: status.licenseKey)) else { return }
+        let sessionRef = session
+        await Task.detached(priority: .utility) {
+            guard let rawJson = try? JSONEncoder().encode(snapshot),
+                  let sealed = try? CryptoBox.seal(rawJson, using: key) else { return }
 
-        var req = URLRequest(url: url)
-        req.httpMethod = "PUT"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "key": status.licenseKey,
-            "deviceId": deviceId,
-            "blob": sealed.base64EncodedString()
-        ])
-        _ = try? await session.data(for: req)
+            var req = URLRequest(url: url)
+            req.httpMethod = "PUT"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "key": licKey,
+                "deviceId": devId,
+                "blob": sealed.base64EncodedString()
+            ])
+            _ = try? await sessionRef.data(for: req)
+        }.value
     }
 
     @discardableResult

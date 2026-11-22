@@ -121,6 +121,7 @@ final class UserStore: ObservableObject {
     static let shared = UserStore()
 
     private(set) var seenSet: Set<String>
+    private var _seenIDs: [String]
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
@@ -138,6 +139,7 @@ final class UserStore: ObservableObject {
         } else {
             loaded = UserData()
         }
+        self._seenIDs = loaded.seenIDs
         self.seenSet = Set(loaded.seenIDs)
         self.data = loaded
         sanitizeLearnedProfile()
@@ -170,8 +172,15 @@ final class UserStore: ObservableObject {
         }
     }
 
+    func exportSnapshotForBackup() -> UserData {
+        var snapshot = data
+        snapshot.seenIDs = _seenIDs
+        return snapshot
+    }
+
     func saveNow() {
-        let snapshot = data
+        var snapshot = data
+        snapshot.seenIDs = _seenIDs
         let url = Self.fileURL
         Task.detached(priority: .utility) {
             if let raw = try? JSONEncoder().encode(snapshot) {
@@ -200,13 +209,14 @@ final class UserStore: ObservableObject {
 
     func markSeen(_ id: String) {
         guard !id.isEmpty, seenSet.insert(id).inserted else { return }
-        data.seenIDs.append(id)
-        if data.seenIDs.count > 12_000 {
-            let overflow = data.seenIDs.count - 10_000
-            let removed = data.seenIDs.prefix(overflow)
+        _seenIDs.append(id)
+        if _seenIDs.count > 12_000 {
+            let overflow = _seenIDs.count - 10_000
+            let removed = _seenIDs.prefix(overflow)
             for r in removed { seenSet.remove(r) }
-            data.seenIDs.removeFirst(overflow)
+            _seenIDs.removeFirst(overflow)
         }
+        scheduleSave()
     }
 
     @discardableResult

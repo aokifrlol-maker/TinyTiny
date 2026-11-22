@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import ImageIO
 
 // MARK: - Native AVPlayer Layer (Properly Bounded & Clipped)
 
@@ -115,29 +116,59 @@ final class MediaImageLoader {
     }()
 
     init() {
-        cache.countLimit = 180
-        cache.totalCostLimit = 96 * 1024 * 1024
+        cache.countLimit = 140
+        cache.totalCostLimit = 80 * 1024 * 1024
     }
 
-    func cached(_ url: URL) -> UIImage? {
-        cache.object(forKey: url.absoluteString as NSString)
+    private func cacheKey(for url: URL, maxPixelSize: CGFloat?) -> String {
+        if let maxPixelSize {
+            return "\(url.absoluteString)#w\(Int(maxPixelSize))"
+        }
+        return url.absoluteString
     }
 
-    func load(_ url: URL) async -> UIImage? {
+    nonisolated private static func decodeImage(from data: Data, maxPixelSize: CGFloat?) -> UIImage? {
+        if let maxPixelSize,
+           let src = CGImageSourceCreateWithData(data as CFData, nil) {
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+            if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+                return UIImage(cgImage: cg)
+            }
+        }
+        return UIImage(data: data)
+    }
+
+    nonisolated private static func bitmapCost(of image: UIImage, fallback: Int) -> Int {
+        if let cg = image.cgImage {
+            return cg.bytesPerRow * cg.height
+        }
+        return fallback
+    }
+
+    func cached(_ url: URL, maxPixelSize: CGFloat? = nil) -> UIImage? {
+        cache.object(forKey: cacheKey(for: url, maxPixelSize: maxPixelSize) as NSString)
+    }
+
+    func load(_ url: URL, maxPixelSize: CGFloat? = nil) async -> UIImage? {
+        let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if url.isFileURL {
-            if let img = cached(url) { return img }
+            if let img = cache.object(forKey: key as NSString) { return img }
             let loaded: UIImage? = await Task.detached(priority: .utility) {
                 guard let data = try? Data(contentsOf: url),
-                      let rawImg = UIImage(data: data) else { return nil }
+                      let rawImg = Self.decodeImage(from: data, maxPixelSize: maxPixelSize) else { return nil }
                 return await rawImg.byPreparingForDisplay() ?? rawImg
             }.value
             if let loaded {
-                cache.setObject(loaded, forKey: url.absoluteString as NSString)
+                cache.setObject(loaded, forKey: key as NSString, cost: Self.bitmapCost(of: loaded, fallback: 512 * 1024))
                 return loaded
             }
             return nil
         }
-        let key = url.absoluteString
         if let existing = cache.object(forKey: key as NSString) { return existing }
         if let task = inFlight[key] { return await task.value }
 
@@ -149,9 +180,9 @@ final class MediaImageLoader {
                 }
                 if let (data, resp) = try? await session.data(for: req),
                    (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
-                   let rawImg = UIImage(data: data) {
+                   let rawImg = Self.decodeImage(from: data, maxPixelSize: maxPixelSize) {
                     let img = await rawImg.byPreparingForDisplay() ?? rawImg
-                    cache.setObject(img, forKey: key as NSString, cost: data.count)
+                    cache.setObject(img, forKey: key as NSString, cost: Self.bitmapCost(of: img, fallback: data.count))
                     return img
                 }
             }
@@ -176,6 +207,7 @@ struct RemoteImageView: View {
     var fill: Bool = false
     var showSpinnerOnLoad: Bool = true
     var allowTallScroll: Bool = false
+    var maxPixelSize: CGFloat? = nil
     var onFailed: (() -> Void)? = nil
 
     @State private var image: UIImage?
@@ -252,14 +284,14 @@ struct RemoteImageView: View {
                 return
             }
             for candidate in candidates {
-                if let cached = MediaImageLoader.shared.cached(candidate) {
+                if let cached = MediaImageLoader.shared.cached(candidate, maxPixelSize: maxPixelSize) {
                     image = cached
                     didFail = false
                     return
                 }
             }
             for candidate in candidates {
-                if let loaded = await MediaImageLoader.shared.load(candidate) {
+                if let loaded = await MediaImageLoader.shared.load(candidate, maxPixelSize: maxPixelSize) {
                     image = loaded
                     didFail = false
                     return
@@ -303,19 +335,21 @@ final class VideoPreloader {
                     cachedAssets.removeValue(forKey: oldest)
                 }
             }
-            // Pre-buffer the next 3 upcoming videos as ready-to-play AVPlayerItems
-            if idx < 3, preloadedItems[key] == nil {
+            // Pre-buffer only the next 2 upcoming videos to avoid exhausting hardware decoders
+            if idx < 2, preloadedItems[key] == nil {
                 let item = AVPlayerItem(asset: asset)
-                item.preferredForwardBufferDuration = 2.0
+                item.preferredForwardBufferDuration = 1.5
                 preloadedItems[key] = item
                 itemOrder.append(key)
-                if itemOrder.count > 4, let oldestItemKey = itemOrder.first {
+                if itemOrder.count > 2, let oldestItemKey = itemOrder.first {
                     itemOrder.removeFirst()
                     preloadedItems.removeValue(forKey: oldestItemKey)
                 }
             }
-            Task.detached(priority: .utility) {
-                _ = try? await asset.load(.isPlayable)
+            if idx < 2 {
+                Task.detached(priority: .utility) {
+                    _ = try? await asset.load(.isPlayable)
+                }
             }
         }
     }
@@ -387,7 +421,7 @@ final class PlayerModel: ObservableObject {
         loadCandidate(at: 0)
 
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self, let item = self.player.currentItem else { return }
@@ -518,6 +552,10 @@ final class PlayerModel: ObservableObject {
         item.preferredForwardBufferDuration = isHLS ? 2.5 : 1.5
         player.automaticallyWaitsToMinimizeStalling = isHLS
 
+        statusObservation?.invalidate()
+        statusObservation = nil
+        sizeObservation?.invalidate()
+        sizeObservation = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil

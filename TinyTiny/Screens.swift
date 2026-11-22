@@ -1644,7 +1644,8 @@ struct GridThumb: View {
                     url: gif.thumbURL,
                     fallbackURLs: gif.posterFallbackURLs,
                     fill: true,
-                    showSpinnerOnLoad: false
+                    showSpinnerOnLoad: false,
+                    maxPixelSize: 420
                 )
             )
             .clipped()
@@ -3289,6 +3290,31 @@ struct CreatorProfileGridView: View {
     @EnvironmentObject private var store: UserStore
     @ObservedObject private var offline = OfflineManager.shared
     @StateObject private var model: FeedModel
+    @State private var tagFilterText = ""
+    @State private var activeRemoteFilter = ""
+
+    private var isRule34: Bool {
+        if case .rule34 = source { return true }
+        return false
+    }
+
+    private var displayedItems: [Gif] {
+        let q = tagFilterText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return model.items }
+        let terms = q.split(separator: " ").map(String.init)
+        return model.items.filter { gif in
+            let hay = ((gif.title ?? "") + " " + (gif.author ?? "")).lowercased()
+            return terms.allSatisfy { hay.contains($0) }
+        }
+    }
+
+    private func applyRule34TagSearch() {
+        guard case .rule34(let base) = source else { return }
+        let clean = tagFilterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        activeRemoteFilter = clean
+        let combined = clean.isEmpty ? base : (base.isEmpty ? clean : "\(base) \(clean)")
+        model.switchSource(.rule34(combined))
+    }
 
     init(
         source: FeedSource,
@@ -3377,7 +3403,50 @@ struct CreatorProfileGridView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 10)
 
-                if model.items.isEmpty && model.isLoading {
+                if isRule34 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.65))
+                        TextField("Filter tags (e.g. solo, animated)...", text: $tagFilterText)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.search)
+                            .onSubmit { applyRule34TagSearch() }
+                        if !tagFilterText.isEmpty || !activeRemoteFilter.isEmpty {
+                            Button {
+                                tagFilterText = ""
+                                if !activeRemoteFilter.isEmpty {
+                                    activeRemoteFilter = ""
+                                    model.switchSource(source)
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                        }
+                        if !tagFilterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Button("Search") {
+                                applyRule34TagSearch()
+                            }
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .liquidGlassCapsule(tinted: store.data.settings.tintedGlass, active: true)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .liquidGlassCard(cornerRadius: 14, tinted: store.data.settings.tintedGlass)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+                }
+
+                if displayedItems.isEmpty && model.isLoading {
                     Spacer()
                     ProgressView()
                         .tint(Theme.accent)
@@ -3387,7 +3456,7 @@ struct CreatorProfileGridView: View {
                         .foregroundStyle(.white.opacity(0.75))
                         .padding(.top, 10)
                     Spacer()
-                } else if model.items.isEmpty {
+                } else if displayedItems.isEmpty {
                     Spacer()
                     VStack(spacing: 12) {
                         Image(systemName: "film.stack")
@@ -3414,10 +3483,10 @@ struct CreatorProfileGridView: View {
                             columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3),
                             spacing: 2
                         ) {
-                            ForEach(model.items) { gif in
+                            ForEach(displayedItems) { gif in
                                 Button {
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    onSelectPost(gif, model.items, model.currentCursor, model.canLoadMore)
+                                    onSelectPost(gif, displayedItems, model.currentCursor, model.canLoadMore)
                                 } label: {
                                     GridThumb(gif: gif, isOfflineBadge: offline.isDownloaded(gif))
                                 }
