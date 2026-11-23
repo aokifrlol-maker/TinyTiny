@@ -521,29 +521,29 @@ fun GoonedMainShell() {
                 // Sub-channel switcher pills for X, IG, OF, and Long Videos (matches iOS)
                 val subChannels: List<Triple<String, Boolean, () -> Unit>> = when (activeChannel) {
                     HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES -> listOf(
-                        Triple("For You", activeChannel == HomeChannel.X_FOR_YOU) { selectXOrLogin(FeedSource.XForYou) },
-                        Triple("Following", activeChannel == HomeChannel.X_FOLLOWING) { selectXOrLogin(FeedSource.XFollowing) },
-                        Triple("Bookmarks", activeChannel == HomeChannel.X_BOOKMARKS) { selectXOrLogin(FeedSource.XBookmarks) },
-                        Triple("Likes", activeChannel == HomeChannel.X_LIKES) { selectXOrLogin(FeedSource.XLikes) }
+                        Triple("For You", activeChannel == HomeChannel.X_FOR_YOU, { selectXOrLogin(FeedSource.XForYou) }),
+                        Triple("Following", activeChannel == HomeChannel.X_FOLLOWING, { selectXOrLogin(FeedSource.XFollowing) }),
+                        Triple("Bookmarks", activeChannel == HomeChannel.X_BOOKMARKS, { selectXOrLogin(FeedSource.XBookmarks) }),
+                        Triple("Likes", activeChannel == HomeChannel.X_LIKES, { selectXOrLogin(FeedSource.XLikes) })
                     )
                     HomeChannel.IG_REELS, HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED -> listOf(
-                        Triple("Reels", activeChannel == HomeChannel.IG_REELS) { selectIGOrLogin(FeedSource.IGReels) },
-                        Triple("Following", activeChannel == HomeChannel.IG_FOLLOWING) { selectIGOrLogin(FeedSource.IGFollowing) },
-                        Triple("Saved", activeChannel == HomeChannel.IG_SAVED) { selectIGOrLogin(FeedSource.IGSaved) }
+                        Triple("Reels", activeChannel == HomeChannel.IG_REELS, { selectIGOrLogin(FeedSource.IGReels) }),
+                        Triple("Following", activeChannel == HomeChannel.IG_FOLLOWING, { selectIGOrLogin(FeedSource.IGFollowing) }),
+                        Triple("Saved", activeChannel == HomeChannel.IG_SAVED, { selectIGOrLogin(FeedSource.IGSaved) })
                     )
                     HomeChannel.OF_FOR_YOU, HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS -> listOf(
-                        Triple("For You", activeChannel == HomeChannel.OF_FOR_YOU) { selectFeed(FeedSource.OFForYou) },
-                        Triple("Trending", activeChannel == HomeChannel.OF_TRENDING) { selectFeed(FeedSource.OFTrending) },
-                        Triple("Latest", activeChannel == HomeChannel.OF_LATEST) { selectFeed(FeedSource.OFLatest) },
-                        Triple("DMs", activeChannel == HomeChannel.OF_DMS) { selectFeed(FeedSource.OFDMs) }
+                        Triple("For You", activeChannel == HomeChannel.OF_FOR_YOU, { selectFeed(FeedSource.OFForYou) }),
+                        Triple("Trending", activeChannel == HomeChannel.OF_TRENDING, { selectFeed(FeedSource.OFTrending) }),
+                        Triple("Latest", activeChannel == HomeChannel.OF_LATEST, { selectFeed(FeedSource.OFLatest) }),
+                        Triple("DMs", activeChannel == HomeChannel.OF_DMS, { selectFeed(FeedSource.OFDMs) })
                     )
                     HomeChannel.LONG_ALL -> listOf(
-                        Triple("All Sites", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.ALL)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.ALL)) },
-                        Triple("Eporner", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.EPORNER)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.EPORNER)) },
-                        Triple("XVideos", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XVIDEOS)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XVIDEOS)) },
-                        Triple("Pornhub", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.PORNHUB)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.PORNHUB)) },
-                        Triple("xHamster", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XHAMSTER)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XHAMSTER)) },
-                        Triple("SpankBang", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.SPANKBANG)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.SPANKBANG)) }
+                        Triple("All Sites", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.ALL), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.ALL)) }),
+                        Triple("Eporner", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.EPORNER), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.EPORNER)) }),
+                        Triple("XVideos", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XVIDEOS), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XVIDEOS)) }),
+                        Triple("Pornhub", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.PORNHUB), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.PORNHUB)) }),
+                        Triple("xHamster", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XHAMSTER), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XHAMSTER)) }),
+                        Triple("SpankBang", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.SPANKBANG), { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.SPANKBANG)) })
                     )
                     else -> emptyList()
                 }
