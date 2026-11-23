@@ -394,6 +394,11 @@ final class PlayerModel: ObservableObject {
     @Published var detectedAspect: Double? = nil
     @Published var isReady: Bool = false
     @Published var allFailed: Bool = false
+    @Published var scrubPreviewImage: UIImage? = nil
+
+    private var previewGenerator: AVAssetImageGenerator?
+    private var lastPreviewAssetURL: URL?
+    private var lastPreviewRequestAt: Date = .distantPast
 
     private var looper: AVPlayerLooper?
     private var endObserver: NSObjectProtocol?
@@ -677,6 +682,32 @@ final class PlayerModel: ObservableObject {
         progressState.progress = clamped
         progressState.currentSeconds = dur * clamped
         progressState.durationSeconds = dur
+    }
+
+    func generateScrubPreview(atSeconds seconds: Double) {
+        let now = Date()
+        guard now.timeIntervalSince(lastPreviewRequestAt) >= 0.11 else { return }
+        lastPreviewRequestAt = now
+        guard let asset = player.currentItem?.asset else { return }
+        let urlAsset = asset as? AVURLAsset
+        if previewGenerator == nil || urlAsset?.url != lastPreviewAssetURL {
+            lastPreviewAssetURL = urlAsset?.url
+            let gen = AVAssetImageGenerator(asset: asset)
+            gen.appliesPreferredTrackTransform = true
+            gen.maximumSize = CGSize(width: 240, height: 240)
+            gen.requestedTimeToleranceBefore = CMTime(seconds: 0.35, preferredTimescale: 600)
+            gen.requestedTimeToleranceAfter = CMTime(seconds: 0.35, preferredTimescale: 600)
+            previewGenerator = gen
+        }
+        guard let gen = previewGenerator else { return }
+        let target = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+        gen.generateCGImageAsynchronously(for: target) { [weak self] cgImage, _, _ in
+            guard let cgImage else { return }
+            let uiImg = UIImage(cgImage: cgImage)
+            Task { @MainActor [weak self] in
+                self?.scrubPreviewImage = uiImg
+            }
+        }
     }
 
     func teardown() {
@@ -1189,6 +1220,10 @@ struct GoonedReelCell: View {
     @State private var speedLocked2x = false
     @State private var showMoreSheet = false
     @State private var isScrubbing = false
+    @State private var scrubStartSeconds: Double = 0
+    @State private var scrubTargetSeconds: Double = 0
+    @State private var scrubDuration: Double = 0
+    @State private var scrubWasPlaying = false
     @State private var localFitOverride: Bool? = nil
     @State private var albumItems: [AlbumMediaItem] = []
     @State private var albumIndex: Int = 0
@@ -1343,7 +1378,61 @@ struct GoonedReelCell: View {
                     .transition(.opacity)
                 }
 
-                if isHolding {
+                if isScrubbing && !isShowingImage {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color.black.opacity(0.65))
+                                if let preview = player.scrubPreviewImage {
+                                    Image(uiImage: preview)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 112, height: 156)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                } else if let poster = gif.posterURL {
+                                    RemoteImageView(url: poster, fallbackURLs: gif.posterFallbackURLs, fill: true, showSpinnerOnLoad: false, maxPixelSize: 240)
+                                        .frame(width: 112, height: 156)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                } else {
+                                    Image(systemName: "film")
+                                        .font(.system(size: 28))
+                                        .foregroundStyle(.white.opacity(0.6))
+                                }
+                            }
+                            .frame(width: 112, height: 156)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                            )
+
+                            let delta = Int((scrubTargetSeconds - scrubStartSeconds).rounded())
+                            let deltaStr = delta == 0 ? "" : (delta > 0 ? "  +\(delta)s" : "  \(delta)s")
+                            Text("\(formatTime(scrubTargetSeconds)) / \(formatTime(scrubDuration))\(deltaStr)")
+                                .font(.system(size: 12.5, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .liquidGlassCapsule(tinted: tinted)
+                        }
+                        .padding(10)
+                        .liquidGlassCard(cornerRadius: 18, tinted: tinted)
+
+                        GeometryReader { barGeo in
+                            let ratio = scrubDuration > 0 ? min(max(scrubTargetSeconds / scrubDuration, 0), 1) : 0
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.white.opacity(0.28)).frame(height: 6)
+                                Capsule().fill(Theme.accentBright).frame(width: max(6, barGeo.size.width * ratio), height: 6)
+                            }
+                        }
+                        .frame(height: 6)
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 96)
+                    }
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                } else if isHolding {
                     holdDetailsHUD
                         .allowsHitTesting(false)
                         .transition(.opacity)
@@ -2052,6 +2141,35 @@ struct GoonedReelCell: View {
                     player.setFastForward(false)
                 }
             },
+            onScrubStart: !isShowingImage ? {
+                isHolding = false
+                player.setFastForward(false)
+                let dur = max(player.durationSeconds, player.progressState.durationSeconds, 1)
+                scrubDuration = dur
+                scrubStartSeconds = player.progressState.currentSeconds
+                scrubTargetSeconds = scrubStartSeconds
+                scrubWasPlaying = !userPaused
+                player.pause()
+                player.generateScrubPreview(atSeconds: scrubStartSeconds)
+                withAnimation(.easeOut(duration: 0.14)) { isScrubbing = true }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } : nil,
+            onScrubDrag: !isShowingImage ? { dx, width in
+                let span = min(scrubDuration, 90.0)
+                let delta = Double(dx / max(width, 1)) * span
+                scrubTargetSeconds = min(max(scrubStartSeconds + delta, 0), scrubDuration)
+                player.generateScrubPreview(atSeconds: scrubTargetSeconds)
+            } : nil,
+            onScrubEnd: !isShowingImage ? {
+                let ratio = scrubDuration > 0 ? (scrubTargetSeconds / scrubDuration) : 0
+                if scrubWasPlaying {
+                    userPaused = false
+                    player.play()
+                }
+                player.seek(toProgress: ratio)
+                player.scrubPreviewImage = nil
+                withAnimation(.easeOut(duration: 0.15)) { isScrubbing = false }
+            } : nil,
             onSwipeLeft: albumItems.count > 1 ? {
                 if albumIndex + 1 < albumItems.count {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -2577,6 +2695,9 @@ private struct ReelGestureOverlay: UIViewRepresentable {
     let onHoldStart: () -> Void
     let onPullDown2xLock: () -> Void
     let onHoldEnd: () -> Void
+    var onScrubStart: (() -> Void)? = nil
+    var onScrubDrag: ((_ dx: CGFloat, _ width: CGFloat) -> Void)? = nil
+    var onScrubEnd: (() -> Void)? = nil
     var onSwipeLeft: (() -> Void)? = nil
     var onSwipeRight: (() -> Void)? = nil
 
@@ -2636,9 +2757,11 @@ private struct ReelGestureOverlay: UIViewRepresentable {
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var parent: ReelGestureOverlay
         weak var longPress: UILongPressGestureRecognizer?
+        private var holdStartX: CGFloat = 0
         private var holdStartY: CGFloat = 0
         private var isCurrentlyHolding = false
         private var didLockDuringHold = false
+        private var didStartScrub = false
 
         init(_ parent: ReelGestureOverlay) {
             self.parent = parent
@@ -2666,20 +2789,36 @@ private struct ReelGestureOverlay: UIViewRepresentable {
             guard let view = gesture.view else { return }
             switch gesture.state {
             case .began:
+                holdStartX = gesture.location(in: view).x
                 holdStartY = gesture.location(in: view).y
                 isCurrentlyHolding = true
                 didLockDuringHold = false
+                didStartScrub = false
                 parent.onHoldStart()
             case .changed:
-                if isCurrentlyHolding && !didLockDuringHold {
-                    let dy = gesture.location(in: view).y - holdStartY
-                    if dy > 28 {
+                guard isCurrentlyHolding else { return }
+                let loc = gesture.location(in: view)
+                let dx = loc.x - holdStartX
+                let dy = loc.y - holdStartY
+                if didStartScrub {
+                    parent.onScrubDrag?(dx, max(view.bounds.width, 1))
+                } else if !didLockDuringHold {
+                    if abs(dx) > 14 && abs(dx) > abs(dy) && parent.onScrubStart != nil {
+                        didStartScrub = true
+                        parent.onScrubStart?()
+                        parent.onScrubDrag?(dx, max(view.bounds.width, 1))
+                    } else if dy > 28 {
                         didLockDuringHold = true
                         parent.onPullDown2xLock()
                     }
                 }
             case .ended, .cancelled, .failed:
-                if isCurrentlyHolding {
+                if didStartScrub {
+                    didStartScrub = false
+                    isCurrentlyHolding = false
+                    didLockDuringHold = false
+                    parent.onScrubEnd?()
+                } else if isCurrentlyHolding {
                     isCurrentlyHolding = false
                     didLockDuringHold = false
                     parent.onHoldEnd()
