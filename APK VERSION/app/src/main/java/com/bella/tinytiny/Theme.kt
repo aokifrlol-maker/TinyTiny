@@ -1,5 +1,11 @@
 package com.bella.tinytiny
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -116,17 +122,18 @@ fun BrandLogoX(size: Dp = 20.dp) {
 
 @Composable
 fun BrandLogoRule34(size: Dp = 20.dp) {
+    val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
-            .clip(CircleShape)
-            .background(Brush.verticalGradient(listOf(Color(0xFFABE6A3), Color(0xFF6BB866)))),
+            .clip(shape)
+            .background(Brush.verticalGradient(listOf(Color(0xFF9EE493), Color(0xFF5FA85B)))),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = "34",
             color = Color(0xFF143D14),
-            fontSize = (size.value * 0.48f).sp,
+            fontSize = (size.value * 0.46f).sp,
             fontWeight = FontWeight.Black
         )
     }
@@ -134,10 +141,11 @@ fun BrandLogoRule34(size: Dp = 20.dp) {
 
 @Composable
 fun BrandLogoInstagram(size: Dp = 20.dp) {
+    val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
-            .clip(RoundedCornerShape(6.dp))
+            .clip(shape)
             .background(
                 Brush.linearGradient(
                     listOf(Color(0xFFF58529), Color(0xFFDD2A7B), Color(0xFF8134AF))
@@ -156,17 +164,18 @@ fun BrandLogoInstagram(size: Dp = 20.dp) {
 
 @Composable
 fun BrandLogoErome(size: Dp = 20.dp) {
+    val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
-            .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(Color(0xFFFF6E9E), Color(0xFFEB296B)))),
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(Color(0xFFD9387A), Color(0xFF7D1643)))),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = "E",
             color = Color.White,
-            fontSize = (size.value * 0.56f).sp,
+            fontSize = (size.value * 0.54f).sp,
             fontWeight = FontWeight.Black
         )
     }
@@ -174,18 +183,19 @@ fun BrandLogoErome(size: Dp = 20.dp) {
 
 @Composable
 fun BrandLogoLongVideos(size: Dp = 20.dp) {
+    val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
-            .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(Color(0xFFFF8F24), Color(0xFFE63D70)))),
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(Color(0xFFD95B3B), Color(0xFF8A2B36)))),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = Icons.Default.PlayArrow,
             contentDescription = "Long Videos",
             tint = Color.White,
-            modifier = Modifier.size(size * 0.66f)
+            modifier = Modifier.size(size * 0.64f)
         )
     }
 }
@@ -206,6 +216,21 @@ fun BrandLogoOnlyFans(size: Dp = 20.dp) {
             fontWeight = FontWeight.Black
         )
     }
+}
+
+@Composable
+fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alpha = transition.animateFloat(
+        initialValue = 0.08f,
+        targetValue = 0.22f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "shimmerAlpha"
+    )
+    Box(modifier = modifier.background(Color.White.copy(alpha = alpha.value)))
 }
 
 @Serializable

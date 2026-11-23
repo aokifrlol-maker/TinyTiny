@@ -33,6 +33,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -99,6 +102,8 @@ object LicenseManager {
     val errorMessage = MutableStateFlow<String?>(null)
     val remoteConfig = MutableStateFlow<RemoteAppConfig?>(null)
     val dismissedAnnouncementId = MutableStateFlow("")
+    @Volatile private var lastRemoteBackupJson: JsonObject? = null
+    @Volatile private var lastSyncError: String? = null
 
     val deviceId: String
 
@@ -291,7 +296,30 @@ object LicenseManager {
     suspend fun verifyPasscodeRecovery(rawKey: String): Boolean {
         val entered = rawKey.trim().uppercase()
         if (entered.isEmpty()) return false
+        val active = status.value.licenseKey.trim().uppercase()
+        if (active.isNotEmpty() && entered != active) return false
         return activate(entered)
+    }
+
+    suspend fun uploadTemporaryEncryptedBlob(cipherData: ByteArray, filename: String): String? = withContext(Dispatchers.IO) {
+        val s = status.value
+        if (!isValidAccess || s.licenseKey.isEmpty()) return@withContext null
+        try {
+            val req = Request.Builder()
+                .url("$normalizedBaseURL/v1/blob")
+                .header("X-License-Key", s.licenseKey)
+                .header("X-Device-Id", deviceId)
+                .header("X-File-Name", filename)
+                .post(cipherData.toRequestBody("application/octet-stream".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.code != 200) return@withContext null
+                val raw = resp.body?.string() ?: return@withContext null
+                JSONObject(raw).optString("url").takeIf { it.isNotEmpty() }
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     // HKDF-SHA256 matching iOS CryptoKit HKDF<SHA256> + v1 legacy fallback
@@ -312,6 +340,19 @@ object LicenseManager {
             .digest(("tinytiny.backup.v1." + licenseKey.uppercase()).toByteArray(Charsets.UTF_8))
     }
 
+    private fun mergeJsonObjects(base: JsonObject, overlay: JsonObject): JsonObject {
+        val merged = base.toMutableMap()
+        for ((k, v) in overlay) {
+            val prev = merged[k]
+            merged[k] = if (prev is JsonObject && v is JsonObject) {
+                mergeJsonObjects(prev, v)
+            } else {
+                v
+            }
+        }
+        return JsonObject(merged)
+    }
+
     suspend fun syncEncryptedBackupNow() = withContext(Dispatchers.IO) {
         val s = status.value
         if (!isValidAccess || s.licenseKey.isEmpty()) return@withContext
@@ -322,7 +363,9 @@ object LicenseManager {
                 seedrMasterKey = CryptoBox.exportSeedrMasterKeyString(),
                 updatedAt = System.currentTimeMillis() / 1000.0
             )
-            val rawJson = CryptoBox.json.encodeToString(snapshot).toByteArray(Charsets.UTF_8)
+            val localObj = CryptoBox.json.encodeToJsonElement(EncryptedProfileBackup.serializer(), snapshot).jsonObject
+            val finalObj = lastRemoteBackupJson?.let { mergeJsonObjects(it, localObj) } ?: localObj
+            val rawJson = CryptoBox.json.encodeToString(JsonObject.serializer(), finalObj).toByteArray(Charsets.UTF_8)
             val sealed = CryptoBox.seal(rawJson, backupKeyV2(s.licenseKey))
             val bodyJson = JSONObject().apply {
                 put("key", s.licenseKey)
@@ -333,13 +376,25 @@ object LicenseManager {
                 .url("$normalizedBaseURL/v1/backup")
                 .put(bodyJson.toRequestBody("application/json".toMediaType()))
                 .build()
-            client.newCall(req).execute().close()
-        } catch (_: Throwable) {}
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    lastSyncError = "Upload failed (HTTP ${resp.code})"
+                } else {
+                    lastRemoteBackupJson = finalObj
+                }
+            }
+        } catch (e: Throwable) {
+            lastSyncError = "Upload error: ${e.localizedMessage ?: e.javaClass.simpleName}"
+        }
     }
 
     suspend fun restoreEncryptedBackupIfPresent(): Boolean = withContext(Dispatchers.IO) {
         val s = status.value
-        if (s.licenseKey.isEmpty()) return@withContext false
+        if (s.licenseKey.isEmpty()) {
+            lastSyncError = "No active license key."
+            return@withContext false
+        }
+        lastSyncError = null
         try {
             val bodyJson = JSONObject().apply {
                 put("key", s.licenseKey)
@@ -351,23 +406,40 @@ object LicenseManager {
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (resp.code == 404) return@withContext true
-                if (resp.code != 200) return@withContext false
-                val b64 = JSONObject(resp.body?.string() ?: return@withContext false).optString("blob")
-                if (b64.isEmpty()) return@withContext false
+                if (resp.code != 200) {
+                    lastSyncError = "Server returned HTTP ${resp.code}"
+                    return@withContext false
+                }
+                val b64 = JSONObject(resp.body?.string() ?: run {
+                    lastSyncError = "Empty server response"
+                    return@withContext false
+                }).optString("blob")
+                if (b64.isEmpty()) return@withContext true
                 val cipher = Base64.decode(b64, Base64.DEFAULT)
                 val plain = try {
                     CryptoBox.open(cipher, backupKeyV2(s.licenseKey))
                 } catch (_: Throwable) {
                     CryptoBox.open(cipher, legacyBackupKeyV1(s.licenseKey))
                 }
-                val backup = CryptoBox.json.decodeFromString<EncryptedProfileBackup>(String(plain, Charsets.UTF_8))
+                val plainText = String(plain, Charsets.UTF_8)
+                lastRemoteBackupJson = try {
+                    CryptoBox.json.parseToJsonElement(plainText).jsonObject
+                } catch (_: Throwable) {
+                    null
+                }
+                val backup = CryptoBox.json.decodeFromString<EncryptedProfileBackup>(plainText)
                 val local = UserStore.shared.data.value
                 val isTrulyEmpty = local.liked.isEmpty() && local.downloaded.isEmpty() &&
                     !local.xSession.isConnected && !local.igSession.isConnected &&
                     local.followedUsers.isEmpty() && local.followedXUsers.isEmpty() &&
                     local.followedIGUsers.isEmpty() && local.followedSubreddits.isEmpty() &&
                     local.followedOFCreators.isEmpty()
-                if (isTrulyEmpty && backup.userData.liked.isNotEmpty()) {
+                val remoteHasData = backup.userData.liked.isNotEmpty() || backup.userData.downloaded.isNotEmpty() ||
+                    backup.userData.xSession.isConnected || backup.userData.igSession.isConnected ||
+                    backup.userData.followedUsers.isNotEmpty() || backup.userData.followedXUsers.isNotEmpty() ||
+                    backup.userData.followedIGUsers.isNotEmpty() || backup.userData.followedSubreddits.isNotEmpty() ||
+                    backup.userData.followedOFCreators.isNotEmpty()
+                if (isTrulyEmpty && remoteHasData) {
                     UserStore.shared.replaceWithBackup(backup.userData)
                 } else {
                     val mergedLikes = (local.liked + backup.userData.liked).distinctBy { it.id }
@@ -388,6 +460,7 @@ object LicenseManager {
                             followedOFCreators = mergedOF,
                             xSession = if (!local.xSession.isConnected && backup.userData.xSession.isConnected) backup.userData.xSession else local.xSession,
                             igSession = if (!local.igSession.isConnected && backup.userData.igSession.isConnected) backup.userData.igSession else local.igSession,
+                            r34Credentials = if (!local.r34Credentials.isConnected && backup.userData.r34Credentials.isConnected) backup.userData.r34Credentials else local.r34Credentials,
                             seenIDs = (UserStore.shared.exportSnapshotForBackup().seenIDs + backup.userData.seenIDs).distinct().takeLast(12_000)
                         )
                     )
@@ -397,7 +470,8 @@ object LicenseManager {
                 injectRestoredSocialCookies()
                 true
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            lastSyncError = e.localizedMessage ?: e.javaClass.simpleName
             false
         }
     }
@@ -427,7 +501,10 @@ object LicenseManager {
 
     suspend fun syncBidirectionalBackup(): String {
         val ok = restoreEncryptedBackupIfPresent()
-        if (!ok) return "Sync paused: couldn't restore cloud backup (kept cloud data safe)."
+        if (!ok) {
+            val reason = lastSyncError?.let { " ($it)" } ?: ""
+            return "Sync paused: couldn't restore cloud backup$reason."
+        }
         val d = UserStore.shared.data.value
         val hasData = d.liked.isNotEmpty() || d.downloaded.isNotEmpty() || d.xSession.isConnected ||
             d.igSession.isConnected || d.followedUsers.isNotEmpty() || d.followedXUsers.isNotEmpty() ||

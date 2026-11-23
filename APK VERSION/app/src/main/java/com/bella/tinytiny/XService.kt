@@ -171,6 +171,7 @@ object XTweetParser {
 
 object XWebEngine {
     private var webView: WebView? = null
+    private var hostContainer: ViewGroup? = null
     private val routeBuffers = ConcurrentHashMap<String, MutableList<Gif>>()
     private val routeCursors = ConcurrentHashMap<String, String>()
     @Volatile private var activeRouteKey: String = "x_foryou"
@@ -181,18 +182,36 @@ object XWebEngine {
         (function(){
           if(window.__ttXHooked) return;
           window.__ttXHooked = true;
+          function isXApi(u){
+            return u && (u.includes('/graphql/') || u.includes('/2/timeline') || u.includes('SearchTimeline') || u.includes('UserTweets') || u.includes('Bookmarks') || u.includes('HomeTimeline') || u.includes('Likes'));
+          }
           const origFetch = window.fetch;
           window.fetch = async function(){
             const resp = await origFetch.apply(this, arguments);
             try {
               const url = (arguments[0] && arguments[0].url) ? arguments[0].url : String(arguments[0] || '');
-              if(url.includes('/graphql/') || url.includes('/2/timeline') || url.includes('SearchTimeline') || url.includes('UserTweets') || url.includes('Bookmarks') || url.includes('HomeTimeline')) {
+              if(isXApi(url)) {
                 if(resp.status === 429) { window.TTXBridge.onRateLimit(); }
                 const clone = resp.clone();
                 clone.text().then(t => { if(t && t.length > 100) window.TTXBridge.onPayload(url, t); });
               }
             } catch(e){}
             return resp;
+          };
+          const origOpen = XMLHttpRequest.prototype.open;
+          const origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(m, u){ this.__ttUrl = String(u || ''); return origOpen.apply(this, arguments); };
+          XMLHttpRequest.prototype.send = function(){
+            this.addEventListener('load', function(){
+              try {
+                if(isXApi(this.__ttUrl)) {
+                  if(this.status === 429) { window.TTXBridge.onRateLimit(); }
+                  const t = typeof this.responseText === 'string' ? this.responseText : '';
+                  if(t && t.length > 100) window.TTXBridge.onPayload(this.__ttUrl, t);
+                }
+              } catch(e){}
+            });
+            return origSend.apply(this, arguments);
           };
         })();
     """
@@ -219,21 +238,69 @@ object XWebEngine {
         }
     }
 
+    fun attachHost(container: ViewGroup) {
+        hostContainer = container
+        val wv = webView ?: return
+        if (wv.parent !== container) {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            container.addView(wv, ViewGroup.LayoutParams(390, 844))
+        }
+    }
+
+    fun resetSession() {
+        routeBuffers.clear()
+        routeCursors.clear()
+        webView?.let { wv ->
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.destroy()
+        }
+        webView = null
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun ensureWebView(): WebView = withContext(Dispatchers.Main) {
-        webView?.let { return@withContext it }
-        val wv = WebView(TinyTinyApplication.instance).apply {
+        webView?.let { existing ->
+            hostContainer?.let { host ->
+                if (existing.parent !== host) {
+                    (existing.parent as? ViewGroup)?.removeView(existing)
+                    host.addView(existing, ViewGroup.LayoutParams(390, 844))
+                }
+            }
+            return@withContext existing
+        }
+        val ctx = hostContainer?.context ?: TinyTinyApplication.instance
+        val chromeUa = try {
+            android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+        } catch (_: Throwable) {
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+        }
+        val wv = WebView(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(390, 844)
+            setBackgroundColor(android.graphics.Color.BLACK)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.userAgentString = Config.userAgent
+            settings.databaseEnabled = true
+            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = true
+            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            settings.userAgentString = chromeUa
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(Bridge(), "TTXBridge")
+            webChromeClient = android.webkit.WebChromeClient()
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    view?.evaluateJavascript(HOOK_JS, null)
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     view?.evaluateJavascript(HOOK_JS, null)
                 }
             }
         }
+        hostContainer?.addView(wv, ViewGroup.LayoutParams(390, 844))
         webView = wv
         wv
     }
@@ -249,13 +316,29 @@ object XWebEngine {
         activeRouteKey = routeKey
         val wv = ensureWebView()
         withContext(Dispatchers.Main) {
-            if (wv.url != targetUrl && after == null) {
+            wv.evaluateJavascript(HOOK_JS, null)
+            val currentUrl = wv.url ?: ""
+            val isSameBase = currentUrl.startsWith(targetUrl)
+            if (!isSameBase && after == null) {
                 wv.loadUrl(targetUrl)
+            } else if (routeKey == "x_foryou" || routeKey == "x_following") {
+                val tabLabel = if (routeKey == "x_following") "Following" else "For you"
+                wv.evaluateJavascript(
+                    """
+                    (function(){
+                      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+                      const target = tabs.find(t => (t.innerText || '').trim().toLowerCase() === '${tabLabel.lowercase()}');
+                      if(target && target.getAttribute('aria-selected') !== 'true') { target.click(); }
+                      else { window.scrollBy(0, window.innerHeight * 2.2); }
+                    })();
+                    """.trimIndent(),
+                    null
+                )
             } else {
                 wv.evaluateJavascript("window.scrollBy(0, window.innerHeight * 2.2);", null)
             }
         }
-        for (i in 0 until 20) {
+        for (i in 0 until 24) {
             val buf = routeBuffers[routeKey]
             if (buf != null && buf.isNotEmpty()) break
             delay(250)
@@ -275,8 +358,11 @@ object XAPI {
     suspend fun bookmarks(after: String? = null): GoonedFeedResponse =
         XWebEngine.fetchRoute("x_bookmarks", "https://x.com/i/bookmarks", after)
 
-    suspend fun likes(after: String? = null): GoonedFeedResponse =
-        XWebEngine.fetchRoute("x_likes", "https://x.com/home", after)
+    suspend fun likes(after: String? = null): GoonedFeedResponse {
+        val uname = UserStore.shared.data.value.xSession.username.removePrefix("@").trim()
+        val url = if (uname.isNotEmpty() && uname != "𝕏 Account") "https://x.com/$uname/likes" else "https://x.com/home"
+        return XWebEngine.fetchRoute("x_likes", url, after)
+    }
 
     suspend fun search(query: String, after: String? = null): GoonedFeedResponse {
         val enc = URLEncoder.encode(query.trim(), "UTF-8")
@@ -295,11 +381,50 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
     val store = UserStore.shared
     val userData by store.data.collectAsState()
     var detected by remember { mutableStateOf(false) }
+    var loginWebView by remember { mutableStateOf<WebView?>(null) }
+
+    fun checkCookiesAndComplete(wv: WebView?) {
+        if (detected) return
+        val cookies = CookieManager.getInstance().getCookie("https://x.com") ?: ""
+        val map = cookies.split(";").mapNotNull {
+            val p = it.trim().split("=", limit = 2)
+            if (p.size == 2) p[0] to p[1] else null
+        }.toMap()
+        val auth = map["auth_token"] ?: ""
+        val ct0 = map["ct0"] ?: ""
+        if (auth.isNotEmpty() && ct0.isNotEmpty()) {
+            detected = true
+            val finishWithHandle: (String) -> Unit = { handle ->
+                val clean = handle.trim().removePrefix("@").ifEmpty { "𝕏 Account" }
+                store.updateXSession(XAccountSession(username = clean, authToken = auth, ct0 = ct0, isConnected = true))
+                onConnected()
+            }
+            if (wv != null) {
+                wv.evaluateJavascript(
+                    "(function(){ const a = document.querySelector('a[data-testid=\"AppTabBar_Profile_Link\"]'); return a ? (a.getAttribute('href') || '').replace(/^\\//,'') : ''; })()"
+                ) { res ->
+                    val parsed = res?.trim('"')?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+                    finishWithHandle(parsed)
+                }
+            } else {
+                finishWithHandle("")
+            }
+        }
+    }
+
+    LaunchedEffect(loginWebView) {
+        while (!detected) {
+            kotlinx.coroutines.delay(650)
+            checkCookiesAndComplete(loginWebView)
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = userData.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(14.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -322,28 +447,31 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            loginWebView = this
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            val chromeUa = try {
+                                android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                            } catch (_: Throwable) {
+                                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                            }
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.loadWithOverviewMode = true
+                            settings.useWideViewPort = true
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            settings.userAgentString = chromeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webChromeClient = android.webkit.WebChromeClient()
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                 override fun onPageFinished(view: WebView?, url: String?) {
-                                    val cookies = CookieManager.getInstance().getCookie("https://x.com") ?: ""
-                                    val map = cookies.split(";").mapNotNull {
-                                        val p = it.trim().split("=", limit = 2)
-                                        if (p.size == 2) p[0] to p[1] else null
-                                    }.toMap()
-                                    val auth = map["auth_token"] ?: ""
-                                    val ct0 = map["ct0"] ?: ""
-                                    if (auth.isNotEmpty() && ct0.isNotEmpty() && !detected) {
-                                        detected = true
-                                        store.updateXSession(XAccountSession(username = "𝕏 Account", authToken = auth, ct0 = ct0, isConnected = true))
-                                        onConnected()
-                                    }
+                                    checkCookiesAndComplete(view)
                                 }
                             }
-                            loadUrl("https://x.com/i/flow/login")
+                            loadUrl("https://x.com/login")
                         }
                     },
                     modifier = Modifier.fillMaxSize()

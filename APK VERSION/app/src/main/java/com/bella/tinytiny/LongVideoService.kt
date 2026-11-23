@@ -173,6 +173,43 @@ object LongVideoAPI {
     }
 
     private suspend fun fetchPornhub(query: String, sort: String, page: Int): List<Gif> {
+        // Tier 1: Pornhub Webmasters JSON API (matches iOS)
+        try {
+            val enc = URLEncoder.encode(query.ifEmpty { "amateur" }, "UTF-8")
+            val ordering = if (sort == "new") "newest" else "mostviewed"
+            val apiUrl = "https://www.pornhub.com/webmasters/search?search=$enc&ordering=$ordering&page=$page&thumbsize=large"
+            val raw = fetchString(apiUrl, desktop = true)
+            if (!raw.isNullOrEmpty() && raw.trimStart().startsWith("{")) {
+                val arr = JSONObject(raw).optJSONArray("videos")
+                if (arr != null && arr.length() > 0) {
+                    val out = mutableListOf<Gif>()
+                    for (i in 0 until minOf(25, arr.length())) {
+                        val v = arr.optJSONObject(i) ?: continue
+                        val vkey = v.optString("video_id").takeIf { it.isNotEmpty() } ?: continue
+                        val title = decodeHtml(v.optString("title").ifEmpty { "Pornhub Video" })
+                        val thumb = v.optString("thumb").ifEmpty { v.optString("default_thumb") }.takeIf { it.isNotEmpty() }
+                        val pageUrl = v.optString("url").ifEmpty { "https://www.pornhub.com/view_video.php?viewkey=$vkey" }
+                        out.add(
+                            Gif(
+                                id = "lv_ph_$vkey",
+                                title = title,
+                                author = "Pornhub",
+                                subreddit = "Pornhub",
+                                width = 1280,
+                                height = 720,
+                                mediaType = "video",
+                                posterUrl = thumb,
+                                thumbnailUrl = thumb,
+                                sourceUrl = pageUrl,
+                                permalink = pageUrl
+                            )
+                        )
+                    }
+                    if (out.isNotEmpty()) return out
+                }
+            }
+        } catch (_: Throwable) {}
+
         val url = if (query.isEmpty()) {
             val o = if (sort == "new") "cm" else "mv"
             "https://www.pornhub.com/video?o=$o&page=$page"
@@ -382,24 +419,104 @@ object LongVideoAPI {
         return listOfNotNull(high, low, hls).distinct()
     }
 
+    private fun rankVideoURLs(urls: Sequence<String>): List<String> {
+        fun qualityScore(u: String): Int {
+            val l = u.lowercase()
+            return when {
+                "1080" in l -> 5
+                "720" in l -> 4
+                "480" in l -> 3
+                "360" in l -> 2
+                "240" in l -> 1
+                ".m3u8" in l -> 4
+                else -> 3
+            }
+        }
+        return urls.map { it.replace("\\/", "/") }.distinct().sortedByDescending { qualityScore(it) }.take(4).toList()
+    }
+
+    suspend fun searchEromePreview(query: String, limit: Int = 8): List<Gif> {
+        val q = query.trim()
+        if (q.length < 2) return emptyList()
+        return fetchErome(q, "hot", 1).take(limit)
+    }
+
+    private fun epornerBase36Hash(hex: String): String {
+        val alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+        val sb = StringBuilder()
+        var i = 0
+        val limit = minOf(32, hex.length)
+        while (i < limit) {
+            val chunk = hex.substring(i, minOf(i + 8, limit))
+            var v = chunk.toLongOrNull(16) ?: 0L
+            if (v == 0L) {
+                sb.append('0')
+            } else {
+                val sub = StringBuilder()
+                while (v > 0L) {
+                    sub.append(alphabet[(v % 36L).toInt()])
+                    v /= 36L
+                }
+                sb.append(sub.reverse())
+            }
+            i += 8
+        }
+        return sb.toString()
+    }
+
     private suspend fun resolveEporner(pageUrl: String): List<String> {
+        // Tier 1: Eporner embed + Base36 XHR direct MP4 resolver (matches iOS)
+        val idMatch = Regex("""(?:video-|hd-porn/|embed/)([A-Za-z0-9]+)""").find(pageUrl)?.groupValues?.get(1)
+        if (!idMatch.isNullOrEmpty()) {
+            val embedUrl = "https://www.eporner.com/embed/$idMatch/"
+            val embedHtml = fetchString(embedUrl, desktop = true, referer = "https://www.eporner.com/")
+            if (!embedHtml.isNullOrEmpty()) {
+                val vid = Regex("""vid\s*=\s*'([^']+)'""").find(embedHtml)?.groupValues?.get(1)
+                val rawHash = Regex("""hash\s*=\s*'([^']+)'""").find(embedHtml)?.groupValues?.get(1)
+                if (!vid.isNullOrEmpty() && !rawHash.isNullOrEmpty() && rawHash.length >= 32) {
+                    val b36 = epornerBase36Hash(rawHash)
+                    val xhrUrl = "https://www.eporner.com/xhr/video/$vid?hash=$b36&domain=www.eporner.com&fallback=false&embed=true&supportedFormats=mp4"
+                    val xhrJson = fetchString(xhrUrl, desktop = true, referer = embedUrl)
+                    if (!xhrJson.isNullOrEmpty()) {
+                        try {
+                            val mp4Obj = JSONObject(xhrJson).optJSONObject("sources")?.optJSONObject("mp4")
+                            if (mp4Obj != null) {
+                                val scored = mutableListOf<Pair<Int, String>>()
+                                val keys = mp4Obj.keys()
+                                while (keys.hasNext()) {
+                                    val k = keys.next()
+                                    val src = mp4Obj.optJSONObject(k)?.optString("src")
+                                    if (!src.isNullOrEmpty()) {
+                                        val res = k.filter { it.isDigit() }.toIntOrNull() ?: 480
+                                        scored.add(res to src)
+                                    }
+                                }
+                                if (scored.isNotEmpty()) {
+                                    return scored.sortedByDescending { it.first }.map { it.second }.distinct()
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            }
+        }
         val html = fetchString(pageUrl, desktop = true, referer = "https://www.eporner.com/") ?: return emptyList()
-        return Regex("""https://[^"'\s\\]+?\.mp4[^"'\s\\]*""").findAll(html).map { it.value.replace("\\/", "/") }.distinct().take(4).toList()
+        return rankVideoURLs(Regex("""https://[^"'\s\\]+?\.mp4[^"'\s\\]*""").findAll(html).map { it.value })
     }
 
     private suspend fun resolvePornhub(pageUrl: String): List<String> {
         val html = fetchString(pageUrl, desktop = true, referer = "https://www.pornhub.com/") ?: return emptyList()
-        return Regex("""https://[^"'\s\\]+?(?:phncdn\.com)[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value.replace("\\/", "/") }.distinct().take(4).toList()
+        return rankVideoURLs(Regex("""https://[^"'\s\\]+?(?:phncdn\.com)[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value })
     }
 
     private suspend fun resolveXHamster(pageUrl: String): List<String> {
         val html = fetchString(pageUrl, desktop = true, referer = "https://xhamster.com/") ?: return emptyList()
-        return Regex("""https?://[^"'\s\\]+xhcdn\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value.replace("\\/", "/") }.distinct().take(4).toList()
+        return rankVideoURLs(Regex("""https?://[^"'\s\\]+xhcdn\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value })
     }
 
     private suspend fun resolveSpankBang(pageUrl: String): List<String> {
         val html = fetchString(pageUrl, desktop = true, referer = "https://spankbang.com/") ?: return emptyList()
-        return Regex("""https?://[^"'\s\\]+sb-cd\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value.replace("\\/", "/") }.distinct().take(4).toList()
+        return rankVideoURLs(Regex("""https?://[^"'\s\\]+sb-cd\.com[^"'\s\\]+?(?:\.mp4|\.m3u8)[^"'\s\\]*""").findAll(html).map { it.value })
     }
 
     private fun interleave(lists: List<List<Gif>>): List<Gif> {

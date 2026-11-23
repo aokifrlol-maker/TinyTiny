@@ -14,8 +14,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.VerticalPager
@@ -57,6 +55,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -102,13 +101,14 @@ fun FeedView(
         return
     }
 
-    val initialPage = remember(items, targetPostId) {
+    val initialPage = remember(src) {
         if (targetPostId != null) items.indexOfFirst { it.id == targetPostId }.coerceAtLeast(0) else 0
     }
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { items.size })
+    var lastReportedPostId by remember(src) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(targetPostId, items.size) {
-        if (targetPostId != null) {
+    LaunchedEffect(targetPostId) {
+        if (targetPostId != null && targetPostId != lastReportedPostId) {
             val idx = items.indexOfFirst { it.id == targetPostId }
             if (idx >= 0 && idx != pagerState.currentPage) {
                 pagerState.scrollToPage(idx)
@@ -116,14 +116,17 @@ fun FeedView(
         }
     }
 
-    LaunchedEffect(pagerState.currentPage, items.size) {
-        val current = items.getOrNull(pagerState.currentPage)
-        if (current != null) {
-            onCurrentPostChanged(current.id)
-            UserStore.shared.markSeen(current)
-            val key = src.swipeKey
-            UserStore.shared.recordSwipe(key.first, key.second, src.displayTitle, current.id)
-            model.onItemAppear(current)
+    LaunchedEffect(pagerState, src) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val current = items.getOrNull(page)
+            if (current != null) {
+                lastReportedPostId = current.id
+                onCurrentPostChanged(current.id)
+                UserStore.shared.markSeen(current)
+                val key = src.swipeKey
+                UserStore.shared.recordSwipe(key.first, key.second, src.displayTitle, current.id)
+                model.onItemAppear(current)
+            }
         }
     }
 
@@ -153,7 +156,13 @@ fun FeedView(
                     UserStore.shared.dislike(gif)
                     model.removeDisliked(gif)
                 },
-                onShare = { shareTarget = gif }
+                onShare = { shareTarget = gif },
+                onAutoScrollNext = {
+                    val next = pageIdx + 1
+                    if (next < items.size) {
+                        scope.launch { pagerState.animateScrollToPage(next) }
+                    }
+                }
             )
         }
     }
@@ -180,7 +189,8 @@ fun GoonedReelCell(
     onSelectRule34Tag: (String) -> Unit,
     onSelectOFCreator: (String, String) -> Unit,
     onDislike: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onAutoScrollNext: () -> Unit = {}
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -202,18 +212,35 @@ fun GoonedReelCell(
     var albumItems by remember(gif.id) { mutableStateOf(MediaMetaRegistry.albumItems(gif.id)) }
     var albumIndex by remember(gif.id) { mutableIntStateOf(0) }
     var resolvedUrls by remember(gif.id) { mutableStateOf(gif.allVideoURLs(userData.settings.hd)) }
+    var resolvingLongVideo by remember(gif.id) { mutableStateOf(false) }
+    var urlIndex by remember(gif.id, albumIndex) { mutableIntStateOf(0) }
+    var isBuffering by remember(gif.id, albumIndex) { mutableStateOf(false) }
+    var playbackFailed by remember(gif.id, albumIndex) { mutableStateOf(false) }
+    var localFitOverride by remember(gif.id) { mutableStateOf<Boolean?>(null) }
+    val effectiveFill = localFitOverride ?: (userData.settings.fillScreen || !userData.settings.videoFitScreen)
 
     LaunchedEffect(gif.id) {
         if (gif.isLongVideoPost && resolvedUrls.isEmpty()) {
+            resolvingLongVideo = true
             val urls = LongVideoAPI.resolvePlayableURLs(gif)
             if (urls.isNotEmpty()) resolvedUrls = urls
             val album = MediaMetaRegistry.albumItems(gif.id)
             if (album.isNotEmpty()) albumItems = album
+            resolvingLongVideo = false
         }
     }
 
     val currentAlbumItem = albumItems.getOrNull(albumIndex)
     val isShowingImage = currentAlbumItem?.let { !it.isVideo } ?: gif.isImage
+
+    // Auto-scroll timer for images or when playVideosToEnd is off (matches iOS)
+    LaunchedEffect(isActive, gif.id, isShowingImage, userData.settings.autoScroll, userData.settings.autoScrollDelay, userData.settings.playVideosToEnd) {
+        if (!isActive || !userData.settings.autoScroll) return@LaunchedEffect
+        if (isShowingImage || !userData.settings.playVideosToEnd) {
+            delay(maxOf(3, userData.settings.autoScrollDelay) * 1000L)
+            if (isActive && !userPaused && !isScrubbing) onAutoScrollNext()
+        }
+    }
 
     val activeDownloadGif = remember(gif.id, albumIndex, albumItems) {
         if (albumItems.size > 1 && currentAlbumItem != null) {
@@ -227,31 +254,56 @@ fun GoonedReelCell(
         } else gif
     }
 
-    val activeVideoUrl = currentAlbumItem?.takeIf { it.isVideo }?.url ?: resolvedUrls.firstOrNull()
-    val exoPlayer = remember(gif.id, activeVideoUrl) {
-        if (activeVideoUrl == null || isShowingImage) null
+    val activeVideoUrl = currentAlbumItem?.takeIf { it.isVideo }?.url ?: resolvedUrls.getOrNull(urlIndex)
+    val exoPlayer = remember(gif.id, activeVideoUrl, isActive) {
+        if (!isActive || activeVideoUrl == null || isShowingImage) null
         else {
+            playbackFailed = false
             val dsFactory = OkHttpDataSource.Factory(TinyTinyApplication.sharedHttpClient)
                 .setDefaultRequestProperties(MediaHeaders.headers(activeVideoUrl))
             ExoPlayer.Builder(ctx)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dsFactory))
                 .build().apply {
-                    repeatMode = Player.REPEAT_MODE_ONE
+                    repeatMode = if (userData.settings.autoScroll && userData.settings.playVideosToEnd) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                     setMediaItem(MediaItem.fromUri(Uri.parse(activeVideoUrl)))
                     prepare()
                 }
         }
     }
 
-    DisposableEffect(exoPlayer) {
-        onDispose { exoPlayer?.release() }
+    DisposableEffect(exoPlayer, userData.settings.autoScroll, userData.settings.playVideosToEnd) {
+        val listener = if (exoPlayer != null) {
+            object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    isBuffering = playbackState == Player.STATE_BUFFERING
+                    if (playbackState == Player.STATE_READY) playbackFailed = false
+                    if (playbackState == Player.STATE_ENDED && isActive && userData.settings.autoScroll && userData.settings.playVideosToEnd) {
+                        onAutoScrollNext()
+                    }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    isBuffering = false
+                    if (urlIndex + 1 < resolvedUrls.size) {
+                        urlIndex += 1
+                    } else {
+                        playbackFailed = true
+                    }
+                }
+            }.also { exoPlayer.addListener(it) }
+        } else null
+        onDispose {
+            if (listener != null) exoPlayer?.removeListener(listener)
+            exoPlayer?.release()
+        }
     }
 
     var currentSec by remember(gif.id) { mutableDoubleStateOf(0.0) }
     var durationSec by remember(gif.id) { mutableDoubleStateOf(gif.duration ?: 1.0) }
 
-    LaunchedEffect(exoPlayer, isActive, userPaused, isScrubbing) {
+    LaunchedEffect(exoPlayer, isActive, userPaused, isScrubbing, userData.settings.autoScroll, userData.settings.playVideosToEnd) {
         if (exoPlayer != null) {
+            exoPlayer.repeatMode = if (userData.settings.autoScroll && userData.settings.playVideosToEnd) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
             exoPlayer.volume = if (userData.settings.muted) 0f else 1f
             exoPlayer.playWhenReady = isActive && !userPaused && !isScrubbing
             exoPlayer.setPlaybackSpeed(if (isHolding || speedLocked2x) 2.0f else 1.0f)
@@ -322,6 +374,7 @@ fun GoonedReelCell(
                     var totalDy = 0f
                     var scrubbing = false
                     var lastPreviewAt = 0L
+                    var scrubPreviewJob: Job? = null
                     detectDragGesturesAfterLongPress(
                         onDragStart = { offset ->
                             startX = offset.x
@@ -353,7 +406,8 @@ fun GoonedReelCell(
                                 val now = System.currentTimeMillis()
                                 if (now - lastPreviewAt > 140L && activeVideoUrl != null) {
                                     lastPreviewAt = now
-                                    scope.launch(Dispatchers.IO) {
+                                    scrubPreviewJob?.cancel()
+                                    scrubPreviewJob = scope.launch(Dispatchers.IO) {
                                         val bmp = fetchFramePreview(activeVideoUrl, target)
                                         if (bmp != null) scrubPreview = bmp
                                     }
@@ -384,9 +438,9 @@ fun GoonedReelCell(
             HorizontalPager(state = hPager, modifier = Modifier.fillMaxSize()) { idx ->
                 val item = albumItems[idx]
                 if (!item.isVideo) {
-                    TallOrNormalImage(url = item.url, fill = userData.settings.fillScreen)
+                    TallOrNormalImage(url = item.url, fill = effectiveFill)
                 } else if (exoPlayer != null && idx == albumIndex) {
-                    ExoPlayerSurface(player = exoPlayer, fill = userData.settings.fillScreen)
+                    ExoPlayerSurface(player = exoPlayer, fill = effectiveFill)
                 } else {
                     AsyncImage(model = item.posterUrl ?: gif.posterURL, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 }
@@ -406,16 +460,65 @@ fun GoonedReelCell(
                 )
             }
         } else if (isShowingImage) {
-            TallOrNormalImage(url = currentAlbumItem?.url ?: gif.imageURL, fill = userData.settings.fillScreen)
+            TallOrNormalImage(url = currentAlbumItem?.url ?: gif.imageURL, fill = effectiveFill)
         } else if (exoPlayer != null) {
-            ExoPlayerSurface(player = exoPlayer, fill = userData.settings.fillScreen)
+            ExoPlayerSurface(player = exoPlayer, fill = effectiveFill)
         } else {
-            AsyncImage(
-                model = gif.posterURL,
-                contentDescription = null,
-                contentScale = if (userData.settings.fillScreen) ContentScale.Crop else ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                AsyncImage(
+                    model = gif.posterURL,
+                    contentDescription = null,
+                    contentScale = if (effectiveFill) ContentScale.Crop else ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (resolvingLongVideo) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .liquidGlassCapsule(tinted = tinted)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        CircularProgressIndicator(color = Theme.accentBright, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text("Loading video...", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // Buffering / Pause / Playback Error Overlays
+        if (!isShowingImage && isBuffering && !userPaused && !playbackFailed) {
+            CircularProgressIndicator(
+                color = Theme.accentBright,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.align(Alignment.Center).size(34.dp)
             )
+        } else if (!isShowingImage && userPaused && !isScrubbing) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(64.dp)
+                    .liquidGlassCircle(tinted = true),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.PlayArrow, contentDescription = "Paused", tint = Color.White, modifier = Modifier.size(36.dp))
+            }
+        } else if (!isShowingImage && playbackFailed) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .liquidGlassCapsule(tinted = true)
+                    .clickable {
+                        playbackFailed = false
+                        urlIndex = 0
+                    }
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = "Retry", tint = Theme.accentBright, modifier = Modifier.size(18.dp))
+                Text("Tap to Retry Video", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
         }
 
         // Bottom Gradient
@@ -446,19 +549,30 @@ fun GoonedReelCell(
             }
         }
 
-        // 2x Locked pill
-        if (speedLocked2x && !isShowingImage && !isHolding) {
-            Text(
-                "2x Locked · Tap to Unlock",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
+        // 2x Speed Active / Locked pill (matches iOS)
+        if ((isHolding || speedLocked2x) && !isShowingImage && !isScrubbing) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 110.dp)
-                    .liquidGlassCapsule(tinted = true, active = true)
+                    .liquidGlassCapsule(tinted = true, active = speedLocked2x)
                     .padding(horizontal = 14.dp, vertical = 7.dp)
-            )
+            ) {
+                Icon(
+                    if (speedLocked2x) Icons.Default.Lock else Icons.Default.FastForward,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    if (speedLocked2x) "2x Locked · Tap to Unlock" else "2x Speed · Pull down to lock",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // Instagram-style Scrub Preview Card
@@ -518,7 +632,7 @@ fun GoonedReelCell(
                     .padding(start = 16.dp, end = 12.dp, bottom = 92.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     gif.author?.let { author ->
                         Text(
                             text = if (gif.isXPost || gif.isIGPost || gif.isOnlyFansPost) "@$author" else author,
@@ -537,14 +651,111 @@ fun GoonedReelCell(
                         )
                     }
                     gif.title?.takeIf { it.isNotEmpty() }?.let { t ->
-                        Text(t, color = Color.White.copy(0.88f), fontSize = 13.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(t, color = Color.White.copy(0.88f), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    // iOS Bottom-Left Control Bar Row 1: [Hot/Top/New] [Fit/Fill] [Collapse]
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .liquidGlassCapsule(tinted)
+                                .clickable {
+                                    val nextSort = when (sort) {
+                                        FeedSort.HOT -> FeedSort.TOP
+                                        FeedSort.TOP -> FeedSort.NEW
+                                        FeedSort.NEW -> FeedSort.HOT
+                                    }
+                                    onSelectSort(nextSort)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                        ) {
+                            Icon(Icons.Default.LocalFireDepartment, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                            Text(sort.label, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(
+                            onClick = { localFitOverride = !effectiveFill },
+                            modifier = Modifier.size(34.dp).liquidGlassCircle(tinted, active = effectiveFill)
+                        ) {
+                            Icon(
+                                if (effectiveFill) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = "Fit/Fill",
+                                tint = Color.White,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = { UserStore.shared.updateSettings { it.copy(controlsCollapsed = true) } },
+                            modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                    }
+
+                    // iOS Bottom-Left Control Bar Row 2: [Browse] [Shuffle] [Auto-Scroll] [Quick Follow +]
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onOpenCategories, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.GridView, contentDescription = "Browse", tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(onClick = onShuffle, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(
+                            onClick = { UserStore.shared.updateSettings { it.copy(autoScroll = !it.autoScroll) } },
+                            modifier = Modifier.size(38.dp).liquidGlassCircle(tinted, active = userData.settings.autoScroll)
+                        ) {
+                            Icon(Icons.Default.KeyboardDoubleArrowDown, contentDescription = "Auto-Scroll", tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        val canFollow = !gif.author.isNullOrEmpty() || !gif.subreddit.isNullOrEmpty()
+                        if (canFollow) {
+                            val isFollowed = when {
+                                gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { UserStore.shared.isFollowingOFCreator(it, gif.author ?: "") } == true
+                                gif.isXPost -> gif.author?.let { UserStore.shared.isFollowingXUser(it) } == true
+                                gif.isIGPost -> gif.author?.let { UserStore.shared.isFollowingIGUser(it) } == true
+                                !gif.subreddit.isNullOrEmpty() -> UserStore.shared.isFollowingSubreddit(gif.subreddit!!)
+                                else -> gif.author?.let { UserStore.shared.isFollowingUser(it) } == true
+                            }
+                            IconButton(
+                                onClick = {
+                                    when {
+                                        gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { UserStore.shared.toggleFollowOFCreator(it, gif.author ?: it, null) }
+                                        gif.isXPost -> gif.author?.let { UserStore.shared.toggleFollowXUser(it) }
+                                        gif.isIGPost -> gif.author?.let { UserStore.shared.toggleFollowIGUser(it) }
+                                        !gif.subreddit.isNullOrEmpty() -> UserStore.shared.toggleFollowSubreddit(gif.subreddit!!)
+                                        else -> gif.author?.let { UserStore.shared.toggleFollowUser(it) }
+                                    }
+                                },
+                                modifier = Modifier.size(38.dp).liquidGlassCircle(tinted, active = isFollowed)
+                            ) {
+                                Icon(if (isFollowed) Icons.Default.Check else Icons.Default.Add, contentDescription = "Follow", tint = Color.White, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+
+                    // Interactive bottom video scrubber bar (matches iOS PlayerScrubberBar)
+                    if (!isShowingImage && exoPlayer != null && durationSec > 0.5) {
+                        Slider(
+                            value = (currentSec / durationSec).toFloat().coerceIn(0f, 1f),
+                            onValueChange = { frac ->
+                                val targetMs = (frac * durationSec * 1000.0).toLong()
+                                currentSec = targetMs / 1000.0
+                                exoPlayer.seekTo(targetMs)
+                            },
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White,
+                                activeTrackColor = Theme.accentBright,
+                                inactiveTrackColor = Color.White.copy(0.25f)
+                            ),
+                            modifier = Modifier.fillMaxWidth().height(18.dp)
+                        )
                     }
                 }
 
                 Spacer(Modifier.width(12.dp))
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Source badge
+                    // Source badge (matches iOS pink r/ badge & brand icons)
                     Box(
                         modifier = Modifier.clickable {
                             when {
@@ -567,28 +778,37 @@ fun GoonedReelCell(
                             gif.isIGPost -> BrandLogoInstagram(40.dp)
                             gif.isOnlyFansPost -> BrandLogoOnlyFans(40.dp)
                             gif.isLongVideoPost -> BrandLogoLongVideos(40.dp)
-                            else -> Box(Modifier.size(40.dp).liquidGlassCircle(tinted), contentAlignment = Alignment.Center) {
-                                Text("r/", color = Color.White, fontWeight = FontWeight.Bold)
+                            else -> Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFF078A0)), contentAlignment = Alignment.Center) {
+                                Text("r/", color = Color.Black, fontWeight = FontWeight.Black, fontSize = 14.sp)
                             }
                         }
                     }
 
                     val liked = UserStore.shared.isLiked(gif)
-                    IconButton(onClick = { UserStore.shared.toggleLike(gif) }, modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)) {
-                        Icon(Icons.Default.Favorite, contentDescription = "Like", tint = if (liked) Theme.accent else Color.White)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        IconButton(onClick = { UserStore.shared.toggleLike(gif) }, modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.Favorite, contentDescription = "Like", tint = if (liked) Theme.accent else Color.White)
+                        }
+                        val upText = Gif.shortCount(gif.upvotes)
+                        if (upText.isNotEmpty()) {
+                            Text(upText, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                     IconButton(onClick = onDislike, modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)) {
                         Icon(Icons.Default.ThumbDown, contentDescription = "Dislike", tint = Color.White)
                     }
-                    IconButton(
-                        onClick = { UserStore.shared.updateSettings { it.copy(muted = !it.muted) } },
-                        modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)
-                    ) {
-                        Icon(
-                            if (userData.settings.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                            contentDescription = "Mute",
-                            tint = Color.White
-                        )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        IconButton(
+                            onClick = { UserStore.shared.updateSettings { it.copy(muted = !it.muted) } },
+                            modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)
+                        ) {
+                            Icon(
+                                if (userData.settings.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = "Sound",
+                                tint = Color.White
+                            )
+                        }
+                        Text("Sound", color = Color.White, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
                     }
                     val downloaded = OfflineManager.isDownloaded(activeDownloadGif)
                     val downloading = activeDownloadGif.id in activeDownloads
@@ -607,16 +827,10 @@ fun GoonedReelCell(
                         }
                     }
                     IconButton(onClick = onShare, modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
+                        Icon(Icons.Default.Send, contentDescription = "Share", tint = Color.White)
                     }
                     IconButton(onClick = { showMoreSheet = true }, modifier = Modifier.size(40.dp).liquidGlassCircle(tinted)) {
                         Icon(Icons.Default.MoreHoriz, contentDescription = "More", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = { UserStore.shared.updateSettings { it.copy(controlsCollapsed = true) } },
-                        modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)
-                    ) {
-                        Icon(Icons.Default.VisibilityOff, contentDescription = "Hide UI", tint = Color.White.copy(0.8f), modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -670,24 +884,23 @@ private fun ExoPlayerSurface(player: ExoPlayer, fill: Boolean) {
 
 @Composable
 private fun TallOrNormalImage(url: String?, fill: Boolean) {
-    var scale by remember { mutableFloatStateOf(1f) }
-    val state = rememberTransformableState { zoomChange, _, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 3.5f)
+    val ctx = LocalContext.current
+    val request = remember(url) {
+        val rb = ImageRequest.Builder(ctx).data(url).crossfade(true)
+        if (!url.isNullOrEmpty()) {
+            for ((k, v) in MediaHeaders.headers(url)) rb.addHeader(k, v)
+        }
+        rb.build()
     }
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .transformable(state = state)
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(url).crossfade(true).build(),
+            model = request,
             contentDescription = null,
-            contentScale = ContentScale.FillWidth,
-            modifier = Modifier
-                .fillMaxWidth()
-                .defaultMinSize(minHeight = 640.dp)
-                .graphicsLayer(scaleX = scale, scaleY = scale)
+            contentScale = if (fill) ContentScale.Crop else ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
         )
     }
 }

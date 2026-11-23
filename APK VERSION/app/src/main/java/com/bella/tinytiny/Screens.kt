@@ -57,7 +57,14 @@ fun GoonedBrowseOverlay(
     var r34Suggestions by remember { mutableStateOf<List<Rule34TagSuggestion>>(emptyList()) }
     var searchResults by remember { mutableStateOf(GoonedSearchResponse()) }
     var ofCreators by remember { mutableStateOf<List<OFCreator>>(emptyList()) }
+    var eromePreviews by remember { mutableStateOf<List<Gif>>(emptyList()) }
+    var trendingCreators by remember { mutableStateOf<List<OFCreator>>(emptyList()) }
+    var showAllCategories by remember { mutableStateOf(false) }
     var showReceiveDrop by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        trendingCreators = OnlyFansAPI.fetchTopCreators(limit = 16)
+    }
 
     LaunchedEffect(query, searchScope) {
         val q = query.trim()
@@ -65,6 +72,7 @@ fun GoonedBrowseOverlay(
             r34Suggestions = emptyList()
             searchResults = GoonedSearchResponse()
             ofCreators = emptyList()
+            eromePreviews = emptyList()
             return@LaunchedEffect
         }
         if (searchScope == BrowseScope.RULE34 || searchScope == BrowseScope.ALL) {
@@ -76,55 +84,82 @@ fun GoonedBrowseOverlay(
         if (searchScope == BrowseScope.OF || searchScope == BrowseScope.ALL) {
             ofCreators = OnlyFansAPI.searchCreators(q)
         }
+        if (searchScope == BrowseScope.EROME || searchScope == BrowseScope.ALL) {
+            eromePreviews = LongVideoAPI.searchEromePreview(q, limit = 6)
+        }
+    }
+
+    fun formatSubs(n: Int): String = when {
+        n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
+        n >= 1_000 -> String.format("%.1fK", n / 1_000.0)
+        else -> "$n"
     }
 
     Box(modifier = Modifier.fillMaxSize().liquidGlassBackground(tinted)) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 10.dp)) {
-                Text("Explore", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = { showReceiveDrop = true }) {
-                    Text("Open Drop", color = Theme.accentBright, fontWeight = FontWeight.Bold)
-                }
-                IconButton(onClick = onClose, modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)) {
+            // iOS-matched Search bar + Close circle button
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(top = 10.dp, bottom = 12.dp)
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search OF, Reddit, 𝕏, IG, R34, E...", fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Theme.textSecondary) },
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = "" }) { Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Theme.textSecondary) }
+                        }
+                    },
+                    singleLine = true,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onClose, modifier = Modifier.size(44.dp).liquidGlassCircle(tinted)) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
                 }
             }
 
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = { Text("Search OF, Reddit, 𝕏, IG, R34, Erome...", fontSize = 14.sp) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) { Icon(Icons.Default.Clear, contentDescription = "Clear") }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(Modifier.height(10.dp))
-            Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (sc in BrowseScope.entries) {
-                    val active = searchScope == sc
-                    Box(
-                        modifier = Modifier
-                            .liquidGlassCapsule(tinted = tinted, active = active)
-                            .clickable { searchScope = sc }
-                            .padding(horizontal = 14.dp, vertical = 7.dp)
-                    ) {
-                        Text(sc.label, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-                    }
+            // Quick Feed Icon Pills (matches iOS Explore top pill row)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ExploreIconPill("For You", tinted, { Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp)) }) {
+                    onSelectFeed(FeedSource.ForYou)
+                }
+                ExploreIconPill("Following", tinted, { Icon(Icons.Default.People, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp)) }) {
+                    onSelectFeed(FeedSource.Following)
+                }
+                ExploreIconPill("𝕏 Feed", tinted, { Icon(Icons.Default.LocalFireDepartment, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp)) }) {
+                    onSelectFeed(FeedSource.XForYou)
+                }
+                ExploreIconPill("IG Reels", tinted, { BrandLogoInstagram(16.dp) }) {
+                    onSelectFeed(FeedSource.IGReels)
+                }
+                ExploreIconPill("OnlyFans", tinted, { BrandLogoOnlyFans(16.dp) }) {
+                    onSelectFeed(FeedSource.OFForYou)
+                }
+                ExploreIconPill("Rule34", tinted, { BrandLogoRule34(16.dp) }) {
+                    onSelectFeed(FeedSource.Rule34(""))
+                }
+                ExploreIconPill("Erome", tinted, { BrandLogoErome(16.dp) }) {
+                    onSelectFeed(FeedSource.LongVideos(LongVideoSite.EROME))
+                }
+                ExploreIconPill("Long Videos", tinted, { BrandLogoLongVideos(16.dp) }) {
+                    onSelectFeed(FeedSource.LongVideos(LongVideoSite.ALL))
+                }
+                ExploreIconPill("Open Drop", tinted, { Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(15.dp)) }) {
+                    showReceiveDrop = true
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = PaddingValues(bottom = 40.dp)
             ) {
                 val q = query.trim()
@@ -133,6 +168,7 @@ fun GoonedBrowseOverlay(
                         Column(modifier = Modifier.fillMaxWidth().liquidGlassCard(18.dp, tinted).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("QUICK SEARCH \"$q\"", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                BrowsePill("All Sources") { onSelectFeed(FeedSource.MultiSearch(q)) }
                                 BrowsePill("𝕏 Search") { onSelectFeed(FeedSource.XSearch(q)) }
                                 BrowsePill("𝕏 @${q.removePrefix("@")}") { onSelectFeed(FeedSource.XUser(q.removePrefix("@"))) }
                                 BrowsePill("IG @${q.removePrefix("@")}") { onSelectFeed(FeedSource.IGUser(q.removePrefix("@"))) }
@@ -140,6 +176,25 @@ fun GoonedBrowseOverlay(
                                 BrowsePill("Rule34") { onSelectFeed(FeedSource.Rule34(Rule34API.parseTags(q).joinToString(" "))) }
                                 BrowsePill("OF Posts") { onSelectFeed(FeedSource.OFSearch(q)) }
                                 BrowsePill("Long Videos") { onSelectFeed(FeedSource.LongSearch(LongVideoSite.ALL, q)) }
+                            }
+                        }
+                    }
+
+                    if (eromePreviews.isNotEmpty()) {
+                        item { Text("EROME ALBUMS", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                        items(eromePreviews.take(4)) { e ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .liquidGlassCard(14.dp, tinted)
+                                    .clickable { onSelectFeed(FeedSource.LongSearch(LongVideoSite.EROME, q)) }
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                BrandLogoErome(22.dp)
+                                Text(e.title ?: "Erome Album", color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Theme.textSecondary)
                             }
                         }
                     }
@@ -195,26 +250,13 @@ fun GoonedBrowseOverlay(
                         }
                     }
                 } else {
-                    item {
-                        Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            BrowsePill("For You") { onSelectFeed(FeedSource.ForYou) }
-                            BrowsePill("Following") { onSelectFeed(FeedSource.Following) }
-                            BrowsePill("𝕏 Feed") { onSelectFeed(FeedSource.XForYou) }
-                            BrowsePill("IG Reels") { onSelectFeed(FeedSource.IGReels) }
-                            BrowsePill("OnlyFans") { onSelectFeed(FeedSource.OFForYou) }
-                            BrowsePill("Rule34") { onSelectFeed(FeedSource.Rule34("")) }
-                            BrowsePill("Erome") { onSelectFeed(FeedSource.LongVideos(LongVideoSite.EROME)) }
-                            BrowsePill("Long Videos") { onSelectFeed(FeedSource.LongVideos(LongVideoSite.ALL)) }
-                        }
-                    }
-
-                    if (userData.recentFeeds.isNotEmpty()) {
-                        item { Text("RECENT", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                        items(userData.recentFeeds.take(6)) { r ->
+                    // Continue Watching Card (matches iOS "Continue: ..." card)
+                    userData.recentFeeds.firstOrNull()?.let { r ->
+                        item {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .liquidGlassCard(14.dp, tinted)
+                                    .liquidGlassCard(20.dp, tinted)
                                     .clickable {
                                         val target = when (r.kind) {
                                             "category" -> FeedSource.Category(r.name)
@@ -229,10 +271,17 @@ fun GoonedBrowseOverlay(
                                         onSelectFeed(target)
                                     }
                                     .padding(14.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
+                                Box(
+                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(Theme.accent),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                }
                                 Column(Modifier.weight(1f)) {
-                                    Text(r.displayTitle, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text("Continue: ${r.displayTitle}", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text("${r.swipedCount} swiped", color = Theme.textSecondary, fontSize = 12.sp)
                                 }
                                 Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Theme.textSecondary)
@@ -240,21 +289,116 @@ fun GoonedBrowseOverlay(
                         }
                     }
 
-                    item { Text("CATEGORIES", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                    items(categories) { cat ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .liquidGlassCard(16.dp, tinted)
-                                .clickable { onSelectFeed(FeedSource.Category(cat.name)) }
-                                .padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(cat.displayName, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                Text(cat.subreddits.take(3).joinToString(" · ") { "r/$it" }, color = Theme.textSecondary, fontSize = 12.sp, maxLines = 1)
+                    // Trending Creators horizontal avatar pills (matches iOS)
+                    if (trendingCreators.isNotEmpty()) {
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("TRENDING CREATORS", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    for (c in trendingCreators) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier
+                                                .liquidGlassCapsule(tinted)
+                                                .clickable { onSelectFeed(FeedSource.OFCreator(c.id, c.cleanHandle, c.displayName)) }
+                                                .padding(start = 5.dp, end = 12.dp, top = 5.dp, bottom = 5.dp)
+                                        ) {
+                                            AsyncImage(
+                                                model = c.avatar,
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.size(28.dp).clip(CircleShape).background(Color.White.copy(0.12f))
+                                            )
+                                            Text(c.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                        }
+                                    }
+                                }
                             }
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Theme.textSecondary)
+                        }
+                    }
+
+                    // Featured 2x2 Grid (matches iOS Gooning / TikTok / OnlyFans / Videos)
+                    val featuredNames = listOf("Gooning", "TikTok", "OnlyFans", "Videos")
+                    val featuredCats = featuredNames.mapNotNull { fn ->
+                        categories.firstOrNull { it.name.equals(fn, ignoreCase = true) }
+                    }.ifEmpty { categories.take(4) }
+
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("FEATURED", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                            featuredCats.chunked(2).forEach { pair ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    pair.forEach { cat ->
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .liquidGlassCard(20.dp, tinted)
+                                                .clickable { onSelectFeed(FeedSource.Category(cat.name)) }
+                                                .padding(16.dp),
+                                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Text(cat.displayName, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                                modifier = Modifier
+                                                    .liquidGlassCapsule(tinted)
+                                                    .padding(horizontal = 9.dp, vertical = 4.dp)
+                                            ) {
+                                                Icon(Icons.Default.People, contentDescription = null, tint = Theme.textSecondary, modifier = Modifier.size(13.dp))
+                                                Text(formatSubs(cat.subscribers), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                            }
+                                        }
+                                    }
+                                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+
+                    // Collapsible All Categories (A-Z) dropdown (matches iOS)
+                    item {
+                        val sortedCats = remember(categories) { categories.sortedBy { it.displayName.lowercase() } }
+                        Column(modifier = Modifier.fillMaxWidth().liquidGlassCard(20.dp, tinted)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showAllCategories = !showAllCategories }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("All Categories (A–Z · ${sortedCats.size})", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                Icon(if (showAllCategories) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null, tint = Color.White)
+                            }
+                            AnimatedVisibility(visible = showAllCategories) {
+                                Column(
+                                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    HorizontalDivider(color = Color.White.copy(0.14f))
+                                    sortedCats.forEach { cat ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { onSelectFeed(FeedSource.Category(cat.name)) }
+                                                .padding(vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(cat.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                            Text(formatSubs(cat.subscribers), color = Theme.textSecondary, fontSize = 12.sp)
+                                            Spacer(Modifier.width(6.dp))
+                                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Theme.textSecondary, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -264,6 +408,26 @@ fun GoonedBrowseOverlay(
 
     if (showReceiveDrop) {
         ReceiveDropSheet(onDismiss = { showReceiveDrop = false })
+    }
+}
+
+@Composable
+private fun ExploreIconPill(
+    label: String,
+    tinted: Boolean,
+    icon: @Composable () -> Unit,
+    onClick: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .liquidGlassCapsule(tinted)
+            .clickable { onClick() }
+            .padding(horizontal = 13.dp, vertical = 8.dp)
+    ) {
+        icon()
+        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -288,8 +452,12 @@ fun GoonedLikesView(
 ) {
     val userData by UserStore.shared.data.collectAsState()
     val tinted = userData.settings.tintedGlass
+    val scope = rememberCoroutineScope()
     var section by remember { mutableIntStateOf(0) } // 0 = Likes, 1 = Offline Vault
     var filter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Videos, 2 = Images
+    var isSelecting by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var shareCollectionPosts by remember { mutableStateOf<List<Gif>?>(null) }
 
     val rawItems = if (section == 0) userData.liked else userData.downloaded
     val filtered = remember(rawItems, filter) {
@@ -305,18 +473,41 @@ fun GoonedLikesView(
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 10.dp)) {
                 Text(if (section == 0) "Likes" else "Offline Vault", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
+                if (filtered.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .liquidGlassCapsule(tinted, active = isSelecting)
+                            .clickable {
+                                isSelecting = !isSelecting
+                                if (!isSelecting) selectedIds = emptySet()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(if (isSelecting) "Done" else "Select", color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
                 IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
-                    modifier = Modifier.liquidGlassCapsule(tinted, active = section == 0).clickable { section = 0 }.padding(horizontal = 16.dp, vertical = 8.dp)
+                    modifier = Modifier.liquidGlassCapsule(tinted, active = section == 0).clickable { section = 0; isSelecting = false; selectedIds = emptySet() }.padding(horizontal = 16.dp, vertical = 8.dp)
                 ) { Text("Likes (${userData.liked.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 Box(
-                    modifier = Modifier.liquidGlassCapsule(tinted, active = section == 1).clickable { section = 1 }.padding(horizontal = 16.dp, vertical = 8.dp)
+                    modifier = Modifier.liquidGlassCapsule(tinted, active = section == 1).clickable { section = 1; isSelecting = false; selectedIds = emptySet() }.padding(horizontal = 16.dp, vertical = 8.dp)
                 ) { Text("Offline (${userData.downloaded.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                if (isSelecting) {
+                    Spacer(Modifier.weight(1f))
+                    val allChosen = selectedIds.size == filtered.size && filtered.isNotEmpty()
+                    TextButton(onClick = {
+                        selectedIds = if (allChosen) emptySet() else filtered.map { it.id }.toSet()
+                    }) {
+                        Text(if (allChosen) "Clear All" else "Select All", color = Theme.accentBright, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
 
             Spacer(Modifier.height(10.dp))
@@ -344,35 +535,115 @@ fun GoonedLikesView(
                     columns = GridCells.Fixed(3),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
-                    contentPadding = PaddingValues(bottom = 110.dp),
+                    contentPadding = PaddingValues(bottom = if (isSelecting) 160.dp else 110.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(filtered, key = { it.id }) { gif ->
-                        GridThumb(gif = gif, isOffline = OfflineManager.isDownloaded(gif)) {
-                            if (section == 0) onPlayLikedPost(gif) else onPlayOfflinePost(gif)
+                        val chosen = gif.id in selectedIds
+                        Box {
+                            GridThumb(gif = gif, isOffline = !isSelecting && OfflineManager.isDownloaded(gif)) {
+                                if (isSelecting) {
+                                    selectedIds = if (chosen) selectedIds - gif.id else selectedIds + gif.id
+                                } else {
+                                    if (section == 0) onPlayLikedPost(gif) else onPlayOfflinePost(gif)
+                                }
+                            }
+                            if (isSelecting) {
+                                Icon(
+                                    if (chosen) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                    contentDescription = null,
+                                    tint = if (chosen) Theme.accentBright else Color.White.copy(0.8f),
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(20.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+
+        // Bulk action bar when selecting (matches iOS)
+        if (isSelecting) {
+            val chosenPosts = filtered.filter { it.id in selectedIds }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 14.dp, vertical = 74.dp)
+                    .fillMaxWidth()
+                    .liquidGlassCard(20.dp, tinted)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Text("${chosenPosts.size} selected", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                IconButton(
+                    enabled = chosenPosts.isNotEmpty(),
+                    onClick = {
+                        chosenPosts.forEach { p ->
+                            if (section == 0) UserStore.shared.toggleLike(p) else OfflineManager.removeDownload(p)
+                        }
+                        selectedIds = emptySet()
+                        if (filtered.size == chosenPosts.size) isSelecting = false
+                    },
+                    modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)
+                ) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFF87171)) }
+                if (section == 0) {
+                    IconButton(
+                        enabled = chosenPosts.isNotEmpty(),
+                        onClick = {
+                            scope.launch {
+                                chosenPosts.forEach { OfflineManager.download(it) }
+                            }
+                            isSelecting = false
+                            selectedIds = emptySet()
+                        },
+                        modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)
+                    ) { Icon(Icons.Default.Download, contentDescription = "Download", tint = Color.White) }
+                }
+                Button(
+                    enabled = chosenPosts.isNotEmpty(),
+                    onClick = { shareCollectionPosts = chosenPosts },
+                    colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)
+                ) {
+                    Text("Share", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                }
+            }
+        }
+    }
+
+    shareCollectionPosts?.let { posts ->
+        ShareCollectionSheet(
+            posts = posts,
+            title = if (section == 0) "${posts.size} Liked Clips" else "${posts.size} Vault Clips",
+            onDismiss = {
+                shareCollectionPosts = null
+                isSelecting = false
+                selectedIds = emptySet()
+            }
+        )
     }
 }
 
 @Composable
 fun GridThumb(gif: Gif, isOffline: Boolean, onClick: () -> Unit) {
     val ctx = LocalContext.current
+    val thumbUrl = gif.thumbURL ?: gif.posterURL
+    val request = remember(thumbUrl) {
+        val rb = ImageRequest.Builder(ctx).data(thumbUrl).size(420).crossfade(true)
+        if (!thumbUrl.isNullOrEmpty()) {
+            for ((k, v) in MediaHeaders.headers(thumbUrl)) rb.addHeader(k, v)
+        }
+        rb.build()
+    }
     Box(
         modifier = Modifier
             .aspectRatio(9f / 16f)
-            .background(Color.White.copy(0.06f))
             .clickable { onClick() }
     ) {
+        ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
         AsyncImage(
-            model = ImageRequest.Builder(ctx)
-                .data(gif.thumbURL ?: gif.posterURL)
-                .size(420)
-                .crossfade(true)
-                .build(),
+            model = request,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
@@ -430,8 +701,14 @@ fun GoonedFollowsView(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp)) {
-                Text("Profile", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("Following", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
+                if (AppState.hasPasscode.collectAsState().value) {
+                    IconButton(onClick = { AppState.isLocked.value = true }, modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)) {
+                        Icon(Icons.Default.Lock, contentDescription = "Lock", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
                 IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
                 }
@@ -439,19 +716,52 @@ fun GoonedFollowsView(
 
             FollowsDropdown("accounts", expanded == "accounts", "Connected Accounts",
                 "${if (userData.xSession.isConnected) "𝕏 On" else "𝕏 Off"} · ${if (userData.igSession.isConnected) "IG On" else "IG Off"}",
-                tinted, { expanded = if (expanded == "accounts") "" else "accounts" }
+                tinted, { expanded = if (expanded == "accounts") "" else "accounts" },
+                leadingIcon = Icons.Default.ManageAccounts
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onConnectX, colors = ButtonDefaults.buttonColors(containerColor = if (userData.xSession.isConnected) Theme.accent else Theme.surfaceElevated), modifier = Modifier.weight(1f)) {
-                        Text(if (userData.xSession.isConnected) "𝕏 Connected" else "Connect 𝕏")
+                if (userData.xSession.isConnected) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(Modifier.size(38.dp).liquidGlassCircle(tinted), contentAlignment = Alignment.Center) { BrandLogoX(18.dp) }
+                        Column(Modifier.weight(1f)) {
+                            Text("@${userData.xSession.username.removePrefix("@")}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Streaming personal X timeline & 18+ media", color = Theme.textSecondary, fontSize = 12.sp)
+                        }
                     }
-                    Button(onClick = onConnectIG, colors = ButtonDefaults.buttonColors(containerColor = if (userData.igSession.isConnected) Theme.accent else Theme.surfaceElevated), modifier = Modifier.weight(1f)) {
-                        Text(if (userData.igSession.isConnected) "IG Connected" else "Connect IG")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Box(Modifier.weight(1f).liquidGlassCapsule(tinted, active = true).clickable { onSelectFeed(FeedSource.XForYou) }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                            Text("𝕏 For You", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Box(Modifier.weight(1f).liquidGlassCapsule(tinted).clickable { onSelectFeed(FeedSource.XFollowing) }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                            Text("𝕏 Following", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Box(Modifier.weight(1f).liquidGlassCapsule(tinted).clickable { onSelectFeed(FeedSource.XBookmarks) }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                            Text("𝕏 Saved", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(Modifier.size(38.dp).liquidGlassCircle(tinted), contentAlignment = Alignment.Center) { BrandLogoX(18.dp) }
+                        Column(Modifier.weight(1f)) {
+                            Text("Personal 𝕏", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("Connect 𝕏 for For You, Following & Saved", color = Theme.textSecondary, fontSize = 12.sp)
+                        }
+                        Button(onClick = onConnectX, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)) { Text("Connect", fontWeight = FontWeight.Bold) }
+                    }
+                }
+                HorizontalDivider(color = Color.White.copy(0.10f), modifier = Modifier.padding(vertical = 4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    BrandLogoInstagram(38.dp)
+                    Column(Modifier.weight(1f)) {
+                        Text(if (userData.igSession.isConnected) "@${userData.igSession.username.removePrefix("@")}" else "Personal Instagram", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("Connect Instagram for Reels, Following & Saved", color = Theme.textSecondary, fontSize = 12.sp)
+                    }
+                    Button(onClick = onConnectIG, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)) {
+                        Text(if (userData.igSession.isConnected) "Re-link" else "Connect", fontWeight = FontWeight.Bold)
                     }
                 }
             }
 
-            FollowsDropdown("x", expanded == "x", "𝕏 Creators", "${userData.followedXUsers.size} followed", tinted, { expanded = if (expanded == "x") "" else "x" }) {
+            FollowsDropdown("x", expanded == "x", "𝕏 Creators", "${userData.followedXUsers.size} following", tinted, { expanded = if (expanded == "x") "" else "x" }, leadingIcon = Icons.Default.LocalFireDepartment) {
                 if (userData.followedXUsers.isEmpty()) Text("No 𝕏 creators followed yet.", color = Theme.textSecondary, fontSize = 13.sp)
                 userData.followedXUsers.forEach { h ->
                     Text("@$h", color = Color.White, modifier = Modifier.fillMaxWidth().clickable { onSelectFeed(FeedSource.XUser(h)) }.padding(vertical = 6.dp))
@@ -490,13 +800,18 @@ private fun FollowsDropdown(
     summary: String,
     tinted: Boolean,
     onToggle: () -> Unit,
+    leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().liquidGlassCard(20.dp, tinted)) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            if (leadingIcon != null) {
+                Icon(leadingIcon, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(22.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Text(summary, color = Theme.textSecondary, fontSize = 12.sp)
@@ -684,6 +999,7 @@ fun GoonedSettingsModal(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -696,43 +1012,141 @@ fun GoonedSettingsModal(
                 }
             }
 
-            FollowsDropdown("accounts", expanded == "accounts", "Accounts & Cloud Sync", LicenseManager.expirySummary, tinted, { expanded = if (expanded == "accounts") "" else "accounts" }) {
+            FollowsDropdown(
+                "accounts",
+                expanded == "accounts",
+                "Connected Accounts",
+                "${if (userData.xSession.isConnected) "𝕏 On" else "𝕏 Off"} · ${if (userData.igSession.isConnected) "IG On" else "IG Off"} · R34",
+                tinted,
+                { expanded = if (expanded == "accounts") "" else "accounts" },
+                leadingIcon = Icons.Default.ManageAccounts
+            ) {
                 Text("License: ${licStatus.licenseKey.ifEmpty { "None" }} (${LicenseManager.expirySummary})", color = Theme.textSecondary, fontSize = 12.sp)
                 Button(onClick = { scope.launch { syncStatus = LicenseManager.syncBidirectionalBackup() } }, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), modifier = Modifier.fillMaxWidth()) {
                     Text("Sync Encrypted Cloud Backup", fontWeight = FontWeight.Bold)
                 }
-                syncStatus?.let { Text(it, color = Color(0xFF4ADE80), fontSize = 12.sp) }
+                syncStatus?.let {
+                    val isErr = it.contains("paused", ignoreCase = true) || it.contains("fail", ignoreCase = true) || it.contains("error", ignoreCase = true)
+                    Text(it, color = if (isErr) Color(0xFFF87171) else Color(0xFF4ADE80), fontSize = 12.sp)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onConnectX, modifier = Modifier.weight(1f)) { Text(if (userData.xSession.isConnected) "𝕏 Connected" else "Connect 𝕏", color = Color.White, fontSize = 12.sp) }
-                    OutlinedButton(onClick = onConnectIG, modifier = Modifier.weight(1f)) { Text(if (userData.igSession.isConnected) "IG Connected" else "Connect IG", color = Color.White, fontSize = 12.sp) }
+                    OutlinedButton(onClick = onConnectX, modifier = Modifier.weight(1f)) { Text(if (userData.xSession.isConnected) "Re-link 𝕏" else "Connect 𝕏", color = Color.White, fontSize = 12.sp) }
+                    if (userData.xSession.isConnected) {
+                        OutlinedButton(onClick = {
+                            store.updateXSession(XAccountSession())
+                            XWebEngine.resetSession()
+                        }) { Text("Disconnect", color = Color(0xFFF87171), fontSize = 12.sp) }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onConnectIG, modifier = Modifier.weight(1f)) { Text(if (userData.igSession.isConnected) "Re-link IG" else "Connect IG", color = Color.White, fontSize = 12.sp) }
+                    if (userData.igSession.isConnected) {
+                        OutlinedButton(onClick = {
+                            store.updateIGSession(InstagramAccountSession())
+                            InstagramWebEngine.resetSession()
+                        }) { Text("Disconnect", color = Color(0xFFF87171), fontSize = 12.sp) }
+                    }
                 }
                 OutlinedButton(onClick = onSetupR34Key, modifier = Modifier.fillMaxWidth()) {
                     Text(if (userData.r34Credentials.isConnected) "Rule34 API Key: Custom" else "Set Rule34 DAPI Key", color = Color.White)
                 }
             }
 
-            FollowsDropdown("algo", expanded == "algo", "Smart Algorithm & Taste", "${userData.algorithm.boostedTags.size} boosted · ${userData.algorithm.blockedTags.size} blocked", tinted, { expanded = if (expanded == "algo") "" else "algo" }) {
+            val tasteState by SmartTasteEngine.shared.state.collectAsState()
+            val fy = tasteState.forYouSources
+            FollowsDropdown(
+                "algo",
+                expanded == "algo",
+                "Algorithm & For You Sources",
+                "${if (userData.settings.algorithmEnabled) "Smart Taste On" else "Smart Taste Off"} · ${userData.algorithm.totalSignals + userData.swipedTotal} signals",
+                tinted,
+                { expanded = if (expanded == "algo") "" else "algo" },
+                leadingIcon = Icons.Default.AutoAwesome
+            ) {
+                SettingSwitch("Smart Algorithm", userData.settings.algorithmEnabled) { v -> store.updateSettings { it.copy(algorithmEnabled = v) } }
                 Button(onClick = { showAlgoEditor = true }, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), modifier = Modifier.fillMaxWidth()) {
                     Text("Edit #Tags & Taste", fontWeight = FontWeight.Bold)
                 }
+                HorizontalDivider(color = Color.White.copy(0.12f), modifier = Modifier.padding(vertical = 4.dp))
+                Text("FOR YOU SOURCES", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                SettingSwitch("Reddit", fy.enableReddit) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableReddit = v) } }
+                SettingSwitch("𝕏 (Twitter)", fy.enableX) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableX = v) } }
+                SettingSwitch("Instagram", fy.enableIG) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableIG = v) } }
+                SettingSwitch("OnlyFans", fy.enableOnlyFans) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableOnlyFans = v) } }
+                SettingSwitch("Rule34", fy.enableRule34) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableRule34 = v) } }
+                SettingSwitch("Long Videos", fy.enableLongVideos) { v -> SmartTasteEngine.shared.updateForYouSources { it.copy(enableLongVideos = v) } }
             }
 
-            FollowsDropdown("playback", expanded == "playback", "Playback & Auto-Scroll", "${if (userData.settings.hd) "HD" else "SD"} · ${if (userData.settings.fillScreen) "Fill" else "Fit"}", tinted, { expanded = if (expanded == "playback") "" else "playback" }) {
+            FollowsDropdown(
+                "playback",
+                expanded == "playback",
+                "Playback & Video",
+                "${if (userData.settings.hd) "HD" else "SD"} · ${if (userData.settings.fillScreen) "Fill" else "Fit"} · ${userData.settings.autoScrollDelay}s",
+                tinted,
+                { expanded = if (expanded == "playback") "" else "playback" },
+                leadingIcon = Icons.Default.PlayCircleFilled
+            ) {
                 SettingSwitch("HD Video Quality", userData.settings.hd) { v -> store.updateSettings { it.copy(hd = v) } }
-                SettingSwitch("Fill Screen", userData.settings.fillScreen) { v -> store.updateSettings { it.copy(fillScreen = v) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f).liquidGlassCapsule(tinted, active = !userData.settings.fillScreen).clickable { store.updateSettings { it.copy(fillScreen = false, videoFitScreen = true) } }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        Text("Fit Screen", color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Box(Modifier.weight(1f).liquidGlassCapsule(tinted, active = userData.settings.fillScreen).clickable { store.updateSettings { it.copy(fillScreen = true, videoFitScreen = false) } }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        Text("Fill Screen", color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
                 SettingSwitch("Auto-Scroll Videos", userData.settings.autoScroll) { v -> store.updateSettings { it.copy(autoScroll = v) } }
-                SettingSwitch("Tinted Liquid Glass", userData.settings.tintedGlass) { v -> store.updateSettings { it.copy(tintedGlass = v) } }
+                SettingSwitch("Play Videos to End", userData.settings.playVideosToEnd) { v -> store.updateSettings { it.copy(playVideosToEnd = v) } }
+                Text("Auto-Scroll Delay", color = Theme.textSecondary, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(3, 6, 10, 15).forEach { sec ->
+                        Box(
+                            Modifier.weight(1f).liquidGlassCapsule(tinted, active = userData.settings.autoScrollDelay == sec).clickable { store.updateSettings { it.copy(autoScrollDelay = sec) } }.padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("${sec}s", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
 
-            FollowsDropdown("vault", expanded == "vault", "Vault & Security", "Offline: $diskUsage", tinted, { expanded = if (expanded == "vault") "" else "vault" }) {
+            FollowsDropdown(
+                "appearance",
+                expanded == "appearance",
+                "Appearance",
+                "${if (userData.settings.tintedGlass) "Tinted Glass" else "Clear Glass"} · ${if (userData.settings.controlsCollapsed) "Collapsed" else "Expanded"}",
+                tinted,
+                { expanded = if (expanded == "appearance") "" else "appearance" },
+                leadingIcon = Icons.Default.WaterDrop
+            ) {
+                SettingSwitch("Tinted Liquid Glass", userData.settings.tintedGlass) { v -> store.updateSettings { it.copy(tintedGlass = v) } }
+                SettingSwitch("Collapse Feed Controls", userData.settings.controlsCollapsed) { v -> store.updateSettings { it.copy(controlsCollapsed = v) } }
+            }
+
+            FollowsDropdown(
+                "vault",
+                expanded == "vault",
+                "Vault, License & Security",
+                "${userData.downloaded.size} offline ($diskUsage) · ${LicenseManager.expirySummary}",
+                tinted,
+                { expanded = if (expanded == "vault") "" else "vault" },
+                leadingIcon = Icons.Default.Security
+            ) {
                 val hasPin by AppState.hasPasscode.collectAsState()
                 val reqPin by AppState.requirePasscodeOnOpen.collectAsState()
                 if (hasPin) {
                     SettingSwitch("Lock on Open", reqPin) { v -> AppState.setRequirePasscodeOnOpen(v) }
                     SettingSwitch("Biometric Unlock", userData.settings.faceID) { v -> store.updateSettings { it.copy(faceID = v) } }
                 }
-                OutlinedButton(onClick = { showPasscodeSetup = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (hasPin) "Change Passcode" else "Set 4-Digit Passcode", color = Color.White)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = { showPasscodeSetup = true }, modifier = Modifier.weight(1f)) {
+                        Text(if (hasPin) "Change Passcode" else "Set 4-Digit Passcode", color = Color.White, fontSize = 12.sp)
+                    }
+                    if (hasPin) {
+                        OutlinedButton(onClick = { AppState.removePasscodeKeepingData() }) {
+                            Text("Remove PIN", color = Color(0xFFF87171), fontSize = 12.sp)
+                        }
+                    }
                 }
                 Button(onClick = { showWipeSheet = true }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB91C1C)), modifier = Modifier.fillMaxWidth()) {
                     Text("Wipe Data...", fontWeight = FontWeight.Bold)
@@ -768,7 +1182,8 @@ fun AlgorithmEditorSheet(onDismiss: () -> Unit) {
     var boostInput by remember { mutableStateOf("") }
     var blockInput by remember { mutableStateOf("") }
 
-    Box(modifier = Modifier.fillMaxSize().liquidGlassBackground(tinted).padding(20.dp)) {
+    val tasteState by SmartTasteEngine.shared.state.collectAsState()
+    Box(modifier = Modifier.fillMaxSize().liquidGlassBackground(tinted).statusBarsPadding().navigationBarsPadding().padding(20.dp)) {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Edit #Tags & Taste", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -819,6 +1234,54 @@ fun AlgorithmEditorSheet(onDismiss: () -> Unit) {
                     }
                 }
             }
+
+            if (tasteState.suppressedTags.isNotEmpty()) {
+                Text("AUTO-SUPPRESSED TAGS (TAP TO UNBLOCK)", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    tasteState.suppressedTags.forEach { t ->
+                        Box(modifier = Modifier.liquidGlassCapsule(tinted).clickable {
+                            SmartTasteEngine.shared.unblockTag(t)
+                        }.padding(horizontal = 10.dp, vertical = 5.dp)) {
+                            Text("-$t ✕", color = Color(0xFFF87171), fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            Text("QUICK PICKER #TAGS (TAP TO BOOST)", color = Theme.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            PornTagCatalog.quickPickerCategories.forEach { (catTitle, tags) ->
+                Text(catTitle, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    tags.forEach { t ->
+                        val isBoosted = userData.algorithm.boostedTags.any { it.equals(t, ignoreCase = true) }
+                        Box(
+                            modifier = Modifier
+                                .liquidGlassCapsule(tinted, active = isBoosted)
+                                .clickable {
+                                    store.updateAlgorithm {
+                                        val next = if (isBoosted) it.boostedTags.filterNot { x -> x.equals(t, ignoreCase = true) } else (it.boostedTags + t).distinct()
+                                        it.copy(boostedTags = next)
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text("#$t", color = Color.White, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            OutlinedButton(
+                onClick = {
+                    SmartTasteEngine.shared.reset()
+                    store.updateAlgorithm { AlgorithmProfile() }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Reset Learned Algorithm", color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -840,7 +1303,8 @@ fun WipeDataSheet(onComplete: () -> Unit, onDismiss: () -> Unit) {
     var isWiping by remember { mutableStateOf(false) }
     var confirmDialog by remember { mutableStateOf(false) }
 
-    Box(modifier = Modifier.fillMaxSize().liquidGlassBackground(tinted).padding(20.dp)) {
+    val tasteState by SmartTasteEngine.shared.state.collectAsState()
+    Box(modifier = Modifier.fillMaxSize().liquidGlassBackground(tinted).statusBarsPadding().navigationBarsPadding().padding(20.dp)) {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

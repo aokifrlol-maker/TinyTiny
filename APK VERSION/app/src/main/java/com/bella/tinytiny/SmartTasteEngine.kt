@@ -7,7 +7,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -20,12 +22,13 @@ enum class SourcePlatform(val rawValue: String, val label: String) {
     LONGVIDEO("lv", "Long Videos")
 }
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class ForYouSourceSettings(
-    var enableReddit: Boolean = true,
-    var enableX: Boolean = true,
-    var enableIG: Boolean = true,
-    var enableOnlyFans: Boolean = true,
+    @JsonNames("includeReddit") var enableReddit: Boolean = true,
+    @JsonNames("includeX") var enableX: Boolean = true,
+    @JsonNames("includeInstagram") var enableIG: Boolean = true,
+    @JsonNames("includeOnlyFans") var enableOnlyFans: Boolean = true,
     var enableRule34: Boolean = true,
     var enableLongVideos: Boolean = false
 )

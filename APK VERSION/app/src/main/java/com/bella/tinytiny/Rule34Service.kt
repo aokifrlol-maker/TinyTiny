@@ -200,13 +200,24 @@ object Rule34API {
                 parseYandereJSON(it)
             }
         }
-        val safebooruDef = async {
-            fetchRaw("https://safebooru.org/index.php", mapOf("page" to "dapi", "s" to "post", "q" to "index", "json" to "1", "limit" to "20", "pid" to "$page", "tags" to gelTags)) {
-                parseGelbooruStyleJSON(it, prefix = "r34sb")
+        val konachanDef = async {
+            fetchRaw("https://konachan.com/post.json", mapOf("limit" to "25", "page" to "${page + 1}", "tags" to yandeTags)) {
+                parseYandereJSON(it)
             }
         }
         val yPosts = yandeDef.await()
-        if (yPosts.isNotEmpty()) yPosts else safebooruDef.await()
+        val kPosts = konachanDef.await()
+        val combined = (yPosts + kPosts).distinctBy { it.id }
+        if (combined.isNotEmpty()) return@coroutineScope combined
+        if (tag.isEmpty()) {
+            try {
+                GoonedAPI.category("Rule34", sort = sort, limit = 25).posts
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
     }
 
     private suspend fun fetchRaw(base: String, query: Map<String, String>, parser: (String) -> List<Gif>): List<Gif> =
@@ -245,11 +256,11 @@ object Rule34API {
             val previewUrl = item.optString("preview_url").takeIf { it.isNotEmpty() }
             val lower = fileUrl.lowercase()
             val sampleLower = (sampleUrl ?: "").lowercase()
-            val isMp4 = lower.endsWith(".mp4") || lower.endsWith(".m4v") || lower.endsWith(".mov")
-            val isSampleMp4 = sampleLower.endsWith(".mp4")
-            if (lower.endsWith(".webm") && !isSampleMp4) continue
+            val isMp4 = lower.endsWith(".mp4") || lower.endsWith(".m4v") || lower.endsWith(".mov") || lower.endsWith(".webm")
+            val isSampleMp4 = sampleLower.endsWith(".mp4") || sampleLower.endsWith(".webm")
 
             val playableVideo = when {
+                isSampleMp4 && sampleLower.endsWith(".mp4") -> sampleUrl
                 isMp4 -> fileUrl
                 isSampleMp4 -> sampleUrl
                 else -> null
@@ -342,6 +353,8 @@ fun Rule34KeySheet(onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = current.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(20.dp)
     ) {
         Column(

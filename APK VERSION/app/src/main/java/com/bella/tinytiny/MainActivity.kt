@@ -3,8 +3,12 @@ package com.bella.tinytiny
 import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.FrameLayout
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -32,7 +36,7 @@ enum class GoonedDockTab { HOME, LIKES, BROWSE, PROFILE }
 
 enum class HomeChannel {
     FOLLOWING, FOR_YOU,
-    X_FOR_YOU, X_FOLLOWING, X_BOOKMARKS,
+    X_FOR_YOU, X_FOLLOWING, X_BOOKMARKS, X_LIKES,
     RULE34,
     IG_REELS, IG_FOLLOWING, IG_SAVED,
     OF_FOR_YOU, OF_TRENDING, OF_LATEST, OF_DMS,
@@ -54,8 +58,14 @@ class MainActivity : FragmentActivity() {
         handleIntent(intent)
     }
 
+    override fun onStart() {
+        super.onStart()
+        RootDeepLinkState.isAppForeground.value = true
+    }
+
     override fun onStop() {
         super.onStop()
+        RootDeepLinkState.isAppForeground.value = false
         AppState.lock()
         UserStore.shared.saveNow()
     }
@@ -79,6 +89,7 @@ class MainActivity : FragmentActivity() {
 object RootDeepLinkState {
     val pendingDirectIGDropId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     val pendingShareUri = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val isAppForeground = kotlinx.coroutines.flow.MutableStateFlow(true)
 }
 
 @Composable
@@ -211,6 +222,7 @@ fun GoonedMainShell() {
     val xForYouModel = remember { FeedModel(FeedSource.XForYou) }
     val xFollowingModel = remember { FeedModel(FeedSource.XFollowing) }
     val xBookmarksModel = remember { FeedModel(FeedSource.XBookmarks) }
+    val xLikesModel = remember { FeedModel(FeedSource.XLikes) }
     val r34Model = remember { FeedModel(FeedSource.Rule34("")) }
     val igReelsModel = remember { FeedModel(FeedSource.IGReels) }
     val igFollowingModel = remember { FeedModel(FeedSource.IGFollowing) }
@@ -237,6 +249,22 @@ fun GoonedMainShell() {
     val receivedPost by ShareService.pendingReceivedPost.collectAsState()
     val receivedPosts by ShareService.pendingReceivedPosts.collectAsState()
     val receivedTitle by ShareService.pendingReceivedTitle.collectAsState()
+    val isAppForeground by RootDeepLinkState.isAppForeground.collectAsState()
+
+    val hasAnyOverlayOrBack = showSettingsModal || showXLogin || showIGLogin || showR34Key ||
+        creatorGridSource != null || activeTab != GoonedDockTab.HOME || activeChannel == HomeChannel.CUSTOM
+
+    BackHandler(enabled = hasAnyOverlayOrBack) {
+        when {
+            showXLogin -> showXLogin = false
+            showIGLogin -> showIGLogin = false
+            showR34Key -> showR34Key = false
+            showSettingsModal -> showSettingsModal = false
+            creatorGridSource != null -> creatorGridSource = null
+            activeTab != GoonedDockTab.HOME -> activeTab = GoonedDockTab.HOME
+            activeChannel == HomeChannel.CUSTOM -> popBack()
+        }
+    }
 
     val activeModel = when (activeChannel) {
         HomeChannel.FOLLOWING -> followingModel
@@ -244,6 +272,7 @@ fun GoonedMainShell() {
         HomeChannel.X_FOR_YOU -> xForYouModel
         HomeChannel.X_FOLLOWING -> xFollowingModel
         HomeChannel.X_BOOKMARKS -> xBookmarksModel
+        HomeChannel.X_LIKES -> xLikesModel
         HomeChannel.RULE34 -> r34Model
         HomeChannel.IG_REELS -> igReelsModel
         HomeChannel.IG_FOLLOWING -> igFollowingModel
@@ -313,6 +342,7 @@ fun GoonedMainShell() {
             FeedSource.XForYou -> { backStack.clear(); activeChannel = HomeChannel.X_FOR_YOU }
             FeedSource.XFollowing -> { backStack.clear(); activeChannel = HomeChannel.X_FOLLOWING }
             FeedSource.XBookmarks -> { backStack.clear(); activeChannel = HomeChannel.X_BOOKMARKS }
+            FeedSource.XLikes -> { backStack.clear(); activeChannel = HomeChannel.X_LIKES }
             FeedSource.IGReels -> { backStack.clear(); activeChannel = HomeChannel.IG_REELS }
             FeedSource.IGFollowing -> { backStack.clear(); activeChannel = HomeChannel.IG_FOLLOWING }
             FeedSource.IGSaved -> { backStack.clear(); activeChannel = HomeChannel.IG_SAVED }
@@ -385,9 +415,20 @@ fun GoonedMainShell() {
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        // Attached invisible WebView host so Android Chromium runs XWebEngine & InstagramWebEngine JS/fetch unthrottled
+        AndroidView(
+            factory = { ctx ->
+                FrameLayout(ctx).apply {
+                    XWebEngine.attachHost(this)
+                    InstagramWebEngine.attachHost(this)
+                }
+            },
+            modifier = Modifier.size(1.dp).alpha(0.01f)
+        )
+
         FeedView(
             model = activeModel,
-            isVisible = activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showR34Key && creatorGridSource == null,
+            isVisible = isAppForeground && activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showR34Key && creatorGridSource == null,
             targetPostId = slotPostIDs[activeChannel],
             onCurrentPostChanged = { slotPostIDs[activeChannel] = it },
             onOpenCategories = { activeTab = GoonedDockTab.BROWSE },
@@ -402,48 +443,129 @@ fun GoonedMainShell() {
         )
 
         if (activeTab == GoonedDockTab.HOME && !userData.settings.controlsCollapsed) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
                     .fillMaxWidth()
             ) {
-                IconButton(onClick = { activeTab = GoonedDockTab.BROWSE }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
-                    Icon(Icons.Default.Search, contentDescription = "Explore", tint = Color.White)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .fillMaxWidth()
+                ) {
+                    IconButton(onClick = { activeTab = GoonedDockTab.BROWSE }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                        Icon(Icons.Default.Search, contentDescription = "Explore", tint = Color.White)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    if (activeChannel == HomeChannel.CUSTOM) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .liquidGlassCapsule(tinted)
+                                .clickable { popBack() }
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Text(customModel.source.value.displayTitle, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                        Spacer(Modifier.weight(1f))
+                    } else {
+                        Row(
+                            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ChannelTextTab("Following", activeChannel == HomeChannel.FOLLOWING) { selectFeed(FeedSource.Following) }
+                            ChannelTextTab("For You", activeChannel == HomeChannel.FOR_YOU) { selectFeed(FeedSource.ForYou) }
+                            ChannelIconTab(
+                                active = activeChannel == HomeChannel.X_FOR_YOU || activeChannel == HomeChannel.X_FOLLOWING || activeChannel == HomeChannel.X_BOOKMARKS || activeChannel == HomeChannel.X_LIKES,
+                                showDot = !userData.xSession.isConnected,
+                                onClick = { selectXOrLogin(FeedSource.XForYou) }
+                            ) {
+                                Box(
+                                    modifier = Modifier.size(30.dp).liquidGlassCircle(tinted = false),
+                                    contentAlignment = Alignment.Center
+                                ) { BrandLogoX(16.dp) }
+                            }
+                            ChannelIconTab(active = activeChannel == HomeChannel.RULE34, onClick = { selectFeed(FeedSource.Rule34("")) }) {
+                                BrandLogoRule34(28.dp)
+                            }
+                            ChannelIconTab(
+                                active = activeChannel == HomeChannel.IG_REELS || activeChannel == HomeChannel.IG_FOLLOWING || activeChannel == HomeChannel.IG_SAVED,
+                                onClick = { selectIGOrLogin(FeedSource.IGReels) }
+                            ) {
+                                BrandLogoInstagram(28.dp)
+                            }
+                            ChannelIconTab(
+                                active = activeChannel == HomeChannel.OF_FOR_YOU || activeChannel == HomeChannel.OF_TRENDING || activeChannel == HomeChannel.OF_LATEST || activeChannel == HomeChannel.OF_DMS,
+                                onClick = { selectFeed(FeedSource.OFForYou) }
+                            ) {
+                                BrandLogoOnlyFans(28.dp)
+                            }
+                            ChannelIconTab(active = activeChannel == HomeChannel.LONG_ALL, onClick = { selectFeed(FeedSource.LongVideos(LongVideoSite.ALL)) }) {
+                                BrandLogoLongVideos(28.dp)
+                            }
+                            ChannelIconTab(active = activeChannel == HomeChannel.LONG_EROME, onClick = { selectFeed(FeedSource.LongVideos(LongVideoSite.EROME)) }) {
+                                BrandLogoErome(28.dp)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = { showSettingsModal = true }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                    }
                 }
-                Spacer(Modifier.width(8.dp))
-                if (activeChannel == HomeChannel.CUSTOM) {
+
+                // Sub-channel switcher pills for X, IG, OF, and Long Videos (matches iOS)
+                val subChannels: List<Triple<String, Boolean, () -> Unit>> = when (activeChannel) {
+                    HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES -> listOf(
+                        Triple("For You", activeChannel == HomeChannel.X_FOR_YOU) { selectXOrLogin(FeedSource.XForYou) },
+                        Triple("Following", activeChannel == HomeChannel.X_FOLLOWING) { selectXOrLogin(FeedSource.XFollowing) },
+                        Triple("Bookmarks", activeChannel == HomeChannel.X_BOOKMARKS) { selectXOrLogin(FeedSource.XBookmarks) },
+                        Triple("Likes", activeChannel == HomeChannel.X_LIKES) { selectXOrLogin(FeedSource.XLikes) }
+                    )
+                    HomeChannel.IG_REELS, HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED -> listOf(
+                        Triple("Reels", activeChannel == HomeChannel.IG_REELS) { selectIGOrLogin(FeedSource.IGReels) },
+                        Triple("Following", activeChannel == HomeChannel.IG_FOLLOWING) { selectIGOrLogin(FeedSource.IGFollowing) },
+                        Triple("Saved", activeChannel == HomeChannel.IG_SAVED) { selectIGOrLogin(FeedSource.IGSaved) }
+                    )
+                    HomeChannel.OF_FOR_YOU, HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS -> listOf(
+                        Triple("For You", activeChannel == HomeChannel.OF_FOR_YOU) { selectFeed(FeedSource.OFForYou) },
+                        Triple("Trending", activeChannel == HomeChannel.OF_TRENDING) { selectFeed(FeedSource.OFTrending) },
+                        Triple("Latest", activeChannel == HomeChannel.OF_LATEST) { selectFeed(FeedSource.OFLatest) },
+                        Triple("DMs", activeChannel == HomeChannel.OF_DMS) { selectFeed(FeedSource.OFDMs) }
+                    )
+                    HomeChannel.LONG_ALL -> listOf(
+                        Triple("All Sites", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.ALL)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.ALL)) },
+                        Triple("Eporner", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.EPORNER)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.EPORNER)) },
+                        Triple("XVideos", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XVIDEOS)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XVIDEOS)) },
+                        Triple("Pornhub", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.PORNHUB)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.PORNHUB)) },
+                        Triple("xHamster", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.XHAMSTER)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.XHAMSTER)) },
+                        Triple("SpankBang", longAllModel.source.value == FeedSource.LongVideos(LongVideoSite.SPANKBANG)) { longAllModel.switchSource(FeedSource.LongVideos(LongVideoSite.SPANKBANG)) }
+                    )
+                    else -> emptyList()
+                }
+                if (subChannels.isNotEmpty()) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .liquidGlassCapsule(tinted)
-                            .clickable { popBack() }
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 14.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(18.dp))
-                        Text(customModel.source.value.displayTitle, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        subChannels.forEach { (lbl, isAct, act) ->
+                            Box(
+                                modifier = Modifier
+                                    .liquidGlassCapsule(tinted = tinted, active = isAct)
+                                    .clickable { act() }
+                                    .padding(horizontal = 12.dp, vertical = 5.dp)
+                            ) {
+                                Text(lbl, color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
-                    Spacer(Modifier.weight(1f))
-                } else {
-                    Row(
-                        modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        ChannelChip("Following", activeChannel == HomeChannel.FOLLOWING, tinted) { selectFeed(FeedSource.Following) }
-                        ChannelChip("For You", activeChannel == HomeChannel.FOR_YOU, tinted) { selectFeed(FeedSource.ForYou) }
-                        ChannelChip("𝕏", activeChannel == HomeChannel.X_FOR_YOU, tinted) { selectXOrLogin(FeedSource.XForYou) }
-                        ChannelChip("34", activeChannel == HomeChannel.RULE34, tinted) { selectFeed(FeedSource.Rule34("")) }
-                        ChannelChip("IG", activeChannel == HomeChannel.IG_REELS, tinted) { selectIGOrLogin(FeedSource.IGReels) }
-                        ChannelChip("OF", activeChannel == HomeChannel.OF_FOR_YOU, tinted) { selectFeed(FeedSource.OFForYou) }
-                        ChannelChip("Erome", activeChannel == HomeChannel.LONG_EROME, tinted) { selectFeed(FeedSource.LongVideos(LongVideoSite.EROME)) }
-                        ChannelChip("Long", activeChannel == HomeChannel.LONG_ALL, tinted) { selectFeed(FeedSource.LongVideos(LongVideoSite.ALL)) }
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                IconButton(onClick = { showSettingsModal = true }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
                 }
             }
         }
@@ -564,14 +686,65 @@ fun GoonedMainShell() {
 }
 
 @Composable
-private fun ChannelChip(label: String, active: Boolean, tinted: Boolean, onClick: () -> Unit) {
-    Box(
+private fun ChannelTextTab(label: String, active: Boolean, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
-            .liquidGlassCapsule(tinted = tinted, active = active)
             .clickable { onClick() }
-            .padding(horizontal = 13.dp, vertical = 7.dp)
+            .padding(horizontal = 4.dp, vertical = 4.dp)
     ) {
-        Text(label, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text = label,
+            color = if (active) Color.White else Color.White.copy(alpha = 0.62f),
+            fontSize = 15.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
+        )
+        Spacer(Modifier.height(3.dp))
+        Box(
+            modifier = Modifier
+                .width(if (active) 18.dp else 0.dp)
+                .height(2.5.dp)
+                .clip(CircleShape)
+                .background(if (active) Color.White else Color.Transparent)
+        )
+    }
+}
+
+@Composable
+private fun ChannelIconTab(
+    active: Boolean,
+    showDot: Boolean = false,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable { onClick() }
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+    ) {
+        Box {
+            Box(modifier = Modifier.alpha(if (active) 1f else 0.72f)) {
+                icon()
+            }
+            if (showDot) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .align(Alignment.TopEnd)
+                        .clip(CircleShape)
+                        .background(Theme.accentBright)
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+        Box(
+            modifier = Modifier
+                .width(if (active) 14.dp else 0.dp)
+                .height(2.5.dp)
+                .clip(CircleShape)
+                .background(if (active) Color.White else Color.Transparent)
+        )
     }
 }
 

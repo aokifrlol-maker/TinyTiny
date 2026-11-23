@@ -205,10 +205,19 @@ fun AgeGateView() {
 
 @Composable
 fun WelcomeOnboardingView(onContinue: () -> Unit) {
+    var page by remember { mutableIntStateOf(0) }
+    val steps = listOf(
+        Triple("Welcome to TinyTiny", "One Encrypted Vault", "Stream Reddit, 𝕏, Instagram, Rule34, OnlyFans, Erome, and Long Videos in a fast Liquid Glass feed."),
+        Triple("Precision Gestures", "Control Every Frame", "Hold & drag left/right to scrub with live preview. Hold still for 2x speed, pull down to lock 2x, double-tap center to Like or edges to Skip."),
+        Triple("Private & Synced", "AES-256-GCM Encrypted", "Your likes, follows, accounts, and offline vault are encrypted on-device and synced seamlessly between iOS and Android.")
+    )
+    val (title, subtitle, body) = steps[page]
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Theme.bg)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -220,26 +229,33 @@ fun WelcomeOnboardingView(onContinue: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("Welcome to TinyTiny", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "Stream Reddit, 𝕏, Instagram, Rule34, OnlyFans, Erome, and Long Videos in one encrypted Liquid Glass vault.",
-                color = Theme.textSecondary,
-                fontSize = 14.sp,
-                textAlign = TextAlign.Center
-            )
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Text("• Hold & drag left/right on videos to scrub with live preview", color = Color.White.copy(0.85f), fontSize = 13.sp)
-                Text("• Hold still for 2x speed · Pull down to lock 2x", color = Color.White.copy(0.85f), fontSize = 13.sp)
-                Text("• Double-tap center to Like, left/right to Skip", color = Color.White.copy(0.85f), fontSize = 13.sp)
-                Text("• Everything is encrypted locally with AES-256-GCM", color = Color.White.copy(0.85f), fontSize = 13.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                BrandLogoX(22.dp)
+                BrandLogoRule34(24.dp)
+                BrandLogoInstagram(24.dp)
+                BrandLogoOnlyFans(24.dp)
+                BrandLogoErome(24.dp)
+            }
+            Text(title, color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            Text(subtitle, color = Theme.accentBright, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(body, color = Theme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                steps.indices.forEach { idx ->
+                    Box(
+                        modifier = Modifier
+                            .size(width = if (idx == page) 22.dp else 8.dp, height = 8.dp)
+                            .clip(CircleShape)
+                            .background(if (idx == page) Theme.accentBright else Color.White.copy(0.25f))
+                    )
+                }
             }
             Button(
-                onClick = onContinue,
+                onClick = { if (page < steps.lastIndex) page++ else onContinue() },
                 colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
                 shape = RoundedCornerShape(999.dp),
                 modifier = Modifier.fillMaxWidth().height(48.dp)
             ) {
-                Text("Continue", fontWeight = FontWeight.Bold)
+                Text(if (page < steps.lastIndex) "Next" else "Get Started", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -256,9 +272,10 @@ fun PasscodeSetupView(isOnboarding: Boolean = true, onDone: () -> Unit) {
         title = if (step == 0) "Create 4-Digit Passcode" else "Confirm Passcode",
         subtitle = errorMsg ?: (if (isOnboarding) "Optional — skip below to stay unlocked" else "Enter a 4-digit vault PIN"),
         code = code,
-        showSkip = isOnboarding,
+        showSkip = true,
+        skipLabel = if (isOnboarding) "Skip Passcode" else "Cancel",
         onSkip = {
-            AppState.skipPasscodeOnOnboarding()
+            if (isOnboarding) AppState.skipPasscodeOnOnboarding()
             onDone()
         },
         onDigit = { d ->
@@ -352,7 +369,7 @@ fun LockView() {
 
         TextButton(
             onClick = { showRecovery = true },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 22.dp)
         ) {
             Text("Forgot Passcode? Recover with License Key", color = Theme.textSecondary, fontSize = 13.sp)
         }
@@ -394,6 +411,7 @@ private fun PasscodePadScreen(
     subtitle: String? = null,
     code: String,
     showSkip: Boolean = false,
+    skipLabel: String = "Skip Passcode",
     onSkip: () -> Unit = {},
     showBiometric: Boolean = false,
     onBiometric: () -> Unit = {},
@@ -455,7 +473,7 @@ private fun PasscodePadScreen(
         if (showSkip) {
             Spacer(Modifier.height(22.dp))
             TextButton(onClick = onSkip) {
-                Text("Skip Passcode", color = Theme.textSecondary)
+                Text(skipLabel, color = Theme.textSecondary)
             }
         }
     }

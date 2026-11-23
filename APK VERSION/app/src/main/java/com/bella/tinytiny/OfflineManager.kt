@@ -90,7 +90,6 @@ object OfflineManager {
                 withContext(Dispatchers.Main) {
                     UserStore.shared.recordDownloaded(localPost)
                 }
-                saveToMediaStoreGallery(savedFile, isVideo = !gif.isImage)
                 refreshDiskUsage()
             } else {
                 lastError.value = "Download failed. Try again."

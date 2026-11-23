@@ -178,8 +178,9 @@ object OnlyFansAPI {
         return if (kind == "video") {
             val file = defaultFilename(att.mime, kind)
             val original = "$MEDIA_CDN/$sk/$file"
-            val hdVariant = listOf("1080p", "720p", "480p", "360p").firstOrNull { it in variantNames }
-            val sdVariant = listOf("480p", "720p", "360p").firstOrNull { it in variantNames }
+            val isMp4Orig = file.endsWith(".mp4", ignoreCase = true)
+            val hdVariant = if (isMp4Orig) listOf("1080p", "720p", "480p", "360p").firstOrNull { it in variantNames } else null
+            val sdVariant = if (isMp4Orig) listOf("480p", "720p", "360p").firstOrNull { it in variantNames } else null
             val hdUrl = hdVariant?.let { "$MEDIA_CDN/$sk/$it.mp4" } ?: original
             val sdUrl = sdVariant?.let { "$MEDIA_CDN/$sk/$it.mp4" } ?: original
             Gif(
@@ -302,7 +303,13 @@ object OnlyFansAPI {
         return try {
             val resp: OFFeedResponse = get("/creators/onlyfans/$creatorId/posts", mapOf("n" to "35", "offset" to "$offset"))
             val gifs = mapPosts(resp.posts)
-            GoonedFeedResponse(gifs, if (gifs.isEmpty()) null else "${offset + 35}")
+            if (gifs.isNotEmpty()) {
+                GoonedFeedResponse(gifs, "${offset + 35}")
+            } else {
+                // Similar-creator infinite continuation (matches iOS)
+                val similar = fetchForYou("${offset}")
+                GoonedFeedResponse(similar.posts, similar.after)
+            }
         } catch (_: Throwable) {
             GoonedFeedResponse()
         }

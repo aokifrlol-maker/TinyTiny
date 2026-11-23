@@ -62,6 +62,45 @@ object ShareService {
     val pendingReceivedTitle = MutableStateFlow<String?>(null)
 
     suspend fun createEncryptedShareLink(post: Gif): Pair<String, String>? {
+        val localUrl = OfflineManager.localMediaURL(post.id)
+        if (localUrl != null && localUrl.startsWith("file://")) {
+            val file = File(localUrl.removePrefix("file://"))
+            if (file.exists() && file.length() in 1..(45L * 1024L * 1024L)) {
+                val key = CryptoBox.generateKey()
+                val encodedKey = CryptoBox.exportKeyBase64URL(key)
+                val sealedBlob = CryptoBox.seal(file.readBytes(), key)
+                val blobUrl = LicenseManager.uploadTemporaryEncryptedBlob(sealedBlob, file.name)
+                if (!blobUrl.isNullOrEmpty()) {
+                    val ext = file.extension.ifEmpty { "mp4" }
+                    val payload = ShareDropPayload(
+                        title = post.title ?: post.author,
+                        encryptedBlobUrl = blobUrl,
+                        fileExtension = ext
+                    )
+                    val raw = CryptoBox.json.encodeToString(payload).toByteArray(Charsets.UTF_8)
+                    val sealed = CryptoBox.seal(raw, key)
+                    val b64 = Base64.encodeToString(sealed, Base64.NO_WRAP)
+                    try {
+                        val bodyJson = JSONObject().apply {
+                            put("key", LicenseManager.status.value.licenseKey)
+                            put("cipher", b64)
+                        }.toString()
+                        val req = Request.Builder()
+                            .url("${LicenseManager.normalizedBaseURL}/v1/share")
+                            .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                            .build()
+                        client.newCall(req).execute().use { resp ->
+                            if (resp.code == 200) {
+                                val shareId = JSONObject(resp.body?.string() ?: "").optString("id")
+                                if (shareId.isNotEmpty()) {
+                                    return "tinytiny://drop/$shareId#k=$encodedKey" to "TTDROP:$shareId.$encodedKey"
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
         val payload = ShareDropPayload(title = post.title ?: post.author, post = post)
         return sealAndPublishPayload(payload)
     }
@@ -260,6 +299,8 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = settings.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(20.dp)
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -307,6 +348,72 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
 }
 
 @Composable
+fun ShareCollectionSheet(posts: List<Gif>, title: String? = null, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val settings by UserStore.shared.data.collectAsState()
+    var link by remember { mutableStateOf<String?>(null) }
+    var code by remember { mutableStateOf<String?>(null) }
+    var copied by remember { mutableStateOf(false) }
+
+    LaunchedEffect(posts) {
+        val res = ShareService.createEncryptedCollectionShareLink(posts, title)
+        link = res?.first
+        code = res?.second
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .liquidGlassBackground(tinted = settings.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(20.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright)
+                Spacer(Modifier.width(8.dp))
+                Text("Share ${posts.size} Clips", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White) }
+            }
+            Text("End-to-end AES-256-GCM encrypted collection drop.", color = Theme.textSecondary, fontSize = 12.5.sp)
+
+            if (link == null) {
+                CircularProgressIndicator(color = Theme.accentBright)
+            } else {
+                Column(modifier = Modifier.fillMaxWidth().liquidGlassCard(cornerRadius = 16.dp).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(code ?: "", color = Color.White, fontSize = 12.sp, maxLines = 2)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("TinyTiny Collection", code ?: link))
+                                copied = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (copied) "Copied!" else "Copy Code")
+                        }
+                        OutlinedButton(onClick = {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, link ?: code)
+                            }
+                            ctx.startActivity(Intent.createChooser(send, "Share Collection"))
+                        }) {
+                            Text("Share Link", color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun ReceiveDropSheet(onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val settings by UserStore.shared.data.collectAsState()
@@ -318,6 +425,8 @@ fun ReceiveDropSheet(onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = settings.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(20.dp)
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -372,6 +481,8 @@ fun IGDirectSendSheet(payload: DirectIGDropPayload, onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = settings.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(20.dp)
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -126,6 +126,7 @@ object InstagramWebEngine {
     )
 
     private var webView: WebView? = null
+    private var hostContainer: ViewGroup? = null
     private val routeBuffers = ConcurrentHashMap<String, MutableList<Gif>>()
     @Volatile private var activeRouteKey = "ig_reels"
 
@@ -133,17 +134,34 @@ object InstagramWebEngine {
         (function(){
           if(window.__ttIGHooked) return;
           window.__ttIGHooked = true;
+          function isIGApi(u){
+            return u && (u.includes('/api/v1/') || u.includes('/graphql/query'));
+          }
           const origFetch = window.fetch;
           window.fetch = async function(){
             const resp = await origFetch.apply(this, arguments);
             try {
               const url = (arguments[0] && arguments[0].url) ? arguments[0].url : String(arguments[0] || '');
-              if(url.includes('/api/v1/') || url.includes('/graphql/query')) {
+              if(isIGApi(url)) {
                 const clone = resp.clone();
                 clone.text().then(t => { if(t && t.length > 100) window.TTIGBridge.onPayload(url, t); });
               }
             } catch(e){}
             return resp;
+          };
+          const origOpen = XMLHttpRequest.prototype.open;
+          const origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(m, u){ this.__ttUrl = String(u || ''); return origOpen.apply(this, arguments); };
+          XMLHttpRequest.prototype.send = function(){
+            this.addEventListener('load', function(){
+              try {
+                if(isIGApi(this.__ttUrl)) {
+                  const t = typeof this.responseText === 'string' ? this.responseText : '';
+                  if(t && t.length > 100) window.TTIGBridge.onPayload(this.__ttUrl, t);
+                }
+              } catch(e){}
+            });
+            return origSend.apply(this, arguments);
           };
         })();
     """
@@ -162,21 +180,68 @@ object InstagramWebEngine {
         }
     }
 
+    fun attachHost(container: ViewGroup) {
+        hostContainer = container
+        val wv = webView ?: return
+        if (wv.parent !== container) {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            container.addView(wv, ViewGroup.LayoutParams(390, 844))
+        }
+    }
+
+    fun resetSession() {
+        routeBuffers.clear()
+        webView?.let { wv ->
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.destroy()
+        }
+        webView = null
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun ensureWebView(): WebView = withContext(Dispatchers.Main) {
-        webView?.let { return@withContext it }
-        val wv = WebView(TinyTinyApplication.instance).apply {
+        webView?.let { existing ->
+            hostContainer?.let { host ->
+                if (existing.parent !== host) {
+                    (existing.parent as? ViewGroup)?.removeView(existing)
+                    host.addView(existing, ViewGroup.LayoutParams(390, 844))
+                }
+            }
+            return@withContext existing
+        }
+        val ctx = hostContainer?.context ?: TinyTinyApplication.instance
+        val chromeUa = try {
+            android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+        } catch (_: Throwable) {
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+        }
+        val wv = WebView(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(390, 844)
+            setBackgroundColor(android.graphics.Color.BLACK)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.userAgentString = Config.userAgent
+            settings.databaseEnabled = true
+            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = true
+            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            settings.userAgentString = chromeUa
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(Bridge(), "TTIGBridge")
+            webChromeClient = android.webkit.WebChromeClient()
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    view?.evaluateJavascript(HOOK_JS, null)
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     view?.evaluateJavascript(HOOK_JS, null)
                 }
             }
         }
+        hostContainer?.addView(wv, ViewGroup.LayoutParams(390, 844))
         webView = wv
         wv
     }
@@ -314,8 +379,9 @@ object InstagramAPI {
         InstagramWebEngine.fetchRoute("ig_following", "https://www.instagram.com/", after)
 
     suspend fun savedFeed(after: String? = null): GoonedFeedResponse {
-        val uname = UserStore.shared.data.value.igSession.username.ifEmpty { "saved" }
-        return InstagramWebEngine.fetchRoute("ig_saved", "https://www.instagram.com/$uname/saved/", after)
+        val uname = UserStore.shared.data.value.igSession.username.trim().removePrefix("@")
+        val target = if (uname.isNotEmpty() && uname != "IG Account") "https://www.instagram.com/$uname/saved/" else "https://www.instagram.com/accounts/saved/"
+        return InstagramWebEngine.fetchRoute("ig_saved", target, after)
     }
 
     suspend fun userReels(handle: String, after: String? = null): GoonedFeedResponse {
@@ -330,11 +396,59 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
     val store = UserStore.shared
     val userData by store.data.collectAsState()
     var detected by remember { mutableStateOf(false) }
+    var loginWebView by remember { mutableStateOf<WebView?>(null) }
+
+    fun checkCookiesAndComplete(wv: WebView?) {
+        if (detected) return
+        val cookies = CookieManager.getInstance().getCookie("https://www.instagram.com") ?: ""
+        val map = cookies.split(";").mapNotNull {
+            val p = it.trim().split("=", limit = 2)
+            if (p.size == 2) p[0] to p[1] else null
+        }.toMap()
+        val sid = map["sessionid"] ?: ""
+        val csrf = map["csrftoken"] ?: ""
+        val uid = map["ds_user_id"] ?: ""
+        if (sid.isNotEmpty() && csrf.isNotEmpty()) {
+            detected = true
+            val finishWithHandle: (String) -> Unit = { handle ->
+                val clean = handle.trim().removePrefix("@").ifEmpty { "IG Account" }
+                store.updateIGSession(
+                    InstagramAccountSession(
+                        username = clean,
+                        userId = uid,
+                        sessionId = sid,
+                        csrfToken = csrf,
+                        isConnected = true
+                    )
+                )
+                onConnected()
+            }
+            if (wv != null) {
+                wv.evaluateJavascript(
+                    "(function(){ const a = document.querySelector('a[href^=\"/\"][role=\"link\"] span'); return (window._sharedData && window._sharedData.config && window._sharedData.config.viewer && window._sharedData.config.viewer.username) || (a ? a.innerText : '') || ''; })()"
+                ) { res ->
+                    val parsed = res?.trim('"')?.takeIf { it.isNotEmpty() && it != "null" && !it.contains(" ") } ?: ""
+                    finishWithHandle(parsed)
+                }
+            } else {
+                finishWithHandle("")
+            }
+        }
+    }
+
+    LaunchedEffect(loginWebView) {
+        while (!detected) {
+            kotlinx.coroutines.delay(650)
+            checkCookiesAndComplete(loginWebView)
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .liquidGlassBackground(tinted = userData.settings.tintedGlass)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(14.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -357,34 +471,28 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            loginWebView = this
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            val chromeUa = try {
+                                android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                            } catch (_: Throwable) {
+                                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                            }
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.loadWithOverviewMode = true
+                            settings.useWideViewPort = true
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            settings.userAgentString = chromeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webChromeClient = android.webkit.WebChromeClient()
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                 override fun onPageFinished(view: WebView?, url: String?) {
-                                    val cookies = CookieManager.getInstance().getCookie("https://www.instagram.com") ?: ""
-                                    val map = cookies.split(";").mapNotNull {
-                                        val p = it.trim().split("=", limit = 2)
-                                        if (p.size == 2) p[0] to p[1] else null
-                                    }.toMap()
-                                    val sid = map["sessionid"] ?: ""
-                                    val csrf = map["csrftoken"] ?: ""
-                                    val uid = map["ds_user_id"] ?: ""
-                                    if (sid.isNotEmpty() && csrf.isNotEmpty() && !detected) {
-                                        detected = true
-                                        store.updateIGSession(
-                                            InstagramAccountSession(
-                                                username = "IG Account",
-                                                userId = uid,
-                                                sessionId = sid,
-                                                csrfToken = csrf,
-                                                isConnected = true
-                                            )
-                                        )
-                                        onConnected()
-                                    }
+                                    checkCookiesAndComplete(view)
                                 }
                             }
                             loadUrl("https://www.instagram.com/accounts/login/")

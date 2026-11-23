@@ -42,6 +42,7 @@ sealed class FeedSource {
     data class OFSearch(val query: String) : FeedSource()
     data class LongVideos(val site: LongVideoSite) : FeedSource()
     data class LongSearch(val site: LongVideoSite, val query: String) : FeedSource()
+    data class MultiSearch(val query: String) : FeedSource()
     data class CustomList(val title: String) : FeedSource()
 
     val isList: Boolean get() = this is CustomList
@@ -91,6 +92,7 @@ sealed class FeedSource {
             is OFSearch -> "OF: $query"
             is LongVideos -> site.displayTitle
             is LongSearch -> "${site.displayTitle}: $query"
+            is MultiSearch -> "Search: $query"
             is CustomList -> title
         }
 
@@ -120,6 +122,7 @@ sealed class FeedSource {
             is OFSearch -> "ofsearch" to query
             is LongVideos -> "long" to site.rawValue
             is LongSearch -> "longsearch" to "${site.rawValue}:$query"
+            is MultiSearch -> "multisearch" to query
             is CustomList -> "list" to title
         }
 }
@@ -137,6 +140,10 @@ class FeedModel(
     val errorText = MutableStateFlow<String?>(null)
 
     private var afterCursor: String? = null
+    private var mixOfCursor: String? = null
+    private var mixR34Cursor: String? = null
+    private var mixXCursor: String? = null
+    private var mixIGCursor: String? = null
     private var hasMore = initialSource !is FeedSource.CustomList
     private val ids = mutableSetOf<String>()
     private val mediaKeys = mutableSetOf<String>()
@@ -175,7 +182,7 @@ class FeedModel(
     private fun isProfileOrSearch(src: FeedSource): Boolean = when (src) {
         is FeedSource.XUser, is FeedSource.XSearch, is FeedSource.XBookmarks, is FeedSource.XLikes,
         is FeedSource.IGUser, is FeedSource.IGSaved, is FeedSource.OFCreator, is FeedSource.OFSearch,
-        is FeedSource.User, is FeedSource.Subreddit, is FeedSource.LongSearch -> true
+        is FeedSource.User, is FeedSource.Subreddit, is FeedSource.LongSearch, is FeedSource.MultiSearch -> true
         is FeedSource.Rule34 -> src.tag.trim().isNotEmpty()
         else -> false
     }
@@ -191,6 +198,10 @@ class FeedModel(
         ids.clear()
         mediaKeys.clear()
         seenSimKeys.clear()
+        mixOfCursor = null
+        mixR34Cursor = null
+        mixXCursor = null
+        mixIGCursor = null
         errorText.value = null
         if (initialItems.isNotEmpty()) {
             items.value = initialItems
@@ -224,14 +235,38 @@ class FeedModel(
     }
 
     fun removeDisliked(gif: Gif) {
-        items.value = items.value.filterNot { it.id == gif.id }
+        val cur = items.value
+        val curIdx = cur.indexOfFirst { it.id == gif.id }
+        val cats = UserStore.shared.categories.value
+        val engine = SmartTasteEngine.shared
+        val next = cur.mapIndexedNotNull { idx, item ->
+            if (item.id == gif.id) null
+            else if (curIdx >= 0 && idx > curIdx && engine.isSuppressedInDiscovery(item, cats)) null
+            else item
+        }
+        items.value = if (curIdx >= 0 && curIdx < next.size) {
+            val head = next.subList(0, curIdx)
+            val tail = UserStore.shared.rankWithAlgorithm(next.subList(curIdx, next.size))
+            head + tail
+        } else next
     }
 
     fun onItemAppear(gif: Gif) {
         val list = items.value
         val idx = list.indexOfFirst { it.id == gif.id }
-        if (idx >= 0 && list.size - idx <= 10 && canLoadMore && !isLoading.value) {
-            scope.launch { loadMore() }
+        if (idx >= 0) {
+            // Prefetch upcoming thumbnails/images with MediaHeaders
+            val ctx = TinyTinyApplication.instance
+            val loader = coil.Coil.imageLoader(ctx)
+            for (nextIdx in (idx + 1)..minOf(list.lastIndex, idx + 3)) {
+                val u = list[nextIdx].imageURL ?: list[nextIdx].posterURL ?: continue
+                val rb = coil.request.ImageRequest.Builder(ctx).data(u)
+                for ((k, v) in MediaHeaders.headers(u)) rb.addHeader(k, v)
+                loader.enqueue(rb.build())
+            }
+            if (list.size - idx <= 10 && canLoadMore && !isLoading.value) {
+                scope.launch { loadMore() }
+            }
         }
     }
 
@@ -240,6 +275,10 @@ class FeedModel(
         ids.clear()
         mediaKeys.clear()
         seenSimKeys.clear()
+        mixOfCursor = null
+        mixR34Cursor = null
+        mixXCursor = null
+        mixIGCursor = null
         items.value = emptyList()
         hasMore = true
         afterCursor = when {
@@ -351,24 +390,59 @@ class FeedModel(
         is FeedSource.OFSearch -> OnlyFansAPI.searchPosts(src.query, cursor)
         is FeedSource.LongVideos -> LongVideoAPI.fetchFeed(src.site, s.rawValue, null, cursor)
         is FeedSource.LongSearch -> LongVideoAPI.fetchFeed(src.site, s.rawValue, src.query, cursor)
+        is FeedSource.MultiSearch -> fetchMultiSearch(src.query, s, cursor)
         is FeedSource.CustomList -> GoonedFeedResponse()
+    }
+
+    private suspend fun fetchMultiSearch(query: String, s: FeedSort, cursor: String?): GoonedFeedResponse = coroutineScope {
+        val d = UserStore.shared.data.value
+        val ofDef = async { try { OnlyFansAPI.searchPosts(query, cursor) } catch (_: Throwable) { null } }
+        val r34Def = async { try { Rule34API.fetchFeed(Rule34API.parseTags(query).joinToString(" "), s.rawValue, cursor, d.r34Credentials) } catch (_: Throwable) { null } }
+        val eromeDef = async { try { LongVideoAPI.fetchFeed(LongVideoSite.EROME, s.rawValue, query, cursor) } catch (_: Throwable) { null } }
+        val longDef = async { try { LongVideoAPI.fetchFeed(LongVideoSite.ALL, s.rawValue, query, cursor) } catch (_: Throwable) { null } }
+        val xDef = if (d.xSession.isConnected) async { try { XAPI.search(query, cursor) } catch (_: Throwable) { null } } else null
+        val pools = listOfNotNull(
+            ofDef.await()?.posts,
+            eromeDef.await()?.posts,
+            r34Def.await()?.posts,
+            longDef.await()?.posts,
+            xDef?.await()?.posts
+        ).filter { it.isNotEmpty() }
+        val mixed = mutableListOf<Gif>()
+        val maxLen = pools.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxLen) {
+            for (p in pools) if (i < p.size) mixed.add(p[i])
+        }
+        val nextPage = (cursor?.toIntOrNull() ?: 1) + 1
+        GoonedFeedResponse(mixed, if (mixed.isEmpty()) null else "$nextPage")
     }
 
     private suspend fun fetchMixedForYou(s: FeedSort, cursor: String?): GoonedFeedResponse = coroutineScope {
         val fy = SmartTasteEngine.shared.state.value.forYouSources
         val d = UserStore.shared.data.value
         val rDef = if (fy.enableReddit) async { try { GoonedAPI.forYou(s.rawValue, after = cursor) } catch (_: Throwable) { null } } else null
-        val ofDef = if (fy.enableOnlyFans) async { try { OnlyFansAPI.fetchForYou(null) } catch (_: Throwable) { null } } else null
-        val r34Def = if (fy.enableRule34) async { try { Rule34API.fetchFeed(null, s.rawValue, null, d.r34Credentials) } catch (_: Throwable) { null } } else null
-        val xDef = if (fy.enableX && d.xSession.isConnected) async { try { XAPI.forYou(null) } catch (_: Throwable) { null } } else null
-        val igDef = if (fy.enableIG && d.igSession.isConnected) async { try { InstagramAPI.reelsFeed(null) } catch (_: Throwable) { null } } else null
+        val ofDef = if (fy.enableOnlyFans) async { try { OnlyFansAPI.fetchForYou(mixOfCursor) } catch (_: Throwable) { null } } else null
+        val r34Def = if (fy.enableRule34) async { try { Rule34API.fetchFeed(null, s.rawValue, mixR34Cursor, d.r34Credentials) } catch (_: Throwable) { null } } else null
+        val xDef = if (fy.enableX && d.xSession.isConnected) async { try { XAPI.forYou(mixXCursor) } catch (_: Throwable) { null } } else null
+        val igDef = if (fy.enableIG && d.igSession.isConnected) async { try { InstagramAPI.reelsFeed(mixIGCursor) } catch (_: Throwable) { null } } else null
+
+        val rResp = rDef?.await()
+        val ofResp = ofDef?.await()
+        val r34Resp = r34Def?.await()
+        val xResp = xDef?.await()
+        val igResp = igDef?.await()
+
+        ofResp?.after?.let { mixOfCursor = it }
+        r34Resp?.after?.let { mixR34Cursor = it }
+        xResp?.after?.let { mixXCursor = it }
+        igResp?.after?.let { mixIGCursor = it }
 
         val pools = listOfNotNull(
-            rDef?.await()?.posts,
-            ofDef?.await()?.posts,
-            r34Def?.await()?.posts,
-            xDef?.await()?.posts,
-            igDef?.await()?.posts
+            rResp?.posts,
+            ofResp?.posts,
+            r34Resp?.posts,
+            xResp?.posts,
+            igResp?.posts
         ).filter { it.isNotEmpty() }
 
         val mixed = mutableListOf<Gif>()
@@ -376,7 +450,7 @@ class FeedModel(
         for (i in 0 until maxLen) {
             for (p in pools) if (i < p.size) mixed.add(p[i])
         }
-        GoonedFeedResponse(mixed, rDef?.await()?.after ?: GoonedAPI.randomForYouCursor(25))
+        GoonedFeedResponse(mixed, rResp?.after ?: GoonedAPI.randomForYouCursor(25))
     }
 
     private suspend fun loadDiskCache(key: String): List<Gif> = withContext(Dispatchers.IO) {

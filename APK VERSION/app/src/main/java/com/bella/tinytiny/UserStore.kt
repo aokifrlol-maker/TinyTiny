@@ -10,9 +10,30 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+
+object FlexibleEpochSecondsSerializer : KSerializer<Double> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("FlexibleEpochSeconds", PrimitiveKind.DOUBLE)
+    override fun serialize(encoder: Encoder, value: Double) = encoder.encodeDouble(value)
+    override fun deserialize(decoder: Decoder): Double {
+        return if (decoder is JsonDecoder) {
+            val prim = decoder.decodeJsonElement().jsonPrimitive
+            prim.content.toDoubleOrNull() ?: (System.currentTimeMillis() / 1000.0)
+        } else {
+            decoder.decodeDouble()
+        }
+    }
+}
 
 @Serializable
 data class AppSettings(
@@ -23,8 +44,10 @@ data class AppSettings(
     var autoScrollDelay: Int = 6,
     var playVideosToEnd: Boolean = true,
     var fillScreen: Boolean = false,
+    var videoFitScreen: Boolean = true,
     var controlsCollapsed: Boolean = false,
-    var tintedGlass: Boolean = false
+    var tintedGlass: Boolean = false,
+    var algorithmEnabled: Boolean = true
 )
 
 @Serializable
@@ -33,7 +56,11 @@ data class AlgorithmProfile(
     var blockedTags: List<String> = emptyList(),
     var tagWeights: MutableMap<String, Double> = mutableMapOf(),
     var preferredAuthors: MutableMap<String, Double> = mutableMapOf(),
-    var preferredSubreddits: MutableMap<String, Double> = mutableMapOf()
+    var preferredSubreddits: MutableMap<String, Double> = mutableMapOf(),
+    var subredditWeights: MutableMap<String, Double> = mutableMapOf(),
+    var creatorWeights: MutableMap<String, Double> = mutableMapOf(),
+    var videoPreference: Double = 0.5,
+    var totalSignals: Int = 0
 )
 
 @Serializable
@@ -42,7 +69,8 @@ data class RecentFeedEntry(
     val name: String,
     val displayTitle: String,
     var swipedCount: Int,
-    var updatedAt: Long = System.currentTimeMillis() / 1000L
+    @Serializable(with = FlexibleEpochSecondsSerializer::class)
+    var updatedAt: Double = System.currentTimeMillis() / 1000.0
 ) {
     val id: String get() = "$kind:$name"
 }
@@ -330,6 +358,7 @@ class UserStore private constructor() {
     }
 
     fun rankWithAlgorithm(posts: List<Gif>): List<Gif> {
+        if (!data.value.settings.algorithmEnabled) return posts
         val algo = data.value.algorithm
         val boosted = algo.boostedTags.map { it.lowercase() }.toSet()
         val blocked = algo.blockedTags.map { it.lowercase() }.toSet()
@@ -388,14 +417,20 @@ class UserStore private constructor() {
             xSession = if (options.keepAccounts) cur.xSession else XAccountSession(),
             igSession = if (options.keepAccounts) cur.igSession else InstagramAccountSession(),
             r34Credentials = if (options.keepAccounts) cur.r34Credentials else Rule34Credentials(),
-            algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile()
+            algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile(),
+            settings = cur.settings
         )
-        synchronized(seenList) {
-            seenList.clear()
-            seenSet.clear()
+        if (!options.keepAlgorithm) {
+            synchronized(seenList) {
+                seenList.clear()
+                seenSet.clear()
+            }
+            SmartTasteEngine.shared.reset()
+        } else {
+            val copySeen = synchronized(seenList) { seenList.toList() }
+            fresh.seenIDs = copySeen
         }
         data.value = fresh
-        if (!options.keepAlgorithm) SmartTasteEngine.shared.reset()
         if (!options.keepOfflineVault) OfflineManager.clearAllDownloads()
         if (!options.keepPasscode) AppState.removePasscodeKeepingData()
 
@@ -405,6 +440,8 @@ class UserStore private constructor() {
 
         if (!options.keepAccounts) {
             withContext(Dispatchers.Main) {
+                XWebEngine.resetSession()
+                InstagramWebEngine.resetSession()
                 android.webkit.CookieManager.getInstance().removeAllCookies(null)
                 android.webkit.CookieManager.getInstance().flush()
                 WebStorage.getInstance().deleteAllData()

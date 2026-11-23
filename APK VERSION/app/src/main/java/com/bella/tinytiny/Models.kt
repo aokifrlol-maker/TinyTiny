@@ -224,7 +224,7 @@ data class Gif(
                 return false
             }
             if (lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/")) return false
-            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8")) return true
+            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") || lower.contains(".webm")) return true
             return lower.contains("video.twimg.com") || lower.contains("v.redd.it") ||
                 lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") ||
                 lower.contains("eporner.com") || lower.contains("phncdn.com") ||
@@ -233,9 +233,19 @@ data class Gif(
 
         fun isRenderableImageURLString(s: String): Boolean {
             val lower = s.lowercase()
-            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8")) return false
+            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") || lower.contains(".webm")) return false
             if (lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/")) return false
             return lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("file://")
+        }
+
+        fun shortCount(n: Int?): String {
+            val v = n ?: return ""
+            return when {
+                v >= 1_000_000 -> String.format("%.1fM", v / 1_000_000.0)
+                v >= 1_000 -> String.format("%.1fK", v / 1_000.0)
+                v > 0 -> "$v"
+                else -> ""
+            }
         }
 
         private fun normalizedMediaDedupeKey(host: String, path: String): String {
