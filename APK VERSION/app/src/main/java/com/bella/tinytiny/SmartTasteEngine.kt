@@ -1,344 +1,333 @@
 package com.bella.tinytiny
 
-import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+
+enum class SourcePlatform(val rawValue: String, val label: String) {
+    REDDIT("reddit", "Reddit"),
+    X("x", "𝕏"),
+    IG("ig", "Instagram"),
+    ONLYFANS("of", "OnlyFans"),
+    RULE34("r34", "Rule34"),
+    LONGVIDEO("lv", "Long Videos")
+}
 
 @Serializable
-data class TasteState(
-    val dislikedIds: List<String> = emptyList(),
-    val suppressedTags: List<String> = emptyList(),
-    val suppressedCreators: List<String> = emptyList(),
-    val hiddenOFGenders: List<String> = emptyList(),
-    val tagPenalties: Map<String, Double> = emptyMap(),
-    val tagDislikeCounts: Map<String, Int> = emptyMap(),
-    val creatorLatentClusters: Map<String, Map<String, Double>> = emptyMap(),
-    val creatorWatchStats: Map<String, Double> = emptyMap()
+data class ForYouSourceSettings(
+    var enableReddit: Boolean = true,
+    var enableX: Boolean = true,
+    var enableIG: Boolean = true,
+    var enableOnlyFans: Boolean = true,
+    var enableRule34: Boolean = true,
+    var enableLongVideos: Boolean = false
 )
 
-data class DislikeOutcome(
-    val suppressedTag: String?,
-    val autoBlocked: Boolean
+@Serializable
+data class TasteV2Data(
+    var tagScores: MutableMap<String, Double> = mutableMapOf(),
+    var creatorScores: MutableMap<String, Double> = mutableMapOf(),
+    var platformScores: MutableMap<String, Double> = mutableMapOf(),
+    var dislikedIDs: MutableList<String> = mutableListOf(),
+    var dislikedMediaKeys: MutableList<String> = mutableListOf(),
+    var dislikedSimilarityKeys: MutableList<String> = mutableListOf(),
+    var seenSimilarityKeys: MutableList<String> = mutableListOf(),
+    var suppressedTags: MutableList<String> = mutableListOf(),
+    var suppressedCreators: MutableList<String> = mutableListOf(),
+    var tagDislikeCounts: MutableMap<String, Int> = mutableMapOf(),
+    var tagPenalties: MutableMap<String, Double> = mutableMapOf(),
+    var hiddenOFGenders: MutableList<String> = mutableListOf(),
+    var forYouSources: ForYouSourceSettings = ForYouSourceSettings()
 )
 
-object SmartTasteEngine {
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+class SmartTasteEngine private constructor() {
+    companion object {
+        val shared = SmartTasteEngine()
+        private const val TASTE_FILENAME = "gooned_taste_v2.json"
+    }
+
+    data class DislikeOutcome(
+        val primaryTag: String? = null,
+        val autoBlockedTag: String? = null,
+        val newlyHiddenGenders: List<String> = emptyList()
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private lateinit var tasteFile: File
+    private var saveJob: Job? = null
 
-    private val _state = MutableStateFlow(TasteState())
-    val state = _state.asStateFlow()
+    val state = MutableStateFlow(TasteV2Data())
+    private val dislikedIDSet = ConcurrentHashMap.newKeySet<String>()
+    private val dislikedMediaSet = ConcurrentHashMap.newKeySet<String>()
+    private val dislikedSimSet = ConcurrentHashMap.newKeySet<String>()
+    private val seenSimSet = ConcurrentHashMap.newKeySet<String>()
+    private val suppressedTagSet = ConcurrentHashMap.newKeySet<String>()
+    private val suppressedCreatorSet = ConcurrentHashMap.newKeySet<String>()
+    private val hiddenOFGenderSet = ConcurrentHashMap.newKeySet<String>()
 
-    private val dislikedSet = HashSet<String>()
-    private val suppressedTagSet = HashSet<String>()
-    private val suppressedCreatorSet = HashSet<String>()
-    private val sessionContextTags = HashMap<String, Double>()
+    private val tasteFile: File
+        get() = File(TinyTinyApplication.instance.filesDir, TASTE_FILENAME)
 
-    val protectedBroadTags = setOf(
-        "ass", "boobs", "tits", "pussy", "cock", "dick", "cum", "cumshot", "sex",
-        "nude", "naked", "girl", "woman", "female", "babe", "hot", "sexy", "cute",
-        "amateur", "homemade", "solo", "pov", "masturbation", "orgasm", "riding",
-        "doggystyle", "missionary", "cowgirl", "blowjob", "handjob", "creampie",
-        "curvy", "thick", "petite", "blonde", "brunette", "redhead"
-    )
+    init {
+        val loaded = try {
+            if (tasteFile.exists()) {
+                CryptoBox.openCodable<TasteV2Data>(tasteFile.readBytes()) ?: TasteV2Data()
+            } else TasteV2Data()
+        } catch (_: Throwable) {
+            TasteV2Data()
+        }
+        state.value = loaded
+        rebuildSets()
+    }
 
-    val immediateArchetypeTags = setOf(
-        "gay", "men", "yaoi", "bara", "femboy", "trans", "trans_woman", "trans_man",
-        "futanari", "nonbinary", "lesbian"
-    )
+    private fun rebuildSets() {
+        val s = state.value
+        dislikedIDSet.clear(); dislikedIDSet.addAll(s.dislikedIDs)
+        dislikedMediaSet.clear(); dislikedMediaSet.addAll(s.dislikedMediaKeys)
+        dislikedSimSet.clear(); dislikedSimSet.addAll(s.dislikedSimilarityKeys)
+        seenSimSet.clear(); seenSimSet.addAll(s.seenSimilarityKeys)
+        suppressedTagSet.clear(); suppressedTagSet.addAll(s.suppressedTags.map { it.lowercase() })
+        suppressedCreatorSet.clear(); suppressedCreatorSet.addAll(s.suppressedCreators.map { it.lowercase() })
+        hiddenOFGenderSet.clear(); hiddenOFGenderSet.addAll(s.hiddenOFGenders.map { it.lowercase() })
+    }
 
-    val mascMaleOnlyTags = setOf(
-        "gay", "men", "m4m", "bara", "yaoi", "trans_man", "gaymen", "gaytwt", "gayporn"
-    )
-
-    val femboyOrTransRescueTags = setOf(
-        "femboy", "sissy", "trap", "crossdresser", "crossdressing", "otokonoko", "josou",
-        "boypussy", "bussy", "trans", "trans_woman", "tgirl", "shemale", "ladyboy", "mtf", "futanari", "futa"
-    )
-
-    private val nicheRules: List<Pair<String, List<String>>> = listOf(
-        "femboy" to listOf("femboy", "femboys", "sissy", "trap", "bussy", "boypussy", "otokonoko", "crossdresser"),
-        "trans_woman" to listOf("trans", "tgirl", "transgirl", "mtf", "shemale", "ladyboy", "ts"),
-        "futanari" to listOf("futa", "futanari", "dickgirl"),
-        "gay" to listOf("gay", "m4m", "gaymen", "gayporn", "gaytwt", "twink", "hunk", "dilf"),
-        "yaoi" to listOf("yaoi", "bara", "bl"),
-        "goth" to listOf("goth", "alt", "emo", "egirl"),
-        "latina" to listOf("latina", "latin"),
-        "asian" to listOf("asian", "japanese", "korean", "jav"),
-        "ebony" to listOf("ebony", "blackgirl"),
-        "cosplay" to listOf("cosplay", "cosplayer"),
-        "hentai" to listOf("hentai", "anime", "rule34", "3d", "sfm"),
-        "lesbian" to listOf("lesbian", "wlw", "yuri", "sapphic"),
-        "bdsm" to listOf("bdsm", "bondage", "submissive", "shibari"),
-        "femdom" to listOf("femdom", "domme", "mistress", "pegging"),
-        "milf" to listOf("milf", "mommy", "mature", "cougar")
-    )
-
-    fun init(context: Context) {
-        tasteFile = File(context.filesDir, "tinytiny_taste_v2.json")
-        if (tasteFile.exists()) {
-            runCatching {
-                val loaded = json.decodeFromString<TasteState>(tasteFile.readText())
-                _state.value = loaded
-                dislikedSet.clear(); dislikedSet.addAll(loaded.dislikedIds)
-                suppressedTagSet.clear(); suppressedTagSet.addAll(loaded.suppressedTags)
-                suppressedCreatorSet.clear(); suppressedCreatorSet.addAll(loaded.suppressedCreators)
-            }
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = scope.launch {
+            delay(2000)
+            saveNow()
         }
     }
 
-    private fun save(next: TasteState) {
-        _state.value = next
+    fun saveNow() {
+        val snapshot = state.value
+        val f = tasteFile
         scope.launch {
-            if (::tasteFile.isInitialized) {
-                runCatching { tasteFile.writeText(json.encodeToString(next)) }
+            CryptoBox.sealCodable(snapshot)?.let { bytes ->
+                val tmp = File(f.parentFile, f.name + ".tmp")
+                tmp.writeBytes(bytes)
+                tmp.renameTo(f)
             }
         }
     }
 
-    fun resetAll() {
-        dislikedSet.clear()
-        suppressedTagSet.clear()
-        suppressedCreatorSet.clear()
-        sessionContextTags.clear()
-        save(TasteState())
-    }
+    fun currentHiddenOFGendersCSV(): String? =
+        if (hiddenOFGenderSet.isEmpty()) null else hiddenOFGenderSet.sorted().joinToString(",")
 
-    fun isDisliked(post: Gif): Boolean = dislikedSet.contains(post.id)
-
-    fun extractTags(post: Gif, includeClusterFallback: Boolean = true): List<String> {
-        val out = LinkedHashSet<String>()
-        val regTags = MediaMetaRegistry.tags(post.id)
-        out.addAll(regTags)
-
-        val blob = listOfNotNull(post.title, post.subreddit, post.author, regTags.joinToString(" "))
-            .joinToString(" ")
-            .lowercase()
-            .replace("#", " ")
-        val words = blob.split(Regex("[^a-z0-9_]+")).filter { it.isNotBlank() }.toSet()
-
-        for ((canonical, keywords) in nicheRules) {
-            if (keywords.any { kw -> words.contains(kw) || (kw.length >= 5 && blob.contains(kw)) }) {
-                out.add(canonical)
-            }
-        }
-
-        if (includeClusterFallback) {
-            val cKey = creatorClusterKey(post)
-            if (cKey != null) {
-                val cluster = _state.value.creatorLatentClusters[cKey]
-                cluster?.entries?.sortedByDescending { it.value }?.take(3)?.forEach { out.add(it.key) }
-            }
-        }
-
-        val isFemboyOrTrans = out.any { femboyOrTransRescueTags.contains(it) }
-        val g = MediaMetaRegistry.creatorGender(post.id)?.lowercase()
-        if (g == "man" && !isFemboyOrTrans) {
-            out.add("gay"); out.add("men")
-        } else if (g == "trans_woman") {
-            out.add("trans"); out.add("trans_woman")
-        }
-        if (isFemboyOrTrans && !words.contains("gay") && !words.contains("yaoi") && !words.contains("m4m") && !words.contains("bara")) {
-            out.remove("gay")
-            out.remove("men")
-        }
-        return out.toList()
-    }
-
-    private fun creatorClusterKey(post: Gif): String? {
-        val cid = post.onlyFansCreatorId
-        if (!cid.isNullOrBlank()) return "of:${cid.lowercase()}"
-        val author = post.author?.trim()?.lowercase()
-        if (!author.isNullOrBlank() && author !in setOf("x_user", "instagram", "rule34", "eporner", "pornhub", "xhamster", "spankbang", "xvideos")) {
-            return "creator:$author"
-        }
-        val sub = post.subreddit?.trim()?.lowercase()
-        if (!sub.isNullOrBlank() && sub !in setOf("rule34.xxx", "onlyfans", "eporner", "pornhub", "xhamster", "spankbang", "xvideos")) {
-            return "sub:$sub"
-        }
-        return null
-    }
-
-    fun ingestPost(post: Gif) {
-        val direct = extractTags(post, includeClusterFallback = false).filter { !MediaMetaRegistry.isStopTag(it) }
-        val cKey = creatorClusterKey(post) ?: return
-        if (direct.isEmpty()) return
-        val cur = _state.value
-        val clusters = cur.creatorLatentClusters.toMutableMap()
-        val entry = (clusters[cKey] ?: emptyMap()).toMutableMap()
-        direct.forEach { t -> entry[t] = (entry[t] ?: 0.0) + 0.5 }
-        clusters[cKey] = entry
-        _state.value = cur.copy(creatorLatentClusters = clusters)
-    }
-
-    fun recordLike(post: Gif) {
-        val tags = extractTags(post)
-        tags.forEach { t -> sessionContextTags[t] = (sessionContextTags[t] ?: 0.0) + 1.0 }
-        val cKey = creatorClusterKey(post)
-        if (cKey != null) {
-            val cur = _state.value
-            val nextWatch = cur.creatorWatchStats.toMutableMap()
-            nextWatch[cKey] = (nextWatch[cKey] ?: 0.0) + 2.0
-            save(cur.copy(creatorWatchStats = nextWatch))
+    fun hideOFGender(gender: String) {
+        val g = gender.lowercase().trim()
+        if (g.isEmpty()) return
+        val s = state.value
+        if (!s.hiddenOFGenders.any { it.equals(g, ignoreCase = true) }) {
+            s.hiddenOFGenders.add(g)
+            hiddenOFGenderSet.add(g)
+            state.value = s.copy()
+            scheduleSave()
         }
     }
 
-    fun recordWatch(post: Gif, seconds: Double) {
-        if (seconds < 2.2) return
-        val cKey = creatorClusterKey(post) ?: return
-        val cur = _state.value
-        val nextWatch = cur.creatorWatchStats.toMutableMap()
-        nextWatch[cKey] = (nextWatch[cKey] ?: 0.0) + (seconds / 10.0).coerceIn(0.2, 1.5)
-        save(cur.copy(creatorWatchStats = nextWatch))
+    fun unhideOFGender(gender: String) {
+        val g = gender.lowercase().trim()
+        val s = state.value
+        s.hiddenOFGenders.removeAll { it.equals(g, ignoreCase = true) }
+        hiddenOFGenderSet.remove(g)
+        state.value = s.copy()
+        scheduleSave()
     }
 
-    fun recordDislike(post: Gif): DislikeOutcome {
-        dislikedSet.add(post.id)
-        val tags = extractTags(post).filter { !MediaMetaRegistry.isStopTag(it) }
-        val cur = _state.value
-        val nextCounts = cur.tagDislikeCounts.toMutableMap()
-        val nextPenalties = cur.tagPenalties.toMutableMap()
-        val nextSuppressed = cur.suppressedTags.toMutableList()
-        val nextGenders = cur.hiddenOFGenders.toMutableList()
-        var chosenTag: String? = null
-        var autoBlocked = false
-
-        val archetype = tags.firstOrNull { immediateArchetypeTags.contains(it) }
-        if (archetype != null) {
-            chosenTag = archetype
-            autoBlocked = true
-            if (!suppressedTagSet.contains(archetype)) {
-                suppressedTagSet.add(archetype)
-                nextSuppressed.add(archetype)
-            }
-            if (mascMaleOnlyTags.contains(archetype)) {
-                if (!nextGenders.contains("man")) nextGenders.add("man")
-                if (!nextGenders.contains("trans_man")) nextGenders.add("trans_man")
-            }
-        } else {
-            val specific = tags.firstOrNull { !protectedBroadTags.contains(it) }
-            if (specific != null) {
-                chosenTag = specific
-                val c = (nextCounts[specific] ?: 0) + 1
-                nextCounts[specific] = c
-                nextPenalties[specific] = (nextPenalties[specific] ?: 0.0) + 1.5
-                if (c >= 2 && !suppressedTagSet.contains(specific)) {
-                    suppressedTagSet.add(specific)
-                    nextSuppressed.add(specific)
-                    autoBlocked = true
-                }
-            }
+    fun recordPositiveEngagement(post: Gif, intensity: Double, categories: List<GoonedCategory>) {
+        val s = state.value
+        val tags = extractDirectTagsOnly(post, categories)
+        for (t in tags) {
+            val k = t.lowercase()
+            s.tagScores[k] = (s.tagScores[k] ?: 0.0) + (1.2 * intensity)
         }
-
-        val nextIds = (listOf(post.id) + cur.dislikedIds).distinct().take(1500)
-        save(
-            cur.copy(
-                dislikedIds = nextIds,
-                suppressedTags = nextSuppressed.distinct(),
-                hiddenOFGenders = nextGenders.distinct(),
-                tagDislikeCounts = nextCounts,
-                tagPenalties = nextPenalties
-            )
-        )
-        return DislikeOutcome(chosenTag, autoBlocked)
+        post.author?.lowercase()?.let { s.creatorScores[it] = (s.creatorScores[it] ?: 0.0) + (1.5 * intensity) }
+        val p = platform(post).rawValue
+        s.platformScores[p] = (s.platformScores[p] ?: 0.0) + (0.25 * intensity)
+        scheduleSave()
     }
 
-    fun toggleArchetypeGuardrail(tag: String, block: Boolean) {
-        val norm = tag.lowercase()
-        val cur = _state.value
-        val nextSuppressed = cur.suppressedTags.toMutableList()
-        val nextGenders = cur.hiddenOFGenders.toMutableList()
-        if (block) {
-            if (!nextSuppressed.contains(norm)) nextSuppressed.add(norm)
-            suppressedTagSet.add(norm)
-            if (mascMaleOnlyTags.contains(norm)) {
-                if (!nextGenders.contains("man")) nextGenders.add("man")
-                if (!nextGenders.contains("trans_man")) nextGenders.add("trans_man")
-            }
-        } else {
-            nextSuppressed.remove(norm)
-            suppressedTagSet.remove(norm)
-            if (mascMaleOnlyTags.contains(norm)) {
-                nextGenders.remove("man")
-                nextGenders.remove("trans_man")
-            }
+    fun recordFastSkip(post: Gif, categories: List<GoonedCategory>) {
+        val s = state.value
+        for (t in extractDirectTagsOnly(post, categories)) {
+            val k = t.lowercase()
+            s.tagScores[k] = (s.tagScores[k] ?: 0.0) - 0.35
         }
-        save(cur.copy(suppressedTags = nextSuppressed, hiddenOFGenders = nextGenders))
+        scheduleSave()
     }
 
-    fun isBlocked(post: Gif, algo: AlgorithmProfile): Boolean {
-        if (dislikedSet.contains(post.id)) return true
-        val blocked = algo.blockedTags.map { it.lowercase() }.toSet() + suppressedTagSet
-        if (blocked.isEmpty()) return false
-        val postTags = extractTags(post).toSet()
-        val pinned = algo.boostedTags.map { it.lowercase() }.toSet()
-        for (b in blocked) {
-            if (pinned.contains(b)) continue
-            if (postTags.contains(b)) return true
-        }
+    fun isSeenOrDuplicate(post: Gif): Boolean {
+        if (isDisliked(post)) return true
+        val sim = post.contentSimilarityKey
+        if (sim != null && seenSimSet.contains(sim)) return true
         return false
     }
 
-    fun scorePost(post: Gif, algo: AlgorithmProfile): Double {
-        var score = 0.0
-        val tags = extractTags(post)
-        val pinned = algo.boostedTags.map { it.lowercase() }.toSet()
+    fun markSeenSimilarity(post: Gif) {
+        val sim = post.contentSimilarityKey ?: return
+        if (!seenSimSet.add(sim)) return
+        val s = state.value
+        s.seenSimilarityKeys.add(sim)
+        if (s.seenSimilarityKeys.size > 6000) {
+            val overflow = s.seenSimilarityKeys.size - 5000
+            repeat(overflow) { seenSimSet.remove(s.seenSimilarityKeys.removeAt(0)) }
+        }
+        scheduleSave()
+    }
+
+    fun isDisliked(post: Gif): Boolean {
+        if (dislikedIDSet.contains(post.id)) return true
+        if (dislikedMediaSet.contains(post.canonicalDedupeKey)) return true
+        val sim = post.contentSimilarityKey
+        if (sim != null && dislikedSimSet.contains(sim)) return true
+        return false
+    }
+
+    fun isSuppressedInDiscovery(post: Gif, categories: List<GoonedCategory>): Boolean {
+        if (isDisliked(post)) return true
+        post.author?.lowercase()?.let { if (suppressedCreatorSet.contains(it)) return true }
+        val g = MediaMetaRegistry.creatorGender(post.id)?.lowercase()
+        if (g != null && hiddenOFGenderSet.contains(g)) return true
+        val tags = extractDirectTagsOnly(post, categories).map { it.lowercase() }
+        if (tags.any { suppressedTagSet.contains(it) }) return true
+        return false
+    }
+
+    fun recordDislike(post: Gif, categories: List<GoonedCategory>): DislikeOutcome {
+        val s = state.value
+        if (dislikedIDSet.add(post.id)) s.dislikedIDs.add(post.id)
+        val mk = post.canonicalDedupeKey
+        if (dislikedMediaSet.add(mk)) s.dislikedMediaKeys.add(mk)
+        post.contentSimilarityKey?.let { if (dislikedSimSet.add(it)) s.dislikedSimilarityKeys.add(it) }
+        post.author?.lowercase()?.let {
+            s.creatorScores[it] = (s.creatorScores[it] ?: 0.0) - 4.0
+        }
+        val tags = extractDirectTagsOnly(post, categories)
+        var autoBlocked: String? = null
         for (t in tags) {
-            if (pinned.contains(t)) score += 3.2
-            score += (algo.tagWeights[t] ?: 0.0) * 0.45
-            score -= (_state.value.tagPenalties[t] ?: 0.0) * 0.8
-            score += (sessionContextTags[t] ?: 0.0) * 0.3
+            val k = t.lowercase()
+            s.tagPenalties[k] = (s.tagPenalties[k] ?: 0.0) + 2.5
+            val count = (s.tagDislikeCounts[k] ?: 0) + 1
+            s.tagDislikeCounts[k] = count
+            if (count >= 3 && !MediaMetaRegistry.isStopTag(k) && suppressedTagSet.add(k)) {
+                s.suppressedTags.add(k)
+                autoBlocked = k
+            }
         }
-        post.author?.lowercase()?.let { a ->
-            score += (algo.creatorWeights[a] ?: 0.0) * 0.8
+        state.value = s.copy()
+        scheduleSave()
+        return DislikeOutcome(primaryTag = tags.firstOrNull(), autoBlockedTag = autoBlocked)
+    }
+
+    fun blockDislikedTag(tag: String): String {
+        val clean = tag.lowercase().trim().removePrefix("#")
+        if (clean.isEmpty()) return clean
+        val s = state.value
+        if (suppressedTagSet.add(clean)) s.suppressedTags.add(clean)
+        state.value = s.copy()
+        scheduleSave()
+        return clean
+    }
+
+    fun unblockTag(tag: String) {
+        val clean = tag.lowercase().trim().removePrefix("#")
+        val s = state.value
+        s.suppressedTags.removeAll { it.equals(clean, ignoreCase = true) }
+        suppressedTagSet.remove(clean)
+        state.value = s.copy()
+        scheduleSave()
+    }
+
+    fun scoreAdjustment(post: Gif, categories: List<GoonedCategory>): Double {
+        val s = state.value
+        var score = s.platformScores[platform(post).rawValue] ?: 0.0
+        post.author?.lowercase()?.let { score += (s.creatorScores[it] ?: 0.0) }
+        for (t in extractDirectTagsOnly(post, categories)) {
+            val k = t.lowercase()
+            score += (s.tagScores[k] ?: 0.0) - (s.tagPenalties[k] ?: 0.0)
         }
-        post.subreddit?.lowercase()?.let { s ->
-            score += (algo.subredditWeights[s] ?: 0.0) * 0.6
-        }
-        if (!post.isImage) score += 0.4
         return score
     }
 
     fun activeQueryTags(pinned: List<String>, blocked: List<String>, count: Int = 6): List<String> {
-        val blockedLower = blocked.map { it.lowercase() }.toSet() + suppressedTagSet
-        val out = LinkedHashSet<String>()
+        val blockedSet = (blocked.map { it.lowercase() } + suppressedTagSet).toSet()
+        val out = mutableListOf<String>()
         for (p in pinned) {
-            val clean = p.trim().lowercase().replace(" ", "_")
-            if (clean.isNotBlank() && !blockedLower.contains(clean) && !MediaMetaRegistry.isStopTag(clean)) {
+            val clean = p.lowercase().trim()
+            if (clean.isNotEmpty() && !MediaMetaRegistry.isStopTag(clean) && clean !in blockedSet && !out.contains(clean)) {
                 out.add(clean)
-                if (out.size >= count) return out.toList()
             }
         }
-        UserStore.data.value.algorithm.tagWeights.entries
-            .filter { it.value > 0.35 }
+        val ranked = state.value.tagScores.entries
+            .filter { it.value > 0.5 && !MediaMetaRegistry.isStopTag(it.key) && it.key !in blockedSet }
             .sortedByDescending { it.value }
-            .forEach { (k, _) ->
-                if (!blockedLower.contains(k) && !MediaMetaRegistry.isStopTag(k)) {
-                    out.add(k)
-                    if (out.size >= count) return out.toList()
-                }
-            }
-        return out.toList()
+            .map { it.key }
+        for (t in ranked) {
+            if (out.size >= count) break
+            if (!out.contains(t)) out.add(t)
+        }
+        return out.take(count)
     }
 
     fun topOnlyFansSeedHandles(limit: Int = 8): List<String> {
-        val scores = HashMap<String, Double>()
-        _state.value.creatorWatchStats.forEach { (raw, w) ->
-            if (w > 0.3 && !raw.startsWith("r/") && !raw.startsWith("x:") && !raw.startsWith("ig:")) {
-                val clean = raw.removePrefix("of:").trim()
-                if (clean.isNotBlank() && !suppressedCreatorSet.contains(clean.lowercase())) {
-                    scores[clean] = (scores[clean] ?: 0.0) + w
+        val followed = UserStore.shared.data.value.followedOFCreators.map { it.name }.distinct()
+        return followed.take(limit)
+    }
+
+    fun updateForYouSources(transform: (ForYouSourceSettings) -> ForYouSourceSettings) {
+        val s = state.value
+        state.value = s.copy(forYouSources = transform(s.forYouSources))
+        scheduleSave()
+    }
+
+    fun applyImportedBackup(imported: TasteV2Data) {
+        state.value = imported
+        rebuildSets()
+        saveNow()
+    }
+
+    fun reset() {
+        state.value = TasteV2Data()
+        rebuildSets()
+        saveNow()
+    }
+
+    companion object Helpers {
+        fun platform(post: Gif): SourcePlatform = when {
+            post.isXPost -> SourcePlatform.X
+            post.isIGPost -> SourcePlatform.IG
+            post.isOnlyFansPost -> SourcePlatform.ONLYFANS
+            post.isRule34Post -> SourcePlatform.RULE34
+            post.isLongVideoPost -> SourcePlatform.LONGVIDEO
+            else -> SourcePlatform.REDDIT
+        }
+
+        fun extractDirectTagsOnly(post: Gif, categories: List<GoonedCategory>): List<String> {
+            val out = mutableListOf<String>()
+            val seen = mutableSetOf<String>()
+            fun add(raw: String) {
+                val clean = raw.lowercase().trim().removePrefix("#")
+                if (clean.length >= 2 && !MediaMetaRegistry.isStopTag(clean) && seen.add(clean)) {
+                    out.add(clean)
                 }
             }
+            for (t in MediaMetaRegistry.tags(post.id)) add(t)
+            val title = post.title ?: ""
+            for (m in Regex("#([A-Za-z0-9_]+)").findAll(title)) add(m.groupValues[1])
+            post.subreddit?.let { sub ->
+                val lowerSub = sub.lowercase()
+                add(lowerSub)
+                categories.firstOrNull { cat -> cat.subreddits.any { it.equals(lowerSub, ignoreCase = true) } }
+                    ?.let { add(it.name) }
+            }
+            return out
         }
-        return scores.entries.sortedByDescending { it.value }.take(limit).map { it.key }
     }
 }

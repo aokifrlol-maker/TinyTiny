@@ -1,268 +1,379 @@
 package com.bella.tinytiny
 
 import kotlinx.serialization.Serializable
+import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
+
+object Config {
+    const val userAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    const val goonedBase = "https://api.gooned.app"
+    const val onlyHavenBase = "https://cum.st/api/v1"
+    const val origin = "https://gooned.app"
+    const val referer = "https://gooned.app/"
+}
 
 @Serializable
 data class Gif(
     val id: String,
-    val title: String? = null,
-    val author: String? = null,
-    val subreddit: String? = null,
-    val upvotes: Int? = null,
-    val duration: Double? = null,
-    val width: Int? = null,
-    val height: Int? = null,
-    val mediaType: String? = null,
-    val mediaUrl: String? = null,
-    val muxedUrl: String? = null,
-    val muxedUrlHd: String? = null,
-    val hlsUrl: String? = null,
-    val posterUrl: String? = null,
-    val thumbnailUrl: String? = null,
-    val sourceUrl: String? = null,
-    val permalink: String? = null,
-    val createdUtc: Double? = null
+    var title: String? = null,
+    var author: String? = null,
+    var subreddit: String? = null,
+    var upvotes: Int? = null,
+    var duration: Double? = null,
+    var width: Int? = null,
+    var height: Int? = null,
+    var mediaType: String? = null,
+    var mediaUrl: String? = null,
+    var muxedUrl: String? = null,
+    var muxedUrlHd: String? = null,
+    var hlsUrl: String? = null,
+    var posterUrl: String? = null,
+    var thumbnailUrl: String? = null,
+    var sourceUrl: String? = null,
+    var permalink: String? = null,
+    var createdUtc: String? = null
 ) {
-    val isImage: Boolean
-        get() {
-            if (mediaType == "image") return true
-            val u = (muxedUrlHd ?: muxedUrl ?: mediaUrl ?: "").lowercase()
-            return (u.endsWith(".jpg") || u.endsWith(".jpeg") || u.endsWith(".png") || u.endsWith(".webp") || u.endsWith(".gif")) &&
-                hlsUrl.isNullOrBlank() && muxedUrl.isNullOrBlank() && muxedUrlHd.isNullOrBlank()
-        }
+    val isXPost: Boolean
+        get() = id.startsWith("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
 
-    val isXPost: Boolean get() = id.startsWith("x_")
-    val isIGPost: Boolean get() = id.startsWith("ig_")
-    val isRule34Post: Boolean get() = id.startsWith("r34_")
-    val isOnlyFansPost: Boolean get() = id.startsWith("of_")
-    val isLongVideoPost: Boolean get() = id.startsWith("lv_")
+    val isIGPost: Boolean
+        get() = id.startsWith("ig_") || (sourceUrl?.contains("instagram.com") == true) || (permalink?.contains("instagram.com") == true)
+
+    val isRule34Post: Boolean
+        get() = id.startsWith("r34") || (subreddit?.lowercase()?.contains("rule34") == true) || (sourceUrl?.contains("rule34.xxx") == true)
+
+    val isOnlyFansPost: Boolean
+        get() = id.startsWith("of_") || (sourceUrl?.contains("cum.st") == true) || (permalink?.contains("cum.st") == true)
+
+    val isLongVideoPost: Boolean
+        get() = id.startsWith("lv_")
 
     val longVideoSiteLabel: String?
         get() = when {
-            id.startsWith("lv_ep_") -> "EPORNER"
-            id.startsWith("lv_xv_") -> "XVIDEOS"
-            id.startsWith("lv_ph_") -> "PORNHUB"
-            id.startsWith("lv_xh_") -> "XHAMSTER"
-            id.startsWith("lv_sb_") -> "SPANKBANG"
-            else -> if (isLongVideoPost) "LONG" else null
+            !isLongVideoPost -> null
+            id.startsWith("lv_ep_") -> "Eporner"
+            id.startsWith("lv_xv_") -> "XVideos"
+            id.startsWith("lv_ph_") -> "Pornhub"
+            id.startsWith("lv_xh_") -> "xHamster"
+            id.startsWith("lv_sb_") -> "SpankBang"
+            id.startsWith("lv_er_") -> "Erome"
+            else -> subreddit
         }
 
     val onlyFansCreatorId: String?
-        get() = MediaMetaRegistry.creatorId(id)
+        get() {
+            if (!isOnlyFansPost) return null
+            val candidate = permalink ?: sourceUrl ?: return null
+            val parts = try { URI(candidate).path?.split("/")?.filter { it.isNotEmpty() } ?: emptyList() } catch (_: Throwable) { emptyList() }
+            val idx = parts.indexOf("onlyfans")
+            if (idx >= 0 && idx + 1 < parts.size) {
+                val cid = parts[idx + 1]
+                if (cid.isNotEmpty() && cid != "post") return cid
+            }
+            return null
+        }
+
+    val isImage: Boolean
+        get() {
+            if (mediaType == "image") return true
+            if (isLongVideoPost) return false
+            return remoteOrLocalVideoURLs(hd = true).isEmpty()
+        }
 
     val hasPlayableMedia: Boolean
-        get() = !videoURL(hd = false).isNullOrBlank() || !imageURL.isNullOrBlank()
+        get() = isLongVideoPost || remoteOrLocalVideoURLs(hd = true).isNotEmpty() || imageURL != null
 
-    fun videoURL(hd: Boolean): String? {
-        if (isImage) return null
-        val candidates = if (hd) {
-            listOf(muxedUrlHd, muxedUrl, hlsUrl, mediaUrl)
-        } else {
-            listOf(muxedUrl, hlsUrl, muxedUrlHd, mediaUrl)
-        }
-        return candidates.firstOrNull { !it.isNullOrBlank() && (it.startsWith("http://") || it.startsWith("https://")) }
-    }
-
-    fun fallbackVideoURLs(hd: Boolean): List<String> {
-        val raw = if (hd) {
-            listOf(muxedUrlHd, muxedUrl, hlsUrl, mediaUrl)
-        } else {
-            listOf(muxedUrl, hlsUrl, muxedUrlHd, mediaUrl)
-        }
-        val extra = MediaMetaRegistry.extraVideoURLs(id)
-        return (raw.filterNotNull() + extra)
-            .filter { it.startsWith("http://") || it.startsWith("https://") }
-            .distinct()
-    }
-
-    val imageURL: String?
+    val knownAspect: Double?
         get() {
-            val u = muxedUrlHd ?: muxedUrl ?: mediaUrl ?: posterUrl ?: thumbnailUrl
-            return if (!u.isNullOrBlank() && (u.startsWith("http://") || u.startsWith("https://"))) u else null
+            val w = width ?: return null
+            val h = height ?: return null
+            return if (w > 0 && h > 0) w.toDouble() / h.toDouble() else null
         }
 
-    val posterOrThumb: String?
-        get() = listOf(posterUrl, thumbnailUrl, imageURL).firstOrNull { !it.isNullOrBlank() }
-
-    val webURL: String
-        get() = permalink?.takeIf { it.startsWith("http") }
-            ?: sourceUrl?.takeIf { it.startsWith("http") }
-            ?: "https://www.reddit.com"
+    val aspect: Double get() = knownAspect ?: 1.0
 
     val canonicalDedupeKey: String
         get() {
-            val raw = (videoURL(false) ?: imageURL ?: id).lowercase()
-            return raw.substringBefore("?")
+            if (isIGPost) {
+                if (!permalink.isNullOrEmpty()) {
+                    try {
+                        val code = URI(permalink).path?.split("/")?.lastOrNull { it.isNotEmpty() && it != "reel" && it != "p" }
+                        if (!code.isNullOrEmpty() && code.length >= 5) return "ig_code_$code"
+                    } catch (_: Throwable) {}
+                }
+                val raw = id.removePrefix("ig_")
+                val base = raw.substringBefore("_")
+                return "ig_pk_$base"
+            }
+            MediaMetaRegistry.canonicalMediaFingerprint(this)?.let { return it }
+            val media = muxedUrlHd ?: muxedUrl ?: mediaUrl ?: posterUrl
+            if (!media.isNullOrEmpty()) {
+                try {
+                    val u = URI(media)
+                    val host = u.host
+                    if (!host.isNullOrEmpty()) {
+                        val norm = normalizedMediaDedupeKey(host, u.path ?: "")
+                        if (norm.isNotEmpty()) return norm
+                    }
+                } catch (_: Throwable) {}
+            }
+            val poster = posterUrl ?: thumbnailUrl
+            if (!poster.isNullOrEmpty()) {
+                try {
+                    val u = URI(poster)
+                    val host = u.host
+                    if (!host.isNullOrEmpty()) {
+                        val norm = normalizedMediaDedupeKey(host, u.path ?: "")
+                        if (norm.isNotEmpty()) return norm
+                    }
+                } catch (_: Throwable) {}
+            }
+            return id.lowercase()
         }
 
     val contentSimilarityKey: String?
         get() {
-            val fp = MediaMetaRegistry.fingerprint(id)
-            if (!fp.isNullOrBlank()) return "fp:$fp"
-            val t = title?.trim()?.lowercase()?.replace(Regex("[^a-z0-9]"), "") ?: ""
-            return if (t.length >= 10) "t:${t.take(36)}" else null
+            val cleanTitle = (title ?: "")
+                .lowercase()
+                .replace(Regex("https?://\\S+"), "")
+                .replace(Regex("@[A-Za-z0-9_]+"), "")
+                .split(Regex("[^a-z0-9]+"))
+                .filter { it.isNotEmpty() }
+                .joinToString(" ")
+            if (cleanTitle.length < 14) return null
+            val durBucket = duration?.let { kotlin.math.round(it * 2.0).toInt() } ?: -1
+            return "sim_${durBucket}_${cleanTitle.take(80)}"
         }
+
+    fun allVideoURLs(hd: Boolean): List<String> = remoteOrLocalVideoURLs(hd)
+
+    fun videoURL(hd: Boolean): String? = remoteOrLocalVideoURLs(hd).firstOrNull()
+
+    private fun remoteOrLocalVideoURLs(hd: Boolean): List<String> {
+        if (mediaType == "image") return emptyList()
+        val urls = mutableListOf<String>()
+        OfflineManager.localMediaURL(id)?.let { local ->
+            val ext = local.substringAfterLast('.', "").lowercase()
+            if (ext !in setOf("jpg", "jpeg", "png", "webp", "gif")) {
+                urls.add(local)
+            }
+        }
+        val candidates: List<String?> = if (isXPost && !hlsUrl.isNullOrEmpty()) {
+            if (hd) listOf(hlsUrl, muxedUrlHd, muxedUrl, mediaUrl) else listOf(hlsUrl, muxedUrl, muxedUrlHd, mediaUrl)
+        } else {
+            if (hd) listOf(muxedUrlHd, muxedUrl, mediaUrl, hlsUrl) else listOf(muxedUrl, muxedUrlHd, mediaUrl, hlsUrl)
+        }
+        val extra = MediaMetaRegistry.extraVideoURLs(id)
+        for (raw in (candidates + extra)) {
+            if (!raw.isNullOrEmpty() && isPlayableVideoURLString(raw) && !urls.contains(raw)) {
+                urls.add(raw)
+            }
+        }
+        return urls
+    }
+
+    val imageURL: String?
+        get() {
+            OfflineManager.localMediaURL(id)?.let { local ->
+                val ext = local.substringAfterLast('.', "").lowercase()
+                if (ext in setOf("jpg", "jpeg", "png", "webp", "gif")) return local
+            }
+            for (raw in listOf(mediaUrl, muxedUrlHd, muxedUrl, posterUrl, thumbnailUrl)) {
+                if (!raw.isNullOrEmpty() && isRenderableImageURLString(raw)) return raw
+            }
+            return null
+        }
+
+    val imageFallbackURLs: List<String>
+        get() = listOfNotNull(mediaUrl, posterUrl, thumbnailUrl).distinct().filter { isRenderableImageURLString(it) }
+
+    val posterURL: String?
+        get() = listOfNotNull(posterUrl, thumbnailUrl, if (mediaType == "image") mediaUrl else null)
+            .firstOrNull { isRenderableImageURLString(it) }
+
+    val thumbURL: String?
+        get() = listOfNotNull(thumbnailUrl, posterUrl, if (mediaType == "image") mediaUrl else null)
+            .firstOrNull { isRenderableImageURLString(it) }
+
+    val posterFallbackURLs: List<String>
+        get() = listOfNotNull(posterUrl, thumbnailUrl, mediaUrl).distinct().filter { isRenderableImageURLString(it) }
+
+    val relativeTime: String
+        get() {
+            val raw = createdUtc ?: return ""
+            return try {
+                val instant = java.time.Instant.parse(raw)
+                val sec = kotlin.math.max(0L, (System.currentTimeMillis() - instant.toEpochMilli()) / 1000L)
+                when {
+                    sec < 60 -> "${sec}s"
+                    sec < 3600 -> "${sec / 60}m"
+                    sec < 86400 -> "${sec / 3600}h"
+                    sec < 2592000 -> "${sec / 86400}d"
+                    else -> "${sec / 2592000}mo"
+                }
+            } catch (_: Throwable) {
+                ""
+            }
+        }
+
+    companion object {
+        fun isPlayableVideoURLString(s: String): Boolean {
+            val lower = s.lowercase()
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif")) {
+                return false
+            }
+            if (lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/")) return false
+            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8")) return true
+            return lower.contains("video.twimg.com") || lower.contains("v.redd.it") ||
+                lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") ||
+                lower.contains("eporner.com") || lower.contains("phncdn.com") ||
+                lower.contains("xhcdn.com") || lower.contains("sb-cd.com") || lower.contains("xvideos-cdn.com")
+        }
+
+        fun isRenderableImageURLString(s: String): Boolean {
+            val lower = s.lowercase()
+            if (lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8")) return false
+            if (lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/")) return false
+            return lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("file://")
+        }
+
+        private fun normalizedMediaDedupeKey(host: String, path: String): String {
+            val lowerHost = host.lowercase()
+            val cleanPath = path.trim('/')
+            if (cleanPath.isEmpty()) return ""
+            if (lowerHost.contains("twimg.com")) {
+                val parts = cleanPath.split("/")
+                val tagIdx = parts.indexOfFirst {
+                    it in setOf("ext_tw_video", "ext_tw_video_thumb", "amplify_video", "amplify_video_thumb", "tweet_video", "tweet_video_thumb")
+                }
+                if (tagIdx >= 0 && tagIdx + 1 < parts.size) return "twvid_${parts[tagIdx + 1]}"
+            }
+            if (lowerHost.contains("v.redd.it")) {
+                val seg = cleanPath.substringBefore('/')
+                if (seg.isNotEmpty()) return "vredd_${seg.lowercase()}"
+            }
+            if (lowerHost.contains("redgifs.com")) {
+                val last = cleanPath.substringAfterLast('/').lowercase()
+                val base = last.substringBeforeLast('.')
+                    .replace("-mobile", "").replace("-silent", "").replace("-large", "")
+                if (base.isNotEmpty()) return "redgifs_$base"
+            }
+            val noExt = cleanPath.substringBeforeLast('.').lowercase()
+            return "media_$lowerHost/$noExt"
+        }
+    }
 }
 
 @Serializable
-data class GoonedCategory(
-    val name: String,
-    val count: Int? = null
-)
-
-enum class FeedSort(val rawValue: String, val label: String) {
-    HOT("hot", "Hot"),
-    TOP("top", "Top"),
-    NEW("new", "New")
-}
-
-enum class LongVideoSite(val rawValue: String, val label: String) {
-    ALL("all", "All"),
-    EPORNER("eporner", "Eporner"),
-    XVIDEOS("xvideos", "XVideos"),
-    PORNHUB("pornhub", "Pornhub"),
-    XHAMSTER("xhamster", "xHamster"),
-    SPANKBANG("spankbang", "SpankBang")
-}
-
-sealed class FeedSource {
-    data object ForYou : FeedSource()
-    data object Following : FeedSource()
-    data object XForYou : FeedSource()
-    data object XFollowing : FeedSource()
-    data object XBookmarks : FeedSource()
-    data class XUser(val username: String) : FeedSource()
-    data object IGReels : FeedSource()
-    data object IGFollowing : FeedSource()
-    data object IGSaved : FeedSource()
-    data class IGUser(val username: String) : FeedSource()
-    data object OFForYou : FeedSource()
-    data object OFTrending : FeedSource()
-    data object OFLatest : FeedSource()
-    data object OFDMs : FeedSource()
-    data class OFCreator(val id: String, val handle: String, val displayName: String) : FeedSource()
-    data class Rule34(val tag: String) : FeedSource()
-    data class LongVideos(val site: LongVideoSite) : FeedSource()
-    data class LongSearch(val site: LongVideoSite, val query: String) : FeedSource()
-    data class Subreddit(val name: String) : FeedSource()
-    data class User(val name: String) : FeedSource()
-    data class Category(val name: String) : FeedSource()
-    data class MultiSearch(val query: String) : FeedSource()
-    data class CustomList(val title: String, val items: List<Gif>) : FeedSource()
-
-    val isXFeed: Boolean get() = this is XForYou || this is XFollowing || this is XBookmarks || this is XUser
-    val isIGFeed: Boolean get() = this is IGReels || this is IGFollowing || this is IGSaved || this is IGUser
-    val isOFFeed: Boolean get() = this is OFForYou || this is OFTrending || this is OFLatest || this is OFDMs || this is OFCreator
-    val isLongFeed: Boolean get() = this is LongVideos || this is LongSearch
-
-    val displayTitle: String
-        get() = when (this) {
-            is ForYou -> "For You"
-            is Following -> "Following"
-            is XForYou -> "𝕏 For You"
-            is XFollowing -> "𝕏 Following"
-            is XBookmarks -> "𝕏 Bookmarks"
-            is XUser -> "@$username"
-            is IGReels -> "IG Reels"
-            is IGFollowing -> "IG Following"
-            is IGSaved -> "IG Saved"
-            is IGUser -> "@$username"
-            is OFForYou -> "OF For You"
-            is OFTrending -> "OF Trending"
-            is OFLatest -> "OF Latest"
-            is OFDMs -> "OF DMs"
-            is OFCreator -> displayName.ifBlank { "@$handle" }
-            is Rule34 -> if (tag.isBlank()) "Rule34" else "#$tag"
-            is LongVideos -> site.label
-            is LongSearch -> "${site.label}: $query"
-            is Subreddit -> "/r/$name"
-            is User -> "u/$name"
-            is Category -> name
-            is MultiSearch -> "Search: $query"
-            is CustomList -> title
-        }
-
-    val swipeKey: String
-        get() = when (this) {
-            is ForYou -> "core:foryou"
-            is Following -> "core:following"
-            is XForYou -> "x:foryou"
-            is XFollowing -> "x:following"
-            is XBookmarks -> "x:bookmarks"
-            is XUser -> "x:user:$username"
-            is IGReels -> "ig:reels"
-            is IGFollowing -> "ig:following"
-            is IGSaved -> "ig:saved"
-            is IGUser -> "ig:user:$username"
-            is OFForYou -> "of:foryou"
-            is OFTrending -> "of:trending"
-            is OFLatest -> "of:latest"
-            is OFDMs -> "of:dms"
-            is OFCreator -> "of:creator:$id"
-            is Rule34 -> "r34:$tag"
-            is LongVideos -> "long:${site.rawValue}"
-            is LongSearch -> "longq:${site.rawValue}:$query"
-            is Subreddit -> "sub:$name"
-            is User -> "user:$name"
-            is Category -> "cat:$name"
-            is MultiSearch -> "multi:$query"
-            is CustomList -> "list:$title"
-        }
-}
-
 data class GoonedFeedResponse(
-    val posts: List<Gif>,
+    val posts: List<Gif> = emptyList(),
     val after: String? = null
 )
 
+@Serializable
+data class GoonedSearchItem(
+    val name: String,
+    val title: String? = null,
+    val subscribers: Int? = null,
+    val icon: String? = null
+) {
+    val id: String get() = name
+}
+
+@Serializable
+data class GoonedSearchResponse(
+    val subreddits: List<GoonedSearchItem> = emptyList(),
+    val users: List<GoonedSearchItem> = emptyList()
+)
+
+@Serializable
+data class GoonedCategoryMeta(
+    val subscribers: Int = 0,
+    val subreddits: List<String> = emptyList()
+)
+
+@Serializable
+data class GoonedCategoriesResponse(
+    val categories: Map<String, GoonedCategoryMeta> = emptyMap()
+)
+
+@Serializable
+data class AlbumMediaItem(
+    val id: String,
+    val url: String,
+    val posterUrl: String? = null,
+    val isVideo: Boolean
+)
+
 object MediaMetaRegistry {
-    private val tagsMap = ConcurrentHashMap<String, List<String>>()
-    private val extraUrlsMap = ConcurrentHashMap<String, List<String>>()
-    private val fingerprintMap = ConcurrentHashMap<String, String>()
-    private val genderMap = ConcurrentHashMap<String, String>()
-    private val creatorIdMap = ConcurrentHashMap<String, String>()
-    private val creatorNameMap = ConcurrentHashMap<String, String>()
-    private val followedMap = ConcurrentHashMap<String, Boolean>()
+    private val tagsById = ConcurrentHashMap<String, List<String>>()
+    private val extraVideoURLsById = ConcurrentHashMap<String, List<String>>()
+    private val albumItemsById = ConcurrentHashMap<String, List<AlbumMediaItem>>()
+    private val creatorGenderById = ConcurrentHashMap<String, String>()
+    private val creatorNameById = ConcurrentHashMap<String, String>()
 
     private val stopTags = setOf(
-        "onlyfans", "of", "fansly", "nsfw", "porn", "video", "videos", "clip", "clips",
-        "reel", "reels", "fyp", "foryou", "trending", "viral", "leak", "leaks",
-        "hd", "4k", "60fps", "mp4", "gif", "image", "photo", "pic", "pics",
-        "twitter", "x", "instagram", "ig", "reddit", "rule34", "r34", "xxx",
-        "eporner", "pornhub", "xhamster", "spankbang", "xvideos", "cumst", "gooned"
+        "onlyfans", "of", "rule34", "r34", "reddit", "x", "twitter", "ig", "instagram",
+        "nsfw", "porn", "xxx", "18", "adult", "sex", "video", "gif", "image", "post", "fyp", "foryou"
     )
 
     fun isStopTag(tag: String): Boolean {
         val clean = tag.trim().lowercase().removePrefix("#")
-        return clean.length < 2 || stopTags.contains(clean)
+        return clean.length < 2 || clean in stopTags
     }
 
     fun register(
         postId: String,
-        fingerprint: String? = null,
-        extraVideoURLs: List<String> = emptyList(),
         tags: List<String> = emptyList(),
-        creatorGender: String? = null,
-        creatorId: String? = null,
         creatorName: String? = null,
-        followedByViewer: Boolean? = null
+        gender: String? = null,
+        extraVideoURLs: List<String> = emptyList(),
+        albumItems: List<AlbumMediaItem> = emptyList()
     ) {
-        if (!fingerprint.isNullOrBlank()) fingerprintMap[postId] = fingerprint
-        if (extraVideoURLs.isNotEmpty()) extraUrlsMap[postId] = extraVideoURLs
-        val cleanTags = tags.map { it.trim().lowercase().removePrefix("#") }.filter { !isStopTag(it) }.distinct()
-        if (cleanTags.isNotEmpty()) tagsMap[postId] = cleanTags
-        if (!creatorGender.isNullOrBlank()) genderMap[postId] = creatorGender.lowercase()
-        if (!creatorId.isNullOrBlank()) creatorIdMap[postId] = creatorId
-        if (!creatorName.isNullOrBlank()) creatorNameMap[postId] = creatorName
-        if (followedByViewer != null) followedMap[postId] = followedByViewer
+        if (tags.isNotEmpty()) tagsById[postId] = tags
+        if (!creatorName.isNullOrEmpty()) creatorNameById[postId] = creatorName
+        if (!gender.isNullOrEmpty()) creatorGenderById[postId] = gender.lowercase()
+        if (extraVideoURLs.isNotEmpty()) extraVideoURLsById[postId] = extraVideoURLs
+        if (albumItems.isNotEmpty()) albumItemsById[postId] = albumItems
     }
 
-    fun tags(postId: String): List<String> = tagsMap[postId] ?: emptyList()
-    fun extraVideoURLs(postId: String): List<String> = extraUrlsMap[postId] ?: emptyList()
-    fun fingerprint(postId: String): String? = fingerprintMap[postId]
-    fun creatorGender(postId: String): String? = genderMap[postId]
-    fun creatorId(postId: String): String? = creatorIdMap[postId]
-    fun creatorName(postId: String): String? = creatorNameMap[postId]
-    fun isFollowedByViewer(postId: String): Boolean? = followedMap[postId]
+    fun tags(forId: String): List<String> = tagsById[forId] ?: emptyList()
+    fun extraVideoURLs(forId: String): List<String> = extraVideoURLsById[forId] ?: emptyList()
+    fun albumItems(forId: String): List<AlbumMediaItem> = albumItemsById[forId] ?: emptyList()
+    fun creatorGender(forId: String): String? = creatorGenderById[forId]
+    fun creatorName(forId: String): String? = creatorNameById[forId]
+
+    fun canonicalMediaFingerprint(gif: Gif): String? {
+        val firstAlbum = albumItemsById[gif.id]?.firstOrNull()?.url ?: return null
+        return try {
+            val u = URI(firstAlbum)
+            "album_${u.host}_${u.path?.substringBeforeLast('.')}"
+        } catch (_: Throwable) {
+            null
+        }
+    }
+}
+
+object MediaHeaders {
+    fun headers(urlString: String, includeReferer: Boolean = true): Map<String, String> {
+        val h = mutableMapOf("User-Agent" to Config.userAgent)
+        val lower = urlString.lowercase()
+        if (includeReferer) {
+            when {
+                lower.contains("cum.st") -> h["Referer"] = "https://cum.st/"
+                lower.contains("erome.com") -> h["Referer"] = "https://www.erome.com/"
+                lower.contains("eporner.com") -> h["Referer"] = "https://www.eporner.com/"
+                lower.contains("xvideos") -> h["Referer"] = "https://www.xvideos.com/"
+                lower.contains("phncdn") || lower.contains("pornhub") -> h["Referer"] = "https://www.pornhub.com/"
+                lower.contains("xhcdn") || lower.contains("xhamster") -> h["Referer"] = "https://xhamster.com/"
+                lower.contains("sb-cd.com") || lower.contains("spankbang") -> h["Referer"] = "https://spankbang.com/"
+                lower.contains("rule34.xxx") -> h["Referer"] = "https://rule34.xxx/"
+                lower.contains("twimg.com") -> h["Referer"] = "https://x.com/"
+                lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") -> h["Referer"] = "https://www.instagram.com/"
+                lower.contains("redgifs.com") -> h["Referer"] = "https://www.redgifs.com/"
+            }
+        }
+        return h
+    }
 }

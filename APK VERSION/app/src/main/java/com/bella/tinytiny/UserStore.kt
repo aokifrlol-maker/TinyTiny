@@ -1,297 +1,424 @@
 package com.bella.tinytiny
 
 import android.content.Context
+import android.webkit.WebStorage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
 data class AppSettings(
-    val hd: Boolean = true,
-    val muted: Boolean = false,
-    val autoScroll: Boolean = false,
-    val autoScrollDelay: Double = 6.0,
-    val playVideosToEnd: Boolean = true,
-    val algorithmEnabled: Boolean = true,
-    val faceID: Boolean = false,
-    val controlsCollapsed: Boolean = false
+    var hd: Boolean = true,
+    var muted: Boolean = true,
+    var faceID: Boolean = false,
+    var autoScroll: Boolean = false,
+    var autoScrollDelay: Int = 6,
+    var playVideosToEnd: Boolean = true,
+    var fillScreen: Boolean = false,
+    var controlsCollapsed: Boolean = false,
+    var tintedGlass: Boolean = false
 )
 
 @Serializable
 data class AlgorithmProfile(
-    val subredditWeights: Map<String, Double> = emptyMap(),
-    val creatorWeights: Map<String, Double> = emptyMap(),
-    val tagWeights: Map<String, Double> = emptyMap(),
-    val boostedTags: List<String> = emptyList(),
-    val blockedTags: List<String> = emptyList(),
-    val totalSignals: Int = 0
+    var boostedTags: List<String> = emptyList(),
+    var blockedTags: List<String> = emptyList(),
+    var tagWeights: MutableMap<String, Double> = mutableMapOf(),
+    var preferredAuthors: MutableMap<String, Double> = mutableMapOf(),
+    var preferredSubreddits: MutableMap<String, Double> = mutableMapOf()
 )
 
 @Serializable
-data class XSession(
-    val authToken: String = "",
-    val ct0: String = "",
-    val username: String = ""
-) {
-    val isConnected: Boolean get() = authToken.isNotBlank() && ct0.isNotBlank()
-}
-
-@Serializable
-data class IGSession(
-    val sessionId: String = "",
-    val csrfToken: String = "",
-    val dsUserId: String = "",
-    val username: String = ""
-) {
-    val isConnected: Boolean get() = sessionId.isNotBlank() && dsUserId.isNotBlank()
-}
-
-@Serializable
-data class Rule34Credentials(
-    val userId: String = "",
-    val apiKey: String = ""
-) {
-    val isConnected: Boolean get() = userId.isNotBlank() && apiKey.isNotBlank()
-}
-
-@Serializable
-data class FollowedOFCreator(
-    val id: String,
+data class RecentFeedEntry(
+    val kind: String,
     val name: String,
-    val handle: String = ""
-)
+    val displayTitle: String,
+    var swipedCount: Int,
+    var updatedAt: Long = System.currentTimeMillis() / 1000L
+) {
+    val id: String get() = "$kind:$name"
+}
 
 @Serializable
 data class UserData(
-    val likes: List<Gif> = emptyList(),
-    val seenIds: List<String> = emptyList(),
-    val followedSubreddits: List<String> = emptyList(),
-    val followedUsers: List<String> = emptyList(),
-    val followedOFCreators: List<FollowedOFCreator> = emptyList(),
-    val savedCursors: Map<String, String> = emptyMap(),
-    val settings: AppSettings = AppSettings(),
-    val algorithm: AlgorithmProfile = AlgorithmProfile(),
-    val xSession: XSession = XSession(),
-    val igSession: IGSession = IGSession(),
-    val r34Credentials: Rule34Credentials = Rule34Credentials()
+    var liked: List<Gif> = emptyList(),
+    var downloaded: List<Gif> = emptyList(),
+    var followedUsers: List<String> = emptyList(),
+    var followedSubreddits: List<String> = emptyList(),
+    var followedXUsers: List<String> = emptyList(),
+    var followedIGUsers: List<String> = emptyList(),
+    var followedOFCreators: List<FollowedOFCreator> = emptyList(),
+    var recentFeeds: List<RecentFeedEntry> = emptyList(),
+    var seenIDs: List<String> = emptyList(),
+    var savedCursors: MutableMap<String, String> = mutableMapOf(),
+    var swipedTotal: Int = 0,
+    var settings: AppSettings = AppSettings(),
+    var xSession: XAccountSession = XAccountSession(),
+    var igSession: InstagramAccountSession = InstagramAccountSession(),
+    var r34Credentials: Rule34Credentials = Rule34Credentials(),
+    var algorithm: AlgorithmProfile = AlgorithmProfile()
 )
 
-object UserStore {
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+class UserStore private constructor() {
+    companion object {
+        val shared = UserStore()
+        private const val DATA_FILENAME = "gooned_userdata.json"
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var saveJob: Job? = null
-    private lateinit var storeFile: File
 
-    private val _data = MutableStateFlow(UserData())
-    val data = _data.asStateFlow()
+    private val seenSet = ConcurrentHashMap.newKeySet<String>()
+    private val seenList = mutableListOf<String>()
 
-    private val _categories = MutableStateFlow<List<GoonedCategory>>(emptyList())
-    val categories = _categories.asStateFlow()
+    val data = MutableStateFlow(UserData())
+    val categories = MutableStateFlow(GoonedCategory.defaultCategories)
 
-    private val seenSet = HashSet<String>()
-    private val likedIdSet = HashSet<String>()
+    private val dataFile: File
+        get() = File(TinyTinyApplication.instance.filesDir, DATA_FILENAME)
 
-    fun init(context: Context) {
-        storeFile = File(context.filesDir, "tinytiny_user_v1.json")
-        if (storeFile.exists()) {
-            runCatching {
-                val loaded = json.decodeFromString<UserData>(storeFile.readText())
-                _data.value = loaded
-                seenSet.clear()
-                seenSet.addAll(loaded.seenIds)
-                likedIdSet.clear()
-                likedIdSet.addAll(loaded.likes.map { it.id })
+    init {
+        val loaded = try {
+            if (dataFile.exists()) {
+                CryptoBox.openCodable<UserData>(dataFile.readBytes()) ?: UserData()
+            } else UserData()
+        } catch (_: Throwable) {
+            UserData()
+        }
+        seenList.addAll(loaded.seenIDs)
+        seenSet.addAll(loaded.seenIDs)
+        data.value = loaded
+        scope.launch {
+            try {
+                val remote = GoonedAPI.categories()
+                if (remote.isNotEmpty()) categories.value = remote
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = scope.launch {
+            delay(1500)
+            saveNow()
+        }
+    }
+
+    fun exportSnapshotForBackup(): UserData {
+        val cur = data.value
+        val copySeen = synchronized(seenList) { seenList.toList() }
+        return cur.copy(seenIDs = copySeen)
+    }
+
+    fun saveNow() {
+        val snapshot = exportSnapshotForBackup()
+        val f = dataFile
+        scope.launch {
+            CryptoBox.sealCodable(snapshot)?.let { bytes ->
+                val tmp = File(f.parentFile, f.name + ".tmp")
+                tmp.writeBytes(bytes)
+                tmp.renameTo(f)
             }
         }
     }
 
-    private fun update(transform: (UserData) -> UserData) {
-        val next = transform(_data.value)
-        _data.value = next
-        scheduleSave(next)
+    fun isSeen(id: String): Boolean = seenSet.contains(id)
+
+    fun isSeen(post: Gif): Boolean =
+        seenSet.contains(post.id) ||
+            seenSet.contains(post.canonicalDedupeKey) ||
+            SmartTasteEngine.shared.isSeenOrDuplicate(post)
+
+    fun markSeen(post: Gif) {
+        markSeen(post.id)
+        markSeen(post.canonicalDedupeKey)
+        SmartTasteEngine.shared.markSeenSimilarity(post)
     }
 
-    private fun scheduleSave(snapshot: UserData) {
-        saveJob?.cancel()
-        saveJob = scope.launch {
-            delay(450)
-            if (::storeFile.isInitialized) {
-                runCatching {
-                    val tmp = File(storeFile.parentFile, "${storeFile.name}.tmp")
-                    tmp.writeText(json.encodeToString(snapshot))
-                    tmp.renameTo(storeFile)
+    fun markSeen(id: String) {
+        if (id.isEmpty() || !seenSet.add(id)) return
+        synchronized(seenList) {
+            seenList.add(id)
+            if (seenList.size > 12_000) {
+                val overflow = seenList.size - 10_000
+                repeat(overflow) {
+                    val rem = seenList.removeAt(0)
+                    seenSet.remove(rem)
                 }
             }
         }
+        scheduleSave()
     }
 
-    fun setCategories(list: List<GoonedCategory>) {
-        _categories.value = list
+    fun savedCursor(key: String): String? = data.value.savedCursors[key]
+
+    fun saveCursor(cursor: String?, key: String) {
+        val cur = data.value
+        val nextMap = cur.savedCursors.toMutableMap()
+        if (!cursor.isNullOrEmpty()) nextMap[key] = cursor else nextMap.remove(key)
+        data.value = cur.copy(savedCursors = nextMap)
+        scheduleSave()
+    }
+
+    fun isLiked(gif: Gif): Boolean = data.value.liked.any { it.id == gif.id }
+
+    fun toggleLike(gif: Gif) {
+        val cur = data.value
+        val next = cur.liked.toMutableList()
+        val idx = next.indexOfFirst { it.id == gif.id }
+        if (idx >= 0) {
+            next.removeAt(idx)
+        } else {
+            next.add(0, gif)
+            markSeen(gif)
+            SmartTasteEngine.shared.recordPositiveEngagement(gif, 1.0, categories.value)
+        }
+        data.value = cur.copy(liked = next)
+        scheduleSave()
+    }
+
+    fun recordDownloaded(gif: Gif) {
+        val cur = data.value
+        val next = cur.downloaded.filterNot { it.id == gif.id }.toMutableList()
+        next.add(0, gif)
+        data.value = cur.copy(downloaded = next)
+        scheduleSave()
+    }
+
+    fun removeDownloaded(id: String) {
+        val cur = data.value
+        data.value = cur.copy(downloaded = cur.downloaded.filterNot { it.id == id })
+        scheduleSave()
+    }
+
+    fun clearAllDownloaded() {
+        data.value = data.value.copy(downloaded = emptyList())
+        scheduleSave()
+    }
+
+    fun isFollowingUser(u: String): Boolean =
+        data.value.followedUsers.any { it.equals(u, ignoreCase = true) }
+
+    fun toggleFollowUser(u: String) {
+        val cur = data.value
+        val next = cur.followedUsers.toMutableList()
+        val idx = next.indexOfFirst { it.equals(u, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(u)
+        data.value = cur.copy(followedUsers = next)
+        scheduleSave()
+    }
+
+    fun isFollowingSubreddit(s: String): Boolean =
+        data.value.followedSubreddits.any { it.equals(s, ignoreCase = true) }
+
+    fun toggleFollowSubreddit(s: String) {
+        val cur = data.value
+        val next = cur.followedSubreddits.toMutableList()
+        val idx = next.indexOfFirst { it.equals(s, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(s)
+        data.value = cur.copy(followedSubreddits = next)
+        scheduleSave()
+    }
+
+    fun isFollowingXUser(handle: String): Boolean {
+        val clean = handle.removePrefix("@")
+        return data.value.followedXUsers.any { it.equals(clean, ignoreCase = true) }
+    }
+
+    fun toggleFollowXUser(handle: String) {
+        val clean = handle.removePrefix("@")
+        val cur = data.value
+        val next = cur.followedXUsers.toMutableList()
+        val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(clean)
+        data.value = cur.copy(followedXUsers = next)
+        scheduleSave()
+    }
+
+    fun isFollowingIGUser(handle: String): Boolean {
+        val clean = handle.removePrefix("@")
+        return data.value.followedIGUsers.any { it.equals(clean, ignoreCase = true) }
+    }
+
+    fun toggleFollowIGUser(handle: String) {
+        val clean = handle.removePrefix("@")
+        val cur = data.value
+        val next = cur.followedIGUsers.toMutableList()
+        val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(clean)
+        data.value = cur.copy(followedIGUsers = next)
+        scheduleSave()
+    }
+
+    fun isFollowingOFCreator(id: String?, handle: String?): Boolean {
+        return data.value.followedOFCreators.any {
+            (!id.isNullOrEmpty() && it.id == id) || (!handle.isNullOrEmpty() && it.name.equals(handle, ignoreCase = true))
+        }
+    }
+
+    fun toggleFollowOFCreator(id: String, name: String, displayName: String? = null) {
+        val cur = data.value
+        val next = cur.followedOFCreators.toMutableList()
+        val idx = next.indexOfFirst { it.id == id || it.name.equals(name, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(FollowedOFCreator(id, name, displayName))
+        data.value = cur.copy(followedOFCreators = next)
+        scheduleSave()
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
-        update { it.copy(settings = transform(it.settings)) }
+        val cur = data.value
+        data.value = cur.copy(settings = transform(cur.settings))
+        scheduleSave()
+    }
+
+    fun updateXSession(session: XAccountSession) {
+        data.value = data.value.copy(xSession = session)
+        saveNow()
+    }
+
+    fun updateIGSession(session: InstagramAccountSession) {
+        data.value = data.value.copy(igSession = session)
+        saveNow()
+    }
+
+    fun updateR34Credentials(creds: Rule34Credentials) {
+        data.value = data.value.copy(r34Credentials = creds)
+        saveNow()
     }
 
     fun updateAlgorithm(transform: (AlgorithmProfile) -> AlgorithmProfile) {
-        update { it.copy(algorithm = transform(it.algorithm)) }
+        val cur = data.value
+        data.value = cur.copy(algorithm = transform(cur.algorithm))
+        saveNow()
     }
 
-    fun setXSession(session: XSession) {
-        update { it.copy(xSession = session) }
-    }
-
-    fun setIGSession(session: IGSession) {
-        update { it.copy(igSession = session) }
-    }
-
-    fun setR34Credentials(creds: Rule34Credentials) {
-        update { it.copy(r34Credentials = creds) }
-    }
-
-    fun isLiked(id: String): Boolean = likedIdSet.contains(id)
-
-    fun toggleLike(post: Gif) {
-        val currentlyLiked = likedIdSet.contains(post.id)
-        if (currentlyLiked) {
-            likedIdSet.remove(post.id)
-            update { it.copy(likes = it.likes.filterNot { g -> g.id == post.id }) }
+    fun recordSwipe(kind: String, name: String, displayTitle: String, postID: String? = null) {
+        if (!postID.isNullOrEmpty()) markSeen(postID)
+        val cur = data.value
+        val nextRecent = cur.recentFeeds.toMutableList()
+        val idx = nextRecent.indexOfFirst { it.kind == kind && it.name.equals(name, ignoreCase = true) }
+        val now = System.currentTimeMillis() / 1000L
+        if (idx >= 0) {
+            val existing = nextRecent.removeAt(idx)
+            nextRecent.add(0, existing.copy(swipedCount = existing.swipedCount + 1, updatedAt = now))
         } else {
-            likedIdSet.add(post.id)
-            SmartTasteEngine.recordLike(post)
-            val tags = SmartTasteEngine.extractTags(post)
-            update { cur ->
-                val nextTags = cur.algorithm.tagWeights.toMutableMap()
-                tags.forEach { t -> nextTags[t] = (nextTags[t] ?: 0.0) + 1.4 }
-                val nextCreators = cur.algorithm.creatorWeights.toMutableMap()
-                post.author?.takeIf { it.isNotBlank() }?.let { a ->
-                    nextCreators[a.lowercase()] = (nextCreators[a.lowercase()] ?: 0.0) + 1.5
-                }
-                val nextSubs = cur.algorithm.subredditWeights.toMutableMap()
-                post.subreddit?.takeIf { it.isNotBlank() }?.let { s ->
-                    nextSubs[s.lowercase()] = (nextSubs[s.lowercase()] ?: 0.0) + 1.2
-                }
-                cur.copy(
-                    likes = listOf(post) + cur.likes.filterNot { it.id == post.id },
-                    algorithm = cur.algorithm.copy(
-                        tagWeights = nextTags,
-                        creatorWeights = nextCreators,
-                        subredditWeights = nextSubs,
-                        totalSignals = cur.algorithm.totalSignals + 1
-                    )
-                )
-            }
+            nextRecent.add(0, RecentFeedEntry(kind, name, displayTitle, 1, now))
         }
-    }
-
-    fun isSeen(post: Gif): Boolean {
-        return seenSet.contains(post.id) ||
-            seenSet.contains(post.canonicalDedupeKey) ||
-            SmartTasteEngine.isDisliked(post)
-    }
-
-    fun markSeen(post: Gif) {
-        val added1 = seenSet.add(post.id)
-        val added2 = seenSet.add(post.canonicalDedupeKey)
-        if (!added1 && !added2) return
-        update { cur ->
-            val trimmed = (listOf(post.id, post.canonicalDedupeKey) + cur.seenIds).distinct().take(2500)
-            cur.copy(seenIds = trimmed)
-        }
+        data.value = cur.copy(swipedTotal = cur.swipedTotal + 1, recentFeeds = nextRecent.take(24))
+        scheduleSave()
     }
 
     fun recordDwellSignal(post: Gif, secondsWatched: Double) {
-        if (secondsWatched < 2.2) return
-        SmartTasteEngine.recordWatch(post, secondsWatched)
-        val boost = (secondsWatched / 8.0).coerceIn(0.25, 1.3)
-        val tags = SmartTasteEngine.extractTags(post)
-        update { cur ->
-            val nextTags = cur.algorithm.tagWeights.toMutableMap()
-            tags.forEach { t -> nextTags[t] = (nextTags[t] ?: 0.0) + boost * 0.5 }
-            cur.copy(
-                algorithm = cur.algorithm.copy(
-                    tagWeights = nextTags,
-                    totalSignals = cur.algorithm.totalSignals + 1
-                )
-            )
+        if (secondsWatched >= 3.8) {
+            SmartTasteEngine.shared.recordPositiveEngagement(post, if (secondsWatched >= 9.0) 1.0 else 0.5, categories.value)
+        } else if (secondsWatched < 1.6) {
+            SmartTasteEngine.shared.recordFastSkip(post, categories.value)
         }
     }
 
-    fun recordLoopSignal(post: Gif) {
-        SmartTasteEngine.recordWatch(post, 10.0)
-    }
-
-    fun savedCursor(key: String): String? = _data.value.savedCursors[key]
-
-    fun setSavedCursor(cursor: String?, key: String) {
-        update { cur ->
-            val next = cur.savedCursors.toMutableMap()
-            if (cursor.isNullOrBlank()) next.remove(key) else next[key] = cursor
-            cur.copy(savedCursors = next)
-        }
-    }
-
-    fun isBlockedByAlgorithm(post: Gif): Boolean {
-        return SmartTasteEngine.isBlocked(post, _data.value.algorithm)
-    }
-
-    fun scorePost(post: Gif): Double {
-        return SmartTasteEngine.scorePost(post, _data.value.algorithm)
+    fun dislike(post: Gif): SmartTasteEngine.DislikeOutcome {
+        markSeen(post)
+        return SmartTasteEngine.shared.recordDislike(post, categories.value)
     }
 
     fun rankWithAlgorithm(posts: List<Gif>): List<Gif> {
-        posts.forEach { SmartTasteEngine.ingestPost(it) }
-        if (!_data.value.settings.algorithmEnabled || posts.size <= 3) {
-            return posts.shuffled()
+        val algo = data.value.algorithm
+        val boosted = algo.boostedTags.map { it.lowercase() }.toSet()
+        val blocked = algo.blockedTags.map { it.lowercase() }.toSet()
+        val engine = SmartTasteEngine.shared
+        val cats = categories.value
+
+        val filtered = posts.filter { post ->
+            if (engine.isSuppressedInDiscovery(post, cats)) return@filter false
+            val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats).map { it.lowercase() }
+            if (tags.any { it in blocked }) return@filter false
+            true
         }
-        val scored = posts.map { it to (scorePost(it) + (-0.6..0.6).random()) }
-            .sortedByDescending { it.second }
-        val split = (scored.size * 3 / 4).coerceAtLeast(1)
-        val topPool = scored.take(split).map { it.first }.toMutableList()
-        val explorePool = scored.drop(split).map { it.first }.shuffled().toMutableList()
-        val result = ArrayList<Gif>(posts.size)
-        var i = 0
-        while (topPool.isNotEmpty() || explorePool.isNotEmpty()) {
-            if (i % 4 == 3 && explorePool.isNotEmpty()) {
-                result.add(explorePool.removeAt(0))
-            } else if (topPool.isNotEmpty()) {
-                result.add(topPool.removeAt(0))
-            } else if (explorePool.isNotEmpty()) {
-                result.add(explorePool.removeAt(0))
+        return filtered.sortedByDescending { post ->
+            var score = engine.scoreAdjustment(post, cats)
+            val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats).map { it.lowercase() }
+            for (t in tags) {
+                if (t in boosted) score += 2.5
+                score += (algo.tagWeights[t] ?: 0.0)
             }
-            i++
-        }
-        return result
-    }
-
-    fun topAlgorithmSubreddits(limit: Int = 4): List<String> {
-        return _data.value.algorithm.subredditWeights
-            .entries
-            .filter { it.value > 0.3 }
-            .sortedByDescending { it.value }
-            .take(limit)
-            .map { it.key }
-    }
-
-    fun eraseAll() {
-        seenSet.clear()
-        likedIdSet.clear()
-        _data.value = UserData()
-        SmartTasteEngine.resetAll()
-        if (::storeFile.isInitialized && storeFile.exists()) {
-            storeFile.delete()
+            post.author?.lowercase()?.let { score += (algo.preferredAuthors[it] ?: 0.0) }
+            post.subreddit?.lowercase()?.let { score += (algo.preferredSubreddits[it] ?: 0.0) }
+            score
         }
     }
 
-    private fun ClosedFloatingPointRange<Double>.random(): Double =
-        start + Math.random() * (endInclusive - start)
+    fun replaceWithBackup(restored: UserData) {
+        synchronized(seenList) {
+            seenList.clear()
+            seenList.addAll(restored.seenIDs)
+            seenSet.clear()
+            seenSet.addAll(restored.seenIDs)
+        }
+        data.value = restored
+        saveNow()
+    }
+
+    data class WipeOptions(
+        val keepLikes: Boolean = true,
+        val keepFollowing: Boolean = true,
+        val keepOfflineVault: Boolean = true,
+        val keepAccounts: Boolean = true,
+        val keepAlgorithm: Boolean = true,
+        val keepPasscode: Boolean = true
+    )
+
+    suspend fun performSelectiveWipe(options: WipeOptions) = withContext(Dispatchers.IO) {
+        val cur = data.value
+        val fresh = UserData(
+            liked = if (options.keepLikes) cur.liked else emptyList(),
+            downloaded = if (options.keepOfflineVault) cur.downloaded else emptyList(),
+            followedUsers = if (options.keepFollowing) cur.followedUsers else emptyList(),
+            followedSubreddits = if (options.keepFollowing) cur.followedSubreddits else emptyList(),
+            followedXUsers = if (options.keepFollowing) cur.followedXUsers else emptyList(),
+            followedIGUsers = if (options.keepFollowing) cur.followedIGUsers else emptyList(),
+            followedOFCreators = if (options.keepFollowing) cur.followedOFCreators else emptyList(),
+            xSession = if (options.keepAccounts) cur.xSession else XAccountSession(),
+            igSession = if (options.keepAccounts) cur.igSession else InstagramAccountSession(),
+            r34Credentials = if (options.keepAccounts) cur.r34Credentials else Rule34Credentials(),
+            algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile()
+        )
+        synchronized(seenList) {
+            seenList.clear()
+            seenSet.clear()
+        }
+        data.value = fresh
+        if (!options.keepAlgorithm) SmartTasteEngine.shared.reset()
+        if (!options.keepOfflineVault) OfflineManager.clearAllDownloads()
+        if (!options.keepPasscode) AppState.removePasscodeKeepingData()
+
+        val ctx = TinyTinyApplication.instance
+        File(ctx.cacheDir, "FeedDiskCache").deleteRecursively()
+        ctx.cacheDir.listFiles()?.forEach { if (it.name.startsWith("tt_")) it.deleteRecursively() }
+
+        if (!options.keepAccounts) {
+            withContext(Dispatchers.Main) {
+                android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                android.webkit.CookieManager.getInstance().flush()
+                WebStorage.getInstance().deleteAllData()
+            }
+        }
+        saveNow()
+    }
+}
+
+object PornTagCatalog {
+    val quickPickerCategories: List<Pair<String, List<String>>> = listOf(
+        "Popular" to listOf("amateur", "asian", "latina", "ebony", "milf", "petite", "curvy", "goth", "redheads", "bbw"),
+        "Actions" to listOf("blowjob", "anal", "creampie", "cumshot", "squirt", "hardcore", "pov", "threesome", "bdsm", "femdom"),
+        "Animated" to listOf("hentai", "rule34", "ahegao", "futanari", "3d", "animated", "sound", "cosplay"),
+        "Body & Vibes" to listOf("ass", "big_tits", "pussy", "solo", "toys", "public", "lesbian", "femboy", "trans")
+    )
 }

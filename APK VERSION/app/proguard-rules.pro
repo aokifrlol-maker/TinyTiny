@@ -1,2 +1,3 @@
--keepattributes *Annotation*
--dontwarn kotlinx.serialization.**
+-keepattributes Signature
+-keepclassmembers class com.bella.tinytiny.** { *; }
+-dontwarn org.conscrypt.**

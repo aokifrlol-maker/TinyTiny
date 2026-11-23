@@ -72,7 +72,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 
-    // Media3 ExoPlayer (MP4 + HLS .m3u8)
+    // Media3 ExoPlayer (MP4 + HLS .m3u8 + OkHttp headers)
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
@@ -83,11 +83,14 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // Image loading (GIF / WebP / JPEG / PNG)
+    // Image loading (GIF / WebP / JPEG / PNG + downsampling)
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-gif:2.7.0")
 
     // Biometric + Encrypted storage
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // WebKit (modern WebView helpers)
+    implementation("androidx.webkit:webkit:1.12.1")
 }
