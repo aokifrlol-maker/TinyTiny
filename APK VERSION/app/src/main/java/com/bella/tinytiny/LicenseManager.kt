@@ -301,27 +301,6 @@ object LicenseManager {
         return activate(entered)
     }
 
-    suspend fun uploadTemporaryEncryptedBlob(cipherData: ByteArray, filename: String): String? = withContext(Dispatchers.IO) {
-        val s = status.value
-        if (!isValidAccess || s.licenseKey.isEmpty()) return@withContext null
-        try {
-            val req = Request.Builder()
-                .url("$normalizedBaseURL/v1/blob")
-                .header("X-License-Key", s.licenseKey)
-                .header("X-Device-Id", deviceId)
-                .header("X-File-Name", filename)
-                .post(cipherData.toRequestBody("application/octet-stream".toMediaType()))
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (resp.code != 200) return@withContext null
-                val raw = resp.body?.string() ?: return@withContext null
-                JSONObject(raw).optString("url").takeIf { it.isNotEmpty() }
-            }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
     // HKDF-SHA256 matching iOS CryptoKit HKDF<SHA256> + v1 legacy fallback
     private fun backupKeyV2(licenseKey: String): ByteArray {
         val ikm = licenseKey.uppercase().toByteArray(Charsets.UTF_8)

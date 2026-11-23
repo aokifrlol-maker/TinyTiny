@@ -333,7 +333,7 @@ class UserStore private constructor() {
         val cur = data.value
         val nextRecent = cur.recentFeeds.toMutableList()
         val idx = nextRecent.indexOfFirst { it.kind == kind && it.name.equals(name, ignoreCase = true) }
-        val now = System.currentTimeMillis() / 1000L
+        val now = System.currentTimeMillis() / 1000.0
         if (idx >= 0) {
             val existing = nextRecent.removeAt(idx)
             nextRecent.add(0, existing.copy(swipedCount = existing.swipedCount + 1, updatedAt = now))
