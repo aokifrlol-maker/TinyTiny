@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import WebKit
 
 struct AppSettings: Codable {
     var hd: Bool = true
@@ -134,7 +135,7 @@ final class UserStore: ObservableObject {
     init() {
         let loaded: UserData
         if let raw = try? Data(contentsOf: Self.fileURL),
-           let decoded = try? JSONDecoder().decode(UserData.self, from: raw) {
+           let decoded = CryptoBox.openCodable(UserData.self, from: raw) {
             loaded = decoded
         } else {
             loaded = UserData()
@@ -148,12 +149,14 @@ final class UserStore: ObservableObject {
     }
 
     static func configureAudioSession(muted: Bool) {
-        let session = AVAudioSession.sharedInstance()
-        if muted {
-            try? session.setCategory(.ambient, mode: .moviePlayback, options: [.mixWithOthers])
-        } else {
-            try? session.setCategory(.playback, mode: .moviePlayback, options: [])
-            try? session.setActive(true)
+        Task.detached(priority: .userInitiated) {
+            let session = AVAudioSession.sharedInstance()
+            if muted {
+                try? session.setCategory(.ambient, mode: .moviePlayback, options: [.mixWithOthers])
+            } else {
+                try? session.setCategory(.playback, mode: .moviePlayback, options: [])
+                try? session.setActive(true)
+            }
         }
     }
 
@@ -183,10 +186,103 @@ final class UserStore: ObservableObject {
         snapshot.seenIDs = _seenIDs
         let url = Self.fileURL
         Task.detached(priority: .utility) {
-            if let raw = try? JSONEncoder().encode(snapshot) {
+            if let raw = CryptoBox.sealCodable(snapshot) {
                 try? raw.write(to: url, options: [.atomic, .completeFileProtection])
             }
         }
+    }
+
+    struct WipeOptions {
+        var keepLikes: Bool = true
+        var keepFollowing: Bool = true
+        var keepOfflineVault: Bool = true
+        var keepAccounts: Bool = true
+        var keepAlgorithm: Bool = true
+        var keepPasscode: Bool = true
+    }
+
+    func performSelectiveWipe(options: WipeOptions, app: AppState) async {
+        // 1. Preserve only chosen slices of UserData; everything else (seenIDs, cursors, history, settings) is wiped
+        var fresh = UserData()
+        if options.keepLikes {
+            fresh.liked = data.liked
+        }
+        if options.keepFollowing {
+            fresh.followedUsers = data.followedUsers
+            fresh.followedSubreddits = data.followedSubreddits
+            fresh.followedXUsers = data.followedXUsers
+            fresh.followedIGUsers = data.followedIGUsers
+            fresh.followedOFCreators = data.followedOFCreators
+        }
+        if options.keepOfflineVault {
+            fresh.downloaded = data.downloaded
+        }
+        if options.keepAccounts {
+            fresh.xSession = data.xSession
+            fresh.igSession = data.igSession
+            fresh.r34Credentials = data.r34Credentials
+        }
+        if options.keepAlgorithm {
+            fresh.algorithm = data.algorithm
+        }
+
+        // 2. Clear seen history, cursors, and in-memory caches
+        _seenIDs = []
+        seenSet = []
+        data = fresh
+
+        if !options.keepAlgorithm {
+            SmartTasteEngine.shared.reset()
+        }
+        if !options.keepOfflineVault {
+            OfflineManager.shared.clearAllDownloads()
+        }
+        if !options.keepPasscode {
+            app.removePasscodeKeepingData()
+        }
+
+        MediaImageLoader.shared.clearCache()
+        VideoPreloader.shared.clearCache()
+        URLCache.shared.removeAllCachedResponses()
+
+        // 3. Clear FeedDiskCache, tmp media, and legacy files from older app versions (never touch License!)
+        let fm = FileManager.default
+        if let cachesDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let feedCache = cachesDir.appendingPathComponent("FeedDiskCache", isDirectory: true)
+            try? fm.removeItem(at: feedCache)
+        }
+        if let items = try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil) {
+            for item in items { try? fm.removeItem(at: item) }
+        }
+        if let docsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first,
+           let docItems = try? fm.contentsOfDirectory(at: docsDir, includingPropertiesForKeys: nil) {
+            let protectedNames: Set<String> = ["gooned_userdata.json", "gooned_taste_v2.json", "OfflineVault"]
+            for item in docItems where !protectedNames.contains(item.lastPathComponent) {
+                try? fm.removeItem(at: item)
+            }
+        }
+
+        // 4. Sweep legacy UserDefaults keys from older versions while keeping License/Onboarding/Passcode state
+        let preservedDefaults: Set<String> = [
+            "ageConfirmed", "tt.onboardingCompleted", "tt.passcodeChoiceCompleted",
+            "tt.requirePasscodeOnOpen", "tinytiny.dismissed.announcement", "tt.passcode.lockedUntil"
+        ]
+        for key in UserDefaults.standard.dictionaryRepresentation().keys {
+            if !preservedDefaults.contains(key) && (key.hasPrefix("tt.") || key.hasPrefix("tt_") || key.hasPrefix("tinytiny.") || key.hasPrefix("gooned")) {
+                if options.keepOfflineVault && key == "tt_saved_photo_asset_ids_v1" { continue }
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+
+        // 5. Clear WebKit cookies/storage if Connected Accounts are being wiped
+        if !options.keepAccounts {
+            let dataStore = WKWebsiteDataStore.default()
+            let types = WKWebsiteDataStore.allWebsiteDataTypes()
+            let records = await dataStore.dataRecords(ofTypes: types)
+            await dataStore.removeData(ofTypes: types, for: records)
+        }
+
+        saveNow()
     }
 
     // MARK: - Seen History & Cursor Rotation (Prevents Repeating Videos)

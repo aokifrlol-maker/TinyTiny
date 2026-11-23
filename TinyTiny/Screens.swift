@@ -2728,7 +2728,7 @@ struct GoonedSettingsModal: View {
                                         settingPasscode = true
                                     }
                                 }
-                                pillOption(title: "Reset App", active: false) {
+                                pillOption(title: "Wipe Data...", active: false) {
                                     confirmErase = true
                                 }
                             }
@@ -2763,11 +2763,12 @@ struct GoonedSettingsModal: View {
             AlgorithmEditorSheet()
                 .environmentObject(store)
         }
-        .confirmationDialog("Erase all data and passcode?", isPresented: $confirmErase, titleVisibility: .visible) {
-            Button("Erase Everything", role: .destructive) {
+        .sheet(isPresented: $confirmErase) {
+            WipeDataSheet(onComplete: {
                 isPresented = false
-                app.eraseEverything()
-            }
+            })
+            .environmentObject(store)
+            .environmentObject(app)
         }
     }
 
@@ -3281,6 +3282,103 @@ struct AlgorithmEditorSheet: View {
 }
 
 // MARK: - Creator / Tag Profile Grid (Tap any post to open Scroller from that item)
+
+struct WipeDataSheet: View {
+    var onComplete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: UserStore
+    @EnvironmentObject private var app: AppState
+
+    @State private var options = UserStore.WipeOptions()
+    @State private var isWiping = false
+    @State private var showConfirm = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Wipe App Data")
+                                    .font(.system(size: 20, weight: .bold))
+                                Text("Your active License Key is always kept safe.")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Spacer()
+                            Button { dismiss() } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .frame(width: 32, height: 32)
+                                    .liquidGlassCircle(tinted: store.data.settings.tintedGlass)
+                            }
+                        }
+
+                        VStack(spacing: 10) {
+                            Text("CHOOSE WHAT TO KEEP")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.white.opacity(0.6))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Toggle("Keep Likes (\(store.data.liked.count))", isOn: $options.keepLikes)
+                            Toggle("Keep Following", isOn: $options.keepFollowing)
+                            Toggle("Keep Offline Vault (\(store.data.downloaded.count))", isOn: $options.keepOfflineVault)
+                            Toggle("Keep Connected Accounts (𝕏 / IG / R34)", isOn: $options.keepAccounts)
+                            Toggle("Keep Smart Algorithm & Taste", isOn: $options.keepAlgorithm)
+                            if app.hasPasscode {
+                                Toggle("Keep App Passcode", isOn: $options.keepPasscode)
+                            }
+                        }
+                        .tint(Theme.accentBright)
+                        .font(.system(size: 15, weight: .semibold))
+                        .padding(16)
+                        .liquidGlassCard(cornerRadius: 20, tinted: store.data.settings.tintedGlass)
+
+                        Text("Clears all seen history, feed caches, temp media, and leftover data from older app versions (plus anything unchecked above).")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.65))
+                            .padding(.horizontal, 4)
+
+                        Button {
+                            showConfirm = true
+                        } label: {
+                            HStack {
+                                Spacer()
+                                if isWiping {
+                                    ProgressView().tint(.white)
+                                } else {
+                                    Label("Wipe Selected Data", systemImage: "trash.fill")
+                                        .font(.system(size: 15, weight: .bold))
+                                }
+                                Spacer()
+                            }
+                            .padding(.vertical, 13)
+                            .foregroundStyle(.white)
+                            .liquidGlassCapsule(tinted: true, active: true)
+                        }
+                        .disabled(isWiping)
+                    }
+                    .padding(18)
+                }
+            }
+            .foregroundStyle(.white)
+            .confirmationDialog("Wipe unselected app data? Your License Key will remain active.", isPresented: $showConfirm, titleVisibility: .visible) {
+                Button("Wipe Now", role: .destructive) {
+                    Task {
+                        isWiping = true
+                        await store.performSelectiveWipe(options: options, app: app)
+                        isWiping = false
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        dismiss()
+                        onComplete()
+                    }
+                }
+            }
+        }
+    }
+}
 
 struct CreatorProfileGridView: View {
     let source: FeedSource

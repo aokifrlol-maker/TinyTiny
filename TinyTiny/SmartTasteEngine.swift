@@ -236,7 +236,7 @@ final class SmartTasteEngine: ObservableObject {
 
     private init() {
         if let raw = try? Data(contentsOf: Self.fileURL),
-           let decoded = try? JSONDecoder().decode(TasteV2Data.self, from: raw) {
+           let decoded = CryptoBox.openCodable(TasteV2Data.self, from: raw) {
             self.state = decoded
         } else {
             self.state = TasteV2Data()
@@ -276,7 +276,7 @@ final class SmartTasteEngine: ObservableObject {
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 450_000_000)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
             self?.saveNow()
         }
@@ -286,7 +286,7 @@ final class SmartTasteEngine: ObservableObject {
         let snapshot = state
         let url = Self.fileURL
         Task.detached(priority: .utility) {
-            if let data = try? JSONEncoder().encode(snapshot) {
+            if let data = CryptoBox.sealCodable(snapshot) {
                 try? data.write(to: url, options: [.atomic, .completeFileProtection])
             }
         }
@@ -386,10 +386,10 @@ final class SmartTasteEngine: ObservableObject {
     private func captureVisualPrototype(postId: String, thumbURL: URL, isPositive: Bool) {
         Task {
             let img: UIImage?
-            if let cached = MediaImageLoader.shared.cached(thumbURL) {
+            if let cached = MediaImageLoader.shared.cached(thumbURL, maxPixelSize: 320) {
                 img = cached
             } else {
-                img = await MediaImageLoader.shared.load(thumbURL)
+                img = await MediaImageLoader.shared.load(thumbURL, maxPixelSize: 320)
             }
             guard let img else { return }
             if let archived = await VisualTasteAnalyzer.shared.registerPrototype(from: img, isPositive: isPositive) {
@@ -420,10 +420,10 @@ final class SmartTasteEngine: ObservableObject {
         Task.detached(priority: .utility) {
             for (pid, thumbURL) in candidates {
                 let img: UIImage?
-                if let cached = await MediaImageLoader.shared.cached(thumbURL) {
+                if let cached = await MediaImageLoader.shared.cached(thumbURL, maxPixelSize: 320) {
                     img = cached
                 } else {
-                    img = await MediaImageLoader.shared.load(thumbURL)
+                    img = await MediaImageLoader.shared.load(thumbURL, maxPixelSize: 320)
                 }
                 guard let img else { continue }
                 let s = await VisualTasteAnalyzer.shared.evaluateCandidate(postId: pid, image: img)

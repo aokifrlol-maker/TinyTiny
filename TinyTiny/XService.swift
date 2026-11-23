@@ -348,13 +348,17 @@ enum XTweetParser {
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func parseTwitterDate(_ raw: String?) -> String? {
-        guard let raw, !raw.isEmpty else { return nil }
+    private static let twitterDateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
         df.dateFormat = "EEE MMM dd HH:mm:ss Z yyyy"
-        guard let date = df.date(from: raw) else { return nil }
-        return ISO8601DateFormatter().string(from: date)
+        return df
+    }()
+    private static let isoFormatter = ISO8601DateFormatter()
+
+    private static func parseTwitterDate(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty, let date = twitterDateFormatter.date(from: raw) else { return nil }
+        return isoFormatter.string(from: date)
     }
 
     private static func parseCreatedAtMs(_ val: Any?) -> String? {
@@ -364,7 +368,7 @@ enum XTweetParser {
         else if let s = val as? String { ms = Double(s) }
         else { ms = nil }
         guard let ms, ms > 1_000_000_000_000 else { return nil }
-        return ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: ms / 1000.0))
+        return isoFormatter.string(from: Date(timeIntervalSince1970: ms / 1000.0))
     }
 
     static func extractBottomCursor(from data: Data) -> String? {

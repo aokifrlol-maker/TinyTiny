@@ -194,6 +194,11 @@ final class MediaImageLoader {
         return img
     }
 
+    func clearCache() {
+        cache.removeAllObjects()
+        inFlight.removeAll()
+    }
+
     func prefetch(urls: [URL?]) {
         for u in urls.compactMap({ $0 }) where cached(u) == nil {
             Task.detached(priority: .utility) { _ = await MediaImageLoader.shared.load(u) }
@@ -310,6 +315,21 @@ final class VideoPreloader {
     private var preloadedItems: [String: AVPlayerItem] = [:]
     private var order: [String] = []
     private var itemOrder: [String] = []
+    private var resolvedLongVideoIDs: Set<String> = []
+
+    func clearCache() {
+        cachedAssets.removeAll()
+        preloadedItems.removeAll()
+        order.removeAll()
+        itemOrder.removeAll()
+        resolvedLongVideoIDs.removeAll()
+    }
+
+    func shouldPreloadLongVideo(_ id: String) -> Bool {
+        guard resolvedLongVideoIDs.insert(id).inserted else { return false }
+        if resolvedLongVideoIDs.count > 120 { resolvedLongVideoIDs.removeAll() }
+        return true
+    }
 
     func preload(gifs: [Gif], hd: Bool) {
         MediaImageLoader.shared.prefetch(urls: gifs.prefix(6).map(\.posterURL))
@@ -920,7 +940,7 @@ struct FeedView: View {
               idx + 1 < model.items.count else { return }
         let upcoming = Array(model.items[(idx + 1)...].prefix(5))
         VideoPreloader.shared.preload(gifs: upcoming, hd: store.data.settings.hd)
-        for item in upcoming.prefix(3) where item.isLongVideoPost {
+        for item in upcoming.prefix(3) where item.isLongVideoPost && VideoPreloader.shared.shouldPreloadLongVideo(item.id) {
             Task.detached(priority: .utility) {
                 _ = await LongVideoAPI.shared.resolvePlayableURLs(for: item)
             }

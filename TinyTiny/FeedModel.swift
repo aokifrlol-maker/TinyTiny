@@ -255,7 +255,7 @@ final class FeedModel: ObservableObject {
         let url = cacheFileURL(for: key)
         return await Task.detached(priority: .utility) {
             guard let data = try? Data(contentsOf: url),
-                  let decoded = try? JSONDecoder().decode([Gif].self, from: data) else {
+                  let decoded = CryptoBox.openCodable([Gif].self, from: data) else {
                 return []
             }
             return decoded
@@ -265,7 +265,7 @@ final class FeedModel: ObservableObject {
     private static func loadDiskCache(for key: String) -> [Gif] {
         let url = cacheFileURL(for: key)
         guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([Gif].self, from: data) else {
+              let decoded = CryptoBox.openCodable([Gif].self, from: data) else {
             return []
         }
         return decoded
@@ -275,7 +275,7 @@ final class FeedModel: ObservableObject {
         let slice = Array(posts.prefix(30))
         let url = cacheFileURL(for: key)
         Task.detached(priority: .utility) {
-            if let data = try? JSONEncoder().encode(slice) {
+            if let data = CryptoBox.sealCodable(slice) {
                 try? data.write(to: url, options: [.atomic])
             }
         }

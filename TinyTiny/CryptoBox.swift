@@ -7,10 +7,36 @@ import Security
 /// and decrypted transparently on-device before playback or Vault storage.
 enum CryptoBox {
     private static let seedrMasterKeyAccount = "tinytiny.seedr.masterkey.v1"
+    private static let localVaultKeyAccount = "tinytiny.local.vaultkey.v1"
     private static let magicHeader = Data("TTENC1".utf8) // 6 bytes
 
     static func generateKey() -> SymmetricKey {
         SymmetricKey(size: .bits256)
+    }
+
+    /// Persistent 256-bit AES-GCM key stored in iOS Keychain for encrypting all local app data at rest.
+    static func localVaultKey() -> SymmetricKey {
+        if let existingData = readKeychain(account: localVaultKeyAccount), existingData.count == 32 {
+            return SymmetricKey(data: existingData)
+        }
+        let fresh = generateKey()
+        let raw = fresh.withUnsafeBytes { Data($0) }
+        saveKeychain(raw, account: localVaultKeyAccount)
+        return fresh
+    }
+
+    static func sealCodable<T: Encodable>(_ value: T) -> Data? {
+        guard let raw = try? JSONEncoder().encode(value) else { return nil }
+        return try? seal(raw, using: localVaultKey())
+    }
+
+    /// Opens `TTENC1`-encrypted blobs, with transparent fallback to legacy plaintext JSON so existing data migrates cleanly.
+    static func openCodable<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
+        if isEncryptedEnvelope(data) {
+            guard let plain = try? open(data, using: localVaultKey()) else { return nil }
+            return try? JSONDecoder().decode(type, from: plain)
+        }
+        return try? JSONDecoder().decode(type, from: data)
     }
 
     /// Persistent 256-bit AES-GCM key stored in iOS Keychain so your encrypted Seedr library remains readable across sessions.
