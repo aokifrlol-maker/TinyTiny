@@ -153,6 +153,15 @@ class FeedModel(
     val currentCursor: String? get() = afterCursor
     val canLoadMore: Boolean get() = source.value !is FeedSource.CustomList && hasMore
 
+    private fun isAllowedByForYouSources(post: Gif, fy: ForYouSourceSettings): Boolean = when {
+        post.isRule34Post -> fy.enableRule34
+        post.isOnlyFansPost -> fy.enableOnlyFans
+        post.isXPost -> fy.enableX
+        post.isIGPost -> fy.enableIG
+        post.isLongVideoPost -> fy.enableLongVideos
+        else -> fy.enableReddit
+    }
+
     init {
         if (initialItems.isNotEmpty()) {
             ids.addAll(initialItems.map { it.id })
@@ -163,11 +172,30 @@ class FeedModel(
                 val cached = loadDiskCache(key)
                 if (items.value.isEmpty() && cached.isNotEmpty()) {
                     val keepSeen = isProfileOrSearch(initialSource)
-                    val filtered = cached.filter { keepSeen || !UserStore.shared.isSeen(it) }
+                    val fy = SmartTasteEngine.shared.state.value.forYouSources
+                    val filtered = cached.filter {
+                        (keepSeen || !UserStore.shared.isSeen(it)) &&
+                            (initialSource !is FeedSource.ForYou || isAllowedByForYouSources(it, fy))
+                    }
                     if (filtered.isNotEmpty()) {
                         items.value = filtered
                         ids.addAll(filtered.map { it.id })
                         mediaKeys.addAll(filtered.map { it.canonicalDedupeKey })
+                    }
+                }
+            }
+        }
+        // Live-purge disabled platforms from For You the instant user toggles any source off in Settings
+        if (initialSource is FeedSource.ForYou) {
+            scope.launch {
+                SmartTasteEngine.shared.state.collect { taste ->
+                    if (source.value is FeedSource.ForYou) {
+                        val fy = taste.forYouSources
+                        val cur = items.value
+                        val filtered = cur.filter { isAllowedByForYouSources(it, fy) }
+                        if (filtered.size != cur.size) {
+                            items.value = filtered
+                        }
                     }
                 }
             }

@@ -211,6 +211,7 @@ class UserStore private constructor() {
         }
         data.value = cur.copy(liked = next)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun recordDownloaded(gif: Gif) {
@@ -359,9 +360,10 @@ class UserStore private constructor() {
 
     fun isEligibleAdultPost(post: Gif): Boolean {
         if (post.isOnlyFansPost || post.isRule34Post || post.isLongVideoPost) return true
-        val titleLower = (post.title ?: "").lowercase()
-        val spamBlock = listOf("crypto", "airdrop", "giveaway", "retweet to win", "breaking news", "stock market", "nfl ", "nba ")
-        if (spamBlock.any { it in titleLower }) return false
+        val sub = (post.subreddit ?: "").lowercase()
+        if (sub in AdultContentClassifier.sfwBlockedSubreddits) return false
+        val combined = "${post.title ?: ""} ${post.author ?: ""} $sub"
+        if (AdultContentClassifier.containsSFWBlockedTerm(combined)) return false
         return post.hasPlayableMedia
     }
 
@@ -456,6 +458,70 @@ class UserStore private constructor() {
             }
         }
         saveNow()
+    }
+}
+
+object AdultContentClassifier {
+    val sfwBlockedSubreddits = setOf(
+        "earthporn", "foodporn", "carporn", "fightporn", "spaceporn", "cityporn",
+        "natureporn", "historyporn", "mapporn", "designporn", "roomporn", "houseporn",
+        "powerwashingporn", "artporn", "movieporn", "abandonedporn", "architectureporn",
+        "humanporn", "animalporn", "weatherporn", "botanicalporn", "mechanicalgifs",
+        "gaming", "funny", "memes", "dankmemes", "videos", "pics", "news", "worldnews",
+        "politics", "sports", "nba", "nfl", "soccer", "ufc", "mma", "formula1",
+        "minecraft", "fortnitebr", "valorant", "leagueoflegends", "callofduty",
+        "tiktokcringe", "publicfreakout", "nextfuckinglevel", "interestingasfuck",
+        "damnthatsinteresting", "wholesomememes", "aww", "animals", "eyebleach",
+        "teenagers", "livestreamfail", "cryptocurrency", "wallstreetbets", "stocks",
+        "technology", "science", "askreddit", "movies", "television", "music", "hiphopheads"
+    )
+
+    val sfwBlockedTerms = listOf(
+        "#nba", "#nfl", "#ufc", "#fifa", "#mlb", "#nhl", "#premierleague", "#championsleague",
+        "#election", "#trump", "#biden", "#kamala", "#breakingnews", "#foxnews", "#cnn", "#msnbc",
+        "#minecraft", "#roblox", "#valorant", "#warzone", "#esports", "#callofduty", "#fortnitebr",
+        "#bitcoin", "#ethereum", "#crypto", "#stockmarket", "#forex", "#tradingview",
+        "#recipe", "#cooking", "#baking", "#mealprep", "#workoutroutine", "#gymmotivation",
+        "street fight", "knockout", "car crash", "dashcam", "bodycam", "police shooting",
+        "press conference", "box score", "touchdown", "home run", "earnings report",
+        "sponsored", "promoted", "airdrop", "giveaway", "retweet to win"
+    )
+
+    private val explicitAdultMarkers = listOf(
+        "nsfw", "18+", "onlyfans", "fansly", "manyvids", "pornhub", "xvideos", "xhamster",
+        "redgifs", "brazzers", "chaturbate", "camgirl", "xxx", "porn", "nude", "nudes",
+        "lewd", "hentai", "rule34", "r34", "futanari", "femboy", "tgirl", "shemale",
+        "ladyboy", "ebony", "milf", "anal", "blowjob", "deepthroat", "facefuck", "creampie",
+        "cumshot", "cumslut", "gangbang", "threesome", "cuckold", "hotwife", "bdsm",
+        "femdom", "pegging", "boobs", "tits", "pussy", "cock", "dick", "sucking",
+        "riding", "doggystyle", "squirt", "orgasm", "masturbat", "nsfwtwt", "hornytwt",
+        "lewdtok", "18plus", "uncensored", "goon", "gooned", "gooning", "edging",
+        "fisting", "ahegao", "paizuri", "bukkake", "freeuse", "bimbo", "slut",
+        "link in bio", "vip page", "full video", "dm for"
+    )
+
+    fun containsSFWBlockedTerm(text: String): Boolean {
+        val lower = text.lowercase()
+        return sfwBlockedTerms.any { it in lower }
+    }
+
+    fun hasExplicitAdultIndicators(text: String): Boolean {
+        val lower = text.lowercase()
+        return explicitAdultMarkers.any { it in lower }
+    }
+
+    fun isEligibleXTweet(
+        text: String,
+        author: String,
+        authorBio: String,
+        possiblySensitive: Boolean,
+        hasAdultWarning: Boolean,
+        hasGraphicViolenceOnly: Boolean
+    ): Boolean {
+        if (hasGraphicViolenceOnly) return false
+        val combined = "$text $author $authorBio"
+        if (containsSFWBlockedTerm(combined)) return false
+        return hasAdultWarning || possiblySensitive || hasExplicitAdultIndicators(combined)
     }
 }
 

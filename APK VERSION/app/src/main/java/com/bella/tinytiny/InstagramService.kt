@@ -38,9 +38,10 @@ data class InstagramAccountSession(
     var username: String = "",
     var userId: String = "",
     var sessionId: String = "",
-    var csrfToken: String = "",
-    var isConnected: Boolean = false
-)
+    var csrfToken: String = ""
+) {
+    val isConnected: Boolean get() = sessionId.isNotEmpty() && csrfToken.isNotEmpty()
+}
 
 object InstagramParser {
     fun parseReels(rawJson: String): List<Gif> {
@@ -417,8 +418,7 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                         username = clean,
                         userId = uid,
                         sessionId = sid,
-                        csrfToken = csrf,
-                        isConnected = true
+                        csrfToken = csrf
                     )
                 )
                 onConnected()
@@ -466,38 +466,45 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
             }
         }
 
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    loginWebViewRef[0] = this
-                    isFocusable = true
-                    isFocusableInTouchMode = true
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    val chromeUa = try {
-                        android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
-                    } catch (_: Throwable) {
-                        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-                    }
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    settings.javaScriptCanOpenWindowsAutomatically = true
-                    settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    settings.userAgentString = chromeUa
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                    webChromeClient = android.webkit.WebChromeClient()
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            checkCookiesAndComplete(view)
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        loginWebViewRef[0] = this
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        minimumHeight = (ctx.resources.displayMetrics.heightPixels - 180).coerceAtLeast(500)
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        val chromeUa = try {
+                            android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                        } catch (_: Throwable) {
+                            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                         }
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.loadWithOverviewMode = true
+                        settings.useWideViewPort = true
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.userAgentString = chromeUa
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                        webChromeClient = android.webkit.WebChromeClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                checkCookiesAndComplete(view)
+                            }
+                        }
+                        loadUrl("https://www.instagram.com/accounts/login/")
                     }
-                    loadUrl("https://www.instagram.com/accounts/login/")
-                }
-            },
-            modifier = Modifier.fillMaxWidth().weight(1f)
-        )
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }

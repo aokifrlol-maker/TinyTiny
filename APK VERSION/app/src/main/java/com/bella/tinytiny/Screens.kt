@@ -308,7 +308,7 @@ fun GoonedBrowseOverlay(
                                                 .padding(start = 5.dp, end = 12.dp, top = 5.dp, bottom = 5.dp)
                                         ) {
                                             AsyncImage(
-                                                model = c.avatar,
+                                                model = c.avatarURL,
                                                 contentDescription = null,
                                                 contentScale = ContentScale.Crop,
                                                 modifier = Modifier.size(28.dp).clip(CircleShape).background(Color.White.copy(0.12f))
@@ -723,7 +723,7 @@ fun GoonedFollowsView(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Box(Modifier.size(38.dp).liquidGlassCircle(tinted), contentAlignment = Alignment.Center) { BrandLogoX(18.dp) }
                         Column(Modifier.weight(1f)) {
-                            Text("@${userData.xSession.username.removePrefix("@")}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("@${userData.xSession.displayHandle}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                             Text("Streaming personal X timeline & 18+ media", color = Theme.textSecondary, fontSize = 12.sp)
                         }
                     }

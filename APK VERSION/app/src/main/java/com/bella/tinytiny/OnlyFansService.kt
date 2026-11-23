@@ -18,18 +18,20 @@ data class OFCreator(
     val id: String,
     val service: String = "onlyfans",
     val name: String,
-    @SerialName("display_name") val displayName: String? = null,
+    val displayName: String? = null,
     val avatar: String? = null,
     val banner: String? = null,
     val bio: String? = null,
-    @SerialName("post_count") val postCount: Int? = null,
-    @SerialName("media_count") val mediaCount: Int? = null,
-    @SerialName("favorited_count") val favoritedCount: Int? = null,
+    val postCount: Int? = null,
+    val videoCount: Int? = null,
+    val imageCount: Int? = null,
+    val bookmarked: Int? = null,
     val gender: String? = null,
-    @SerialName("creator_tags") val creatorTags: List<String>? = null
+    val creatorTags: List<String>? = null
 ) {
     val label: String get() = displayName?.takeIf { it.isNotEmpty() } ?: "@$name"
     val cleanHandle: String get() = name.replace("@", "")
+    val avatarURL: String get() = avatar?.takeIf { it.isNotEmpty() } ?: "https://img.cum.st/creator/$service/$id/avatar.webp"
 }
 
 @Serializable
@@ -44,9 +46,9 @@ data class FollowedOFCreator(
 @Serializable
 data class OFVariant(
     val name: String,
+    val bytes: Long? = null,
     val width: Int? = null,
     val height: Int? = null,
-    val size: Int? = null,
     val mime: String? = null
 )
 
@@ -56,12 +58,13 @@ data class OFAttachment(
     val position: Int? = null,
     val kind: String,
     val filename: String? = null,
+    val mimeType: String? = null,
     val mime: String? = null,
-    @SerialName("storage_key") val storageKey: String? = null,
-    val size: Int? = null,
+    val storageKey: String? = null,
+    val bytes: Long? = null,
     val width: Int? = null,
     val height: Int? = null,
-    @SerialName("duration_ms") val durationMs: Int? = null,
+    val durationMs: Long? = null,
     val variants: List<OFVariant>? = null
 )
 
@@ -69,20 +72,24 @@ data class OFAttachment(
 data class OFPost(
     val id: String,
     val service: String? = null,
-    @SerialName("creator_id") val creatorId: String? = null,
-    @SerialName("creator_name") val creatorName: String? = null,
-    @SerialName("creator_display_name") val creatorDisplayName: String? = null,
+    val creatorId: String? = null,
+    val creatorName: String? = null,
     val title: String? = null,
-    val caption: String? = null,
-    @SerialName("published_at") val publishedAt: Int? = null,
-    @SerialName("bookmarked_count") val bookmarkedCount: Int? = null,
-    val attachments: List<OFAttachment>? = null
+    val captionText: String? = null,
+    val contentText: String? = null,
+    val published: Long? = null,
+    val added: Long? = null,
+    val bookmarked: Int? = null,
+    val attachments: List<OFAttachment>? = null,
+    val tags: List<String>? = null,
+    val creatorTags: List<String>? = null
 )
 
 @Serializable
 data class OFFeedResponse(
     val posts: List<OFPost> = emptyList(),
-    @SerialName("next_cursor") val nextCursor: String? = null
+    val dms: List<OFPost> = emptyList(),
+    val nextCursor: String? = null
 )
 
 @Serializable
@@ -153,7 +160,7 @@ object OnlyFansAPI {
         creatorName: String,
         caption: String?,
         bookmarked: Int?,
-        published: Int?,
+        published: Long?,
         prefix: String
     ): Gif? {
         val kind = att.kind.lowercase()
@@ -163,7 +170,7 @@ object OnlyFansAPI {
         val variantNames = (att.variants ?: emptyList()).map { it.name }
         val pos = att.position ?: 0
         val cleanTitle = caption?.trim()?.takeIf { it.isNotEmpty() } ?: "@$creatorName"
-        val isoDate = published?.takeIf { it > 0 }?.let { Instant.ofEpochSecond(it.toLong()).toString() }
+        val isoDate = published?.takeIf { it > 0L }?.let { Instant.ofEpochSecond(it).toString() }
         val permalink = "https://cum.st/creators/onlyfans/$creatorId/post/$postId"
 
         val creator = creatorById[creatorId] ?: creatorByName[creatorName.lowercase()]
@@ -175,8 +182,9 @@ object OnlyFansAPI {
             gender = creator?.gender
         )
 
+        val effectiveMime = att.mimeType ?: att.mime
         return if (kind == "video") {
-            val file = defaultFilename(att.mime, kind)
+            val file = defaultFilename(effectiveMime, kind)
             val original = "$MEDIA_CDN/$sk/$file"
             val isMp4Orig = file.endsWith(".mp4", ignoreCase = true)
             val hdVariant = if (isMp4Orig) listOf("1080p", "720p", "480p", "360p").firstOrNull { it in variantNames } else null
@@ -203,7 +211,7 @@ object OnlyFansAPI {
                 createdUtc = isoDate
             )
         } else {
-            val file = defaultFilename(att.mime, kind)
+            val file = defaultFilename(effectiveMime, kind)
             val orig = "$MEDIA_CDN/$sk/$file"
             Gif(
                 id = postIdFull,
@@ -235,9 +243,9 @@ object OnlyFansAPI {
                     postId = p.id,
                     creatorId = cid,
                     creatorName = cname,
-                    caption = p.caption ?: p.title,
-                    bookmarked = p.bookmarkedCount,
-                    published = p.publishedAt,
+                    caption = p.captionText ?: p.contentText ?: p.title,
+                    bookmarked = p.bookmarked,
+                    published = p.published ?: p.added,
                     prefix = prefix
                 )?.let { out.add(it) }
             }
@@ -288,11 +296,12 @@ object OnlyFansAPI {
     suspend fun fetchDMs(after: String? = null): GoonedFeedResponse {
         val offset = after?.toIntOrNull() ?: 0
         val params = withHiddenGenders(
-            mapOf("service" to "onlyfans", "kind" to "dm", "n" to "35", "offset" to "$offset")
+            mapOf("service" to "onlyfans", "n" to "35", "offset" to "$offset")
         )
         return try {
-            val resp: OFFeedResponse = get("/posts", params)
-            GoonedFeedResponse(mapPosts(resp.posts), "${offset + 35}")
+            val resp: OFFeedResponse = get("/dms", params)
+            val rows = if (resp.dms.isNotEmpty()) resp.dms else resp.posts
+            GoonedFeedResponse(mapPosts(rows, prefix = "ofdm"), "${offset + 35}")
         } catch (_: Throwable) {
             GoonedFeedResponse()
         }

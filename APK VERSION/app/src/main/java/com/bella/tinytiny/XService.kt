@@ -23,7 +23,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -33,13 +35,19 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class XAccountSession(
-    var username: String = "",
+    @JsonNames("screenName") var username: String = "",
+    var screenName: String = "",
+    var userId: String = "",
     var authToken: String = "",
     var ct0: String = "",
-    var isConnected: Boolean = false
-)
+    var mixIntoForYou: Boolean = true
+) {
+    val isConnected: Boolean get() = authToken.isNotEmpty() && ct0.isNotEmpty()
+    val displayHandle: String get() = screenName.ifEmpty { username }.removePrefix("@").ifEmpty { "𝕏 Account" }
+}
 
 object XTweetParser {
     private val twitterDateFormatter = DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss Z yyyy", Locale.US)
@@ -66,17 +74,52 @@ object XTweetParser {
                 }
             }
             is JSONObject -> {
+                // Skip promoted ads / sponsored timeline entries (matches iOS)
+                val entryId = node.optString("entryId", "").lowercase()
+                if (entryId.startsWith("promoted-") || entryId.contains("promoted-tweet")) return
+                if (node.has("promotedMetadata") || node.has("promoted_metadata") || node.has("adMetadata")) return
+                val comp = node.optJSONObject("clientEventInfo")?.optString("component", "")?.lowercase() ?: ""
+                if (comp.contains("promoted") || comp.contains("ad_")) return
+
                 val legacy = node.optJSONObject("legacy")
-                val coreUser = node.optJSONObject("core")?.optJSONObject("user_results")?.optJSONObject("result")?.optJSONObject("legacy")
+                val userResult = node.optJSONObject("core")?.optJSONObject("user_results")?.optJSONObject("result")
+                val coreUser = userResult?.optJSONObject("legacy")
                 val screenName = coreUser?.optString("screen_name")?.takeIf { it.isNotEmpty() }
+                    ?: userResult?.optJSONObject("core")?.optString("screen_name")?.takeIf { it.isNotEmpty() }
                     ?: node.optString("screen_name").takeIf { it.isNotEmpty() }
                     ?: inheritedAuthor
+                val authorBio = coreUser?.optString("description", "") ?: ""
 
                 if (legacy != null) {
                     val restId = node.optString("rest_id").ifEmpty { legacy.optString("id_str") }
                     val extEntities = legacy.optJSONObject("extended_entities") ?: legacy.optJSONObject("entities")
                     val mediaArr = extEntities?.optJSONArray("media")
                     if (restId.isNotEmpty() && mediaArr != null) {
+                        val possiblySensitive = legacy.optBoolean("possibly_sensitive", false) ||
+                            node.optBoolean("possibly_sensitive", false)
+                        val fullText = legacy.optString("full_text").replace(Regex("https://t\\.co/\\S+"), "").trim()
+                        val authorClean = screenName ?: "x_user"
+                        var hasAdultWarning = false
+                        var hasGraphicOnly = false
+                        for (mIdx in 0 until mediaArr.length()) {
+                            val m = mediaArr.optJSONObject(mIdx) ?: continue
+                            val sw = m.optJSONObject("sensitive_media_warning")
+                            if (sw != null) {
+                                if (sw.optBoolean("adult_content", false)) hasAdultWarning = true
+                                if (sw.optBoolean("graphic_violence", false) && !sw.optBoolean("adult_content", false)) hasGraphicOnly = true
+                            }
+                        }
+                        if (!AdultContentClassifier.isEligibleXTweet(
+                                text = fullText,
+                                author = authorClean,
+                                authorBio = authorBio,
+                                possiblySensitive = possiblySensitive,
+                                hasAdultWarning = hasAdultWarning,
+                                hasGraphicViolenceOnly = hasGraphicOnly
+                            )
+                        ) {
+                            return
+                        }
                         for (mIdx in 0 until mediaArr.length()) {
                             val m = mediaArr.optJSONObject(mIdx) ?: continue
                             val type = m.optString("type")
@@ -104,14 +147,12 @@ object XTweetParser {
                             if (bestMp4 != null || hlsUrl != null) {
                                 val gid = "x_${restId}_$mIdx"
                                 if (seen.add(gid)) {
-                                    val fullText = legacy.optString("full_text").replace(Regex("https://t\\.co/\\S+"), "").trim()
                                     val thumb = m.optString("media_url_https").takeIf { it.isNotEmpty() }
                                     val orig = m.optJSONObject("original_info")
                                     val w = orig?.optInt("width", 0)?.takeIf { it > 0 }
                                     val h = orig?.optInt("height", 0)?.takeIf { it > 0 }
                                     val dur = videoInfo.optDouble("duration_millis", 0.0).takeIf { it > 0 }?.let { it / 1000.0 }
                                     val created = parseTwitterDate(legacy.optString("created_at"))
-                                    val authorClean = screenName ?: "x_user"
                                     val tags = Regex("#([A-Za-z0-9_]+)").findAll(fullText).map { it.groupValues[1].lowercase() }.toList()
                                     MediaMetaRegistry.register(gid, tags = tags, creatorName = authorClean)
                                     out.add(
@@ -396,7 +437,7 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
             detected = true
             val finishWithHandle: (String) -> Unit = { handle ->
                 val clean = handle.trim().removePrefix("@").ifEmpty { "𝕏 Account" }
-                store.updateXSession(XAccountSession(username = clean, authToken = auth, ct0 = ct0, isConnected = true))
+                store.updateXSession(XAccountSession(username = clean, screenName = clean, authToken = auth, ct0 = ct0))
                 onConnected()
             }
             if (wv != null) {
@@ -442,38 +483,45 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
             }
         }
 
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    loginWebViewRef[0] = this
-                    isFocusable = true
-                    isFocusableInTouchMode = true
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    val chromeUa = try {
-                        android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
-                    } catch (_: Throwable) {
-                        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-                    }
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    settings.javaScriptCanOpenWindowsAutomatically = true
-                    settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    settings.userAgentString = chromeUa
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                    webChromeClient = android.webkit.WebChromeClient()
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            checkCookiesAndComplete(view)
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        loginWebViewRef[0] = this
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        minimumHeight = (ctx.resources.displayMetrics.heightPixels - 180).coerceAtLeast(500)
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        val chromeUa = try {
+                            android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                        } catch (_: Throwable) {
+                            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                         }
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.loadWithOverviewMode = true
+                        settings.useWideViewPort = true
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.userAgentString = chromeUa
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                        webChromeClient = android.webkit.WebChromeClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                checkCookiesAndComplete(view)
+                            }
+                        }
+                        loadUrl("https://x.com/login")
                     }
-                    loadUrl("https://x.com/login")
-                }
-            },
-            modifier = Modifier.fillMaxWidth().weight(1f)
-        )
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }

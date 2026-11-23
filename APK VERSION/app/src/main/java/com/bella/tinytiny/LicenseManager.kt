@@ -104,6 +104,15 @@ object LicenseManager {
     val dismissedAnnouncementId = MutableStateFlow("")
     @Volatile private var lastRemoteBackupJson: JsonObject? = null
     @Volatile private var lastSyncError: String? = null
+    private var cloudSyncJob: kotlinx.coroutines.Job? = null
+
+    fun scheduleCloudSync() {
+        cloudSyncJob?.cancel()
+        cloudSyncJob = scope.launch {
+            kotlinx.coroutines.delay(4_000L)
+            syncEncryptedBackupNow()
+        }
+    }
 
     val deviceId: String
 
@@ -447,6 +456,12 @@ object LicenseManager {
                 SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
                 CryptoBox.restoreSeedrMasterKeyIfMissing(backup.seedrMasterKey)
                 injectRestoredSocialCookies()
+                if (UserStore.shared.data.value.xSession.isConnected) {
+                    scope.launch { XWebEngine.warmUp() }
+                }
+                if (UserStore.shared.data.value.igSession.isConnected) {
+                    scope.launch { InstagramWebEngine.warmUp() }
+                }
                 true
             }
         } catch (e: Throwable) {
