@@ -82,6 +82,7 @@ fun FeedView(
     val sort by model.sort.collectAsState()
     val src by model.source.collectAsState()
     val userData by UserStore.shared.data.collectAsState()
+    val scope = rememberCoroutineScope()
 
     var shareTarget by remember { mutableStateOf<Gif?>(null) }
 

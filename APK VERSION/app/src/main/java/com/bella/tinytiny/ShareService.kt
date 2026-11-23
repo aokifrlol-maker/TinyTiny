@@ -61,7 +61,7 @@ object ShareService {
     val pendingReceivedPosts = MutableStateFlow<List<Gif>?>(null)
     val pendingReceivedTitle = MutableStateFlow<String?>(null)
 
-    suspend fun createEncryptedShareLink(post: Gif): Pair<String, String>? {
+    suspend fun createEncryptedShareLink(post: Gif): Pair<String, String>? = withContext(Dispatchers.IO) {
         val localUrl = OfflineManager.localMediaURL(post.id)
         if (localUrl != null && localUrl.startsWith("file://")) {
             val file = File(localUrl.removePrefix("file://"))
@@ -93,7 +93,7 @@ object ShareService {
                             if (resp.code == 200) {
                                 val shareId = JSONObject(resp.body?.string() ?: "").optString("id")
                                 if (shareId.isNotEmpty()) {
-                                    return "tinytiny://drop/$shareId#k=$encodedKey" to "TTDROP:$shareId.$encodedKey"
+                                    return@withContext "tinytiny://drop/$shareId#k=$encodedKey" to "TTDROP:$shareId.$encodedKey"
                                 }
                             }
                         }
@@ -102,7 +102,7 @@ object ShareService {
             }
         }
         val payload = ShareDropPayload(title = post.title ?: post.author, post = post)
-        return sealAndPublishPayload(payload)
+        sealAndPublishPayload(payload)
     }
 
     suspend fun createEncryptedCollectionShareLink(posts: List<Gif>, title: String? = null): Pair<String, String>? {
