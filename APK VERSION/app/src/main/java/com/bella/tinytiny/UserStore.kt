@@ -357,6 +357,14 @@ class UserStore private constructor() {
         return SmartTasteEngine.shared.recordDislike(post, categories.value)
     }
 
+    fun isEligibleAdultPost(post: Gif): Boolean {
+        if (post.isOnlyFansPost || post.isRule34Post || post.isLongVideoPost) return true
+        val titleLower = (post.title ?: "").lowercase()
+        val spamBlock = listOf("crypto", "airdrop", "giveaway", "retweet to win", "breaking news", "stock market", "nfl ", "nba ")
+        if (spamBlock.any { it in titleLower }) return false
+        return post.hasPlayableMedia
+    }
+
     fun rankWithAlgorithm(posts: List<Gif>): List<Gif> {
         if (!data.value.settings.algorithmEnabled) return posts
         val algo = data.value.algorithm

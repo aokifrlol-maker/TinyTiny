@@ -235,7 +235,9 @@ function formatKeyDetails(rec) {
   const devLines = devs.map(([, info]) => {
     const agoMin = Math.max(0, Math.floor((nowSec() - (info.lastSeenAt || 0)) / 60));
     const agoStr = agoMin < 60 ? `${agoMin}m ago` : agoMin < 1440 ? `${Math.floor(agoMin / 60)}h ago` : `${Math.floor(agoMin / 1440)}d ago`;
-    return `  • ${escapeHtmlTg(info.model || "iPhone")} (iOS ${escapeHtmlTg(info.ios || "?")}, v${escapeHtmlTg(info.app || "1.0")}) · ${agoStr}`;
+    const osRaw = String(info.ios || "?");
+    const osLabel = osRaw.toLowerCase().startsWith("android") ? osRaw : `iOS ${osRaw}`;
+    return `  • ${escapeHtmlTg(info.model || "iPhone")} (${escapeHtmlTg(osLabel)}, v${escapeHtmlTg(info.app || "1.0")}) · ${agoStr}`;
   });
   return [
     `<b>${rec.key}</b>`,
@@ -258,7 +260,11 @@ function keyActionKeyboard(rec) {
         { text: "Lifetime", callback_data: `k:life:${rec.key}` },
       ],
       [
-        { text: "Unbind Devices", callback_data: `k:unb:${rec.key}` },
+        { text: "+1 Device", callback_data: `k:dev1:${rec.key}` },
+        { text: "+5 Devices", callback_data: `k:dev5:${rec.key}` },
+      ],
+      [
+        { text: "Unbind Devices", callback_data: `k:unbmenu:${rec.key}` },
         rec.revoked
           ? { text: "Unrevoke", callback_data: `k:unrev:${rec.key}` }
           : { text: "Revoke", callback_data: `k:rev:${rec.key}` },
@@ -273,6 +279,24 @@ function keyActionKeyboard(rec) {
       ],
     ],
   };
+}
+
+function unbindDevicesKeyboard(rec) {
+  const ids = Array.isArray(rec.deviceIds) ? rec.deviceIds : [];
+  const devMap = rec.devices || {};
+  const rows = ids.map((id, idx) => {
+    const info = devMap[id] || {};
+    const label = info.model || `Device ${idx + 1}`;
+    const osRaw = String(info.ios || "");
+    const tag = osRaw.toLowerCase().startsWith("android") ? "Android" : (osRaw ? `iOS ${osRaw}` : "");
+    const btnText = `❌ Unbind ${label}${tag ? ` (${tag})` : ""}`.slice(0, 48);
+    return [{ text: btnText, callback_data: `k:unbd:${idx}:${rec.key}` }];
+  });
+  if (ids.length > 0) {
+    rows.push([{ text: `🗑 Unbind ALL (${ids.length})`, callback_data: `k:unball:${rec.key}` }]);
+  }
+  rows.push([{ text: "← Back to Key", callback_data: `k:open:${rec.key}` }]);
+  return { inline_keyboard: rows };
 }
 
 async function buildHomeMenu(env) {
@@ -726,6 +750,38 @@ async function handleTelegramUpdate(env, update) {
 
     if (parts[0] === "k" && parts.length >= 3 && chatId && msgId) {
       const action = parts[1];
+      if (action === "unbd" && parts.length >= 4) {
+        const idx = parseInt(parts[2], 10);
+        const key = parts.slice(3).join(":");
+        const rec = await getLicense(env, key);
+        if (!rec) {
+          await answerCallbackQuery(env, cq.id, "Key not found");
+          return new Response("ok");
+        }
+        const ids = Array.isArray(rec.deviceIds) ? rec.deviceIds : [];
+        if (idx >= 0 && idx < ids.length) {
+          const removedId = ids[idx];
+          const label = rec.devices?.[removedId]?.model || "Device";
+          rec.deviceIds = ids.filter((id) => id !== removedId);
+          if (rec.devices && rec.devices[removedId]) {
+            delete rec.devices[removedId];
+          }
+          await saveLicense(env, rec);
+          await editTelegramMessage(
+            env,
+            chatId,
+            msgId,
+            `${formatKeyDetails(rec)}\n\n<i>Cloud backup untouched. Pick another device to unbind or go Back:</i>`,
+            unbindDevicesKeyboard(rec)
+          );
+          await answerCallbackQuery(env, cq.id, `Unbound ${label}`);
+          return new Response("ok");
+        }
+        await editTelegramMessage(env, chatId, msgId, formatKeyDetails(rec), unbindDevicesKeyboard(rec));
+        await answerCallbackQuery(env, cq.id, "Device already unbound");
+        return new Response("ok");
+      }
+
       const key = parts.slice(2).join(":");
       const rec = await getLicense(env, key);
       if (!rec) {
@@ -734,6 +790,15 @@ async function handleTelegramUpdate(env, update) {
       }
       if (action === "note") {
         await sendTelegram(env, chatId, `📝 <b>Set Note for ${rec.key}</b>\nReply to this message with the note:`, { force_reply: true });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (action === "unbmenu") {
+        const count = (rec.deviceIds || []).length;
+        const hint = count === 0
+          ? "\n\n<i>No devices currently bound to this key.</i>"
+          : "\n\n<i>Pick a specific device to unbind (cloud saves are kept safe):</i>";
+        await editTelegramMessage(env, chatId, msgId, formatKeyDetails(rec) + hint, unbindDevicesKeyboard(rec));
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
       }
@@ -760,10 +825,16 @@ async function handleTelegramUpdate(env, update) {
         rec.durationLabel = "Lifetime";
         await saveLicense(env, rec);
         toast = "Set to Lifetime";
-      } else if (action === "unb") {
-        rec.deviceIds = [];
+      } else if (action === "dev1" || action === "dev5") {
+        const add = action === "dev1" ? 1 : 5;
+        rec.maxDevices = Math.min(50, Math.max(1, (rec.maxDevices || 1) + add));
         await saveLicense(env, rec);
-        toast = "Devices unbound";
+        toast = `Max devices: ${rec.maxDevices}`;
+      } else if (action === "unb" || action === "unball") {
+        rec.deviceIds = [];
+        rec.devices = {};
+        await saveLicense(env, rec);
+        toast = "All devices unbound (cloud backup safe)";
       } else if (action === "rev") {
         rec.revoked = true;
         await saveLicense(env, rec);
@@ -987,9 +1058,25 @@ async function handleTelegramUpdate(env, update) {
       await sendTelegram(env, chatId, "Key not found.");
       return new Response("ok");
     }
-    rec.deviceIds = [];
+    await sendTelegram(
+      env,
+      chatId,
+      `${formatKeyDetails(rec)}\n\n<i>Pick a specific device to unbind (cloud saves are kept safe):</i>`,
+      unbindDevicesKeyboard(rec)
+    );
+    return new Response("ok");
+  }
+
+  if (cmd === "/setdevices") {
+    const rec = await getLicense(env, parts[1]);
+    const cap = parseInt(parts[2], 10);
+    if (!rec || !Number.isFinite(cap) || cap < 1) {
+      await sendTelegram(env, chatId, "Usage: <code>/setdevices TT-XXXX-XXXX-XXXX 5</code>");
+      return new Response("ok");
+    }
+    rec.maxDevices = Math.min(50, Math.max(1, cap));
     await saveLicense(env, rec);
-    await sendTelegram(env, chatId, `Unbound all devices from <code>${rec.key}</code>.`);
+    await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
     return new Response("ok");
   }
 

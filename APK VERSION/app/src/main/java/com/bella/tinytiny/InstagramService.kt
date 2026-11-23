@@ -7,6 +7,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -394,9 +395,8 @@ object InstagramAPI {
 @Composable
 fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
     val store = UserStore.shared
-    val userData by store.data.collectAsState()
     var detected by remember { mutableStateOf(false) }
-    var loginWebView by remember { mutableStateOf<WebView?>(null) }
+    val loginWebViewRef = remember { arrayOfNulls<WebView>(1) }
 
     fun checkCookiesAndComplete(wv: WebView?) {
         if (detected) return
@@ -436,71 +436,68 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
         }
     }
 
-    LaunchedEffect(loginWebView) {
+    LaunchedEffect(Unit) {
         while (!detected) {
-            kotlinx.coroutines.delay(650)
-            checkCookiesAndComplete(loginWebView)
+            kotlinx.coroutines.delay(900)
+            checkCookiesAndComplete(loginWebViewRef[0])
         }
     }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .liquidGlassBackground(tinted = userData.settings.tintedGlass)
+            .background(Color.Black)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(14.dp)
+            .imePadding()
     ) {
-        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                BrandLogoInstagram(22.dp)
-                Spacer(Modifier.width(10.dp))
-                Text("Sign in to Instagram", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .liquidGlassCard(cornerRadius = 18.dp)
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            loginWebView = this
-                            setBackgroundColor(android.graphics.Color.BLACK)
-                            val chromeUa = try {
-                                android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
-                            } catch (_: Throwable) {
-                                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-                            }
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.databaseEnabled = true
-                            settings.loadWithOverviewMode = true
-                            settings.useWideViewPort = true
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            settings.userAgentString = chromeUa
-                            CookieManager.getInstance().setAcceptCookie(true)
-                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                            webChromeClient = android.webkit.WebChromeClient()
-                            webViewClient = object : WebViewClient() {
-                                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    checkCookiesAndComplete(view)
-                                }
-                            }
-                            loadUrl("https://www.instagram.com/accounts/login/")
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            BrandLogoInstagram(22.dp)
+            Spacer(Modifier.width(10.dp))
+            Text("Sign in to Instagram", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
             }
         }
+
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    loginWebViewRef[0] = this
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    val chromeUa = try {
+                        android.webkit.WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                    } catch (_: Throwable) {
+                        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                    }
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    settings.javaScriptCanOpenWindowsAutomatically = true
+                    settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    settings.userAgentString = chromeUa
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    webChromeClient = android.webkit.WebChromeClient()
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            checkCookiesAndComplete(view)
+                        }
+                    }
+                    loadUrl("https://www.instagram.com/accounts/login/")
+                }
+            },
+            modifier = Modifier.fillMaxWidth().weight(1f)
+        )
     }
 }

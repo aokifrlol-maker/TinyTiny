@@ -311,7 +311,7 @@ class FeedModel(
                     hasMore = false
                 }
 
-                val playable = resp.posts.filter { it.hasPlayableMedia }
+                val playable = resp.posts.filter { it.hasPlayableMedia && (profileOrSearch || UserStore.shared.isEligibleAdultPost(it)) }
                 val batch = mutableListOf<Gif>()
                 for (post in playable) {
                     if (!ids.add(post.id)) continue

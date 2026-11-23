@@ -11,6 +11,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -426,21 +428,74 @@ fun GoonedMainShell() {
             modifier = Modifier.size(1.dp).alpha(0.01f)
         )
 
-        FeedView(
-            model = activeModel,
-            isVisible = isAppForeground && activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showR34Key && creatorGridSource == null,
-            targetPostId = slotPostIDs[activeChannel],
-            onCurrentPostChanged = { slotPostIDs[activeChannel] = it },
-            onOpenCategories = { activeTab = GoonedDockTab.BROWSE },
-            onSelectSubreddit = { selectFeed(FeedSource.Subreddit(it)) },
-            onSelectUser = { selectFeed(FeedSource.User(it)) },
-            onSelectXUser = { selectXOrLogin(FeedSource.XUser(it)) },
-            onSelectIGUser = { selectIGOrLogin(FeedSource.IGUser(it)) },
-            onSelectRule34Tag = { selectFeed(FeedSource.Rule34(it)) },
-            onSelectOFCreator = { id, h -> selectFeed(FeedSource.OFCreator(id, h, null)) },
-            onConnectX = { pendingFeedAfterLogin = FeedSource.XForYou; showXLogin = true },
-            onConnectIG = { pendingFeedAfterLogin = FeedSource.IGReels; showIGLogin = true }
+        // Hide FeedView (ExoPlayer SurfaceView) while X/IG login WebView is open to prevent compositing flicker
+        val primaryChannels = listOf(
+            HomeChannel.FOLLOWING,
+            HomeChannel.FOR_YOU,
+            HomeChannel.X_FOR_YOU,
+            HomeChannel.RULE34,
+            HomeChannel.IG_REELS,
+            HomeChannel.OF_FOR_YOU,
+            HomeChannel.LONG_ALL,
+            HomeChannel.LONG_EROME
         )
+        if (!showXLogin && !showIGLogin) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(activeChannel, activeTab) {
+                        if (activeTab == GoonedDockTab.HOME && activeChannel != HomeChannel.CUSTOM) {
+                            var accumDx = 0f
+                            detectHorizontalDragGestures(
+                                onDragStart = { accumDx = 0f },
+                                onHorizontalDrag = { _, dragAmount -> accumDx += dragAmount },
+                                onDragEnd = {
+                                    val curBase = when (activeChannel) {
+                                        HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES -> HomeChannel.X_FOR_YOU
+                                        HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED -> HomeChannel.IG_REELS
+                                        HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS -> HomeChannel.OF_FOR_YOU
+                                        else -> activeChannel
+                                    }
+                                    val curIdx = primaryChannels.indexOf(curBase)
+                                    if (curIdx >= 0 && kotlin.math.abs(accumDx) > 120f) {
+                                        val nextIdx = (curIdx + if (accumDx < 0) 1 else -1).coerceIn(0, primaryChannels.lastIndex)
+                                        if (nextIdx != curIdx) {
+                                            when (primaryChannels[nextIdx]) {
+                                                HomeChannel.FOLLOWING -> selectFeed(FeedSource.Following)
+                                                HomeChannel.FOR_YOU -> selectFeed(FeedSource.ForYou)
+                                                HomeChannel.X_FOR_YOU -> selectXOrLogin(FeedSource.XForYou)
+                                                HomeChannel.RULE34 -> selectFeed(FeedSource.Rule34(""))
+                                                HomeChannel.IG_REELS -> selectIGOrLogin(FeedSource.IGReels)
+                                                HomeChannel.OF_FOR_YOU -> selectFeed(FeedSource.OFForYou)
+                                                HomeChannel.LONG_ALL -> selectFeed(FeedSource.LongVideos(LongVideoSite.ALL))
+                                                HomeChannel.LONG_EROME -> selectFeed(FeedSource.LongVideos(LongVideoSite.EROME))
+                                                else -> {}
+                                            }
+                                        }
+                                    }
+                                    accumDx = 0f
+                                }
+                            )
+                        }
+                    }
+            ) {
+                FeedView(
+                    model = activeModel,
+                    isVisible = isAppForeground && activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showR34Key && creatorGridSource == null,
+                    targetPostId = slotPostIDs[activeChannel],
+                    onCurrentPostChanged = { slotPostIDs[activeChannel] = it },
+                    onOpenCategories = { activeTab = GoonedDockTab.BROWSE },
+                    onSelectSubreddit = { selectFeed(FeedSource.Subreddit(it)) },
+                    onSelectUser = { selectFeed(FeedSource.User(it)) },
+                    onSelectXUser = { selectXOrLogin(FeedSource.XUser(it)) },
+                    onSelectIGUser = { selectIGOrLogin(FeedSource.IGUser(it)) },
+                    onSelectRule34Tag = { selectFeed(FeedSource.Rule34(it)) },
+                    onSelectOFCreator = { id, h -> selectFeed(FeedSource.OFCreator(id, h, null)) },
+                    onConnectX = { pendingFeedAfterLogin = FeedSource.XForYou; showXLogin = true },
+                    onConnectIG = { pendingFeedAfterLogin = FeedSource.IGReels; showIGLogin = true }
+                )
+            }
+        }
 
         if (activeTab == GoonedDockTab.HOME && !userData.settings.controlsCollapsed) {
             Column(
@@ -681,6 +736,15 @@ fun GoonedMainShell() {
         }
         if (showR34Key) {
             Rule34KeySheet(onDismiss = { showR34Key = false })
+        }
+        // In-app PrivacyCover when app loses focus / backgrounds (matches iOS PrivacyCover)
+        if (!isAppForeground) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Theme.bg),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(48.dp))
+            }
         }
     }
 }

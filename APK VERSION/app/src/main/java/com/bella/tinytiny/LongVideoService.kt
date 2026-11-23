@@ -255,6 +255,44 @@ object LongVideoAPI {
         val html = fetchString(url) ?: return emptyList()
         val out = mutableListOf<Gif>()
         val seen = mutableSetOf<String>()
+
+        // Tier 1: Parse window.initials JSON (matches iOS)
+        try {
+            val idx = html.indexOf("window.initials")
+            if (idx >= 0) {
+                val start = html.indexOf('{', idx)
+                val end = html.indexOf(";</script>", start)
+                if (start >= 0 && end > start) {
+                    val jsonStr = html.substring(start, end)
+                    val modelRegex = Regex(""""pageURL"\s*:\s*"(https?:\\/\\/[^"]*xhamster\.com\\/videos\\/[^"]+)"[\s\S]{0,600}?"thumbURL"\s*:\s*"(https?:\\/\\/[^"]+)"[\s\S]{0,600}?"title"\s*:\s*"([^"]+)"""")
+                    for (m in modelRegex.findAll(jsonStr).take(24)) {
+                        val vUrl = m.groupValues[1].replace("\\/", "/")
+                        val thumb = m.groupValues[2].replace("\\/", "/")
+                        val title = decodeHtml(m.groupValues[3])
+                        val slug = vUrl.substringAfterLast('/')
+                        val id = "lv_xh_${slug.takeLast(24)}"
+                        if (!seen.add(id)) continue
+                        out.add(
+                            Gif(
+                                id = id,
+                                title = title,
+                                author = "xHamster",
+                                subreddit = "xHamster",
+                                width = 1280,
+                                height = 720,
+                                mediaType = "video",
+                                posterUrl = thumb,
+                                thumbnailUrl = thumb,
+                                sourceUrl = vUrl,
+                                permalink = vUrl
+                            )
+                        )
+                    }
+                    if (out.isNotEmpty()) return out
+                }
+            }
+        } catch (_: Throwable) {}
+
         for (m in xhCardRegex.findAll(html).take(24)) {
             val vUrl = m.groupValues[1]
             val thumb = m.groupValues[2]

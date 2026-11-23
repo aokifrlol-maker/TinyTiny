@@ -624,6 +624,32 @@ fun GoonedReelCell(
                     modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape)
                 )
             }
+        } else if (isHolding && !isShowingImage) {
+            // iOS holdDetailsHUD: clean 2x speed + full video metadata overlay while holding
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 96.dp)
+                    .liquidGlassCard(20.dp, tinted)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.FastForward, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp))
+                    Text("2x Speed · Pull down to lock · Drag sideways to scrub", color = Theme.accentBright, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                }
+                gif.author?.let { Text("@$it", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                gif.title?.takeIf { it.isNotEmpty() }?.let { Text(it, color = Color.White.copy(0.9f), fontSize = 13.sp, maxLines = 4, overflow = TextOverflow.Ellipsis) }
+                val metaParts = listOfNotNull(
+                    gif.longVideoSiteLabel ?: gif.subreddit?.let { "r/$it" },
+                    if (durationSec > 1.0) formatTime(durationSec) else null,
+                    if ((gif.width ?: 0) > 0 && (gif.height ?: 0) > 0) "${gif.width}×${gif.height}" else null
+                )
+                if (metaParts.isNotEmpty()) {
+                    Text(metaParts.joinToString(" · "), color = Theme.textSecondary, fontSize = 11.5.sp)
+                }
+            }
         } else if (!collapsed) {
             // Left Author/Title + Right Action Stack
             Row(
