@@ -251,21 +251,6 @@ fun GoonedMainShell() {
     val receivedTitle by ShareService.pendingReceivedTitle.collectAsState()
     val isAppForeground by RootDeepLinkState.isAppForeground.collectAsState()
 
-    val hasAnyOverlayOrBack = showSettingsModal || showXLogin || showIGLogin || showR34Key ||
-        creatorGridSource != null || activeTab != GoonedDockTab.HOME || activeChannel == HomeChannel.CUSTOM
-
-    BackHandler(enabled = hasAnyOverlayOrBack) {
-        when {
-            showXLogin -> showXLogin = false
-            showIGLogin -> showIGLogin = false
-            showR34Key -> showR34Key = false
-            showSettingsModal -> showSettingsModal = false
-            creatorGridSource != null -> creatorGridSource = null
-            activeTab != GoonedDockTab.HOME -> activeTab = GoonedDockTab.HOME
-            activeChannel == HomeChannel.CUSTOM -> popBack()
-        }
-    }
-
     val activeModel = when (activeChannel) {
         HomeChannel.FOLLOWING -> followingModel
         HomeChannel.FOR_YOU -> forYouModel
@@ -322,6 +307,21 @@ fun GoonedMainShell() {
         } else {
             activeChannel = HomeChannel.FOR_YOU
             activeTab = GoonedDockTab.HOME
+        }
+    }
+
+    val hasAnyOverlayOrBack = showSettingsModal || showXLogin || showIGLogin || showR34Key ||
+        creatorGridSource != null || activeTab != GoonedDockTab.HOME || activeChannel == HomeChannel.CUSTOM
+
+    BackHandler(enabled = hasAnyOverlayOrBack) {
+        when {
+            showXLogin -> showXLogin = false
+            showIGLogin -> showIGLogin = false
+            showR34Key -> showR34Key = false
+            showSettingsModal -> showSettingsModal = false
+            creatorGridSource != null -> creatorGridSource = null
+            activeTab != GoonedDockTab.HOME -> activeTab = GoonedDockTab.HOME
+            activeChannel == HomeChannel.CUSTOM -> popBack()
         }
     }
 
