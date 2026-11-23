@@ -71,7 +71,7 @@ object Passcode {
 object Biometrics {
     fun available(context: Context = TinyTinyApplication.instance): Boolean {
         val bm = BiometricManager.from(context)
-        return bm.canEvaluate(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+        return bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
     }
 

@@ -108,17 +108,20 @@ object OfflineManager {
                     rb.header(k, v)
                 }
                 client.newCall(rb.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) continue
-                    val body = resp.body ?: continue
-                    val tmp = File(dest.parentFile, dest.name + ".part")
-                    FileOutputStream(tmp).use { out ->
-                        body.byteStream().copyTo(out)
-                    }
-                    if (tmp.length() > 1024) {
-                        tmp.renameTo(dest)
-                        return true
-                    } else {
-                        tmp.delete()
+                    if (resp.isSuccessful) {
+                        val body = resp.body
+                        if (body != null) {
+                            val tmp = File(dest.parentFile, dest.name + ".part")
+                            FileOutputStream(tmp).use { out ->
+                                body.byteStream().copyTo(out)
+                            }
+                            if (tmp.length() > 1024) {
+                                tmp.renameTo(dest)
+                                return true
+                            } else {
+                                tmp.delete()
+                            }
+                        }
                     }
                 }
             } catch (_: Throwable) {}

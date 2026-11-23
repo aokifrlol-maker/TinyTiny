@@ -197,7 +197,7 @@ object XWebEngine {
         })();
     """
 
-    inner class Bridge {
+    class Bridge {
         @JavascriptInterface
         fun onPayload(url: String, body: String) {
             val tweets = XTweetParser.parseTweets(body)
@@ -293,13 +293,13 @@ object XAPI {
 @Composable
 fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
     val store = UserStore.shared
-    val settings by store.data.collectAsState()
+    val userData by store.data.collectAsState()
     var detected by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .liquidGlassBackground(tinted = settings.settings.tintedGlass)
+            .liquidGlassBackground(tinted = userData.settings.tintedGlass)
             .padding(14.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {

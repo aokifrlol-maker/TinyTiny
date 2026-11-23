@@ -51,6 +51,36 @@ class SmartTasteEngine private constructor() {
     companion object {
         val shared = SmartTasteEngine()
         private const val TASTE_FILENAME = "gooned_taste_v2.json"
+
+        fun platform(post: Gif): SourcePlatform = when {
+            post.isXPost -> SourcePlatform.X
+            post.isIGPost -> SourcePlatform.IG
+            post.isOnlyFansPost -> SourcePlatform.ONLYFANS
+            post.isRule34Post -> SourcePlatform.RULE34
+            post.isLongVideoPost -> SourcePlatform.LONGVIDEO
+            else -> SourcePlatform.REDDIT
+        }
+
+        fun extractDirectTagsOnly(post: Gif, categories: List<GoonedCategory>): List<String> {
+            val out = mutableListOf<String>()
+            val seen = mutableSetOf<String>()
+            fun add(raw: String) {
+                val clean = raw.lowercase().trim().removePrefix("#")
+                if (clean.length >= 2 && !MediaMetaRegistry.isStopTag(clean) && seen.add(clean)) {
+                    out.add(clean)
+                }
+            }
+            for (t in MediaMetaRegistry.tags(post.id)) add(t)
+            val title = post.title ?: ""
+            for (m in Regex("#([A-Za-z0-9_]+)").findAll(title)) add(m.groupValues[1])
+            post.subreddit?.let { sub ->
+                val lowerSub = sub.lowercase()
+                add(lowerSub)
+                categories.firstOrNull { cat -> cat.subreddits.any { it.equals(lowerSub, ignoreCase = true) } }
+                    ?.let { add(it.name) }
+            }
+            return out
+        }
     }
 
     data class DislikeOutcome(
@@ -297,37 +327,5 @@ class SmartTasteEngine private constructor() {
         state.value = TasteV2Data()
         rebuildSets()
         saveNow()
-    }
-
-    companion object Helpers {
-        fun platform(post: Gif): SourcePlatform = when {
-            post.isXPost -> SourcePlatform.X
-            post.isIGPost -> SourcePlatform.IG
-            post.isOnlyFansPost -> SourcePlatform.ONLYFANS
-            post.isRule34Post -> SourcePlatform.RULE34
-            post.isLongVideoPost -> SourcePlatform.LONGVIDEO
-            else -> SourcePlatform.REDDIT
-        }
-
-        fun extractDirectTagsOnly(post: Gif, categories: List<GoonedCategory>): List<String> {
-            val out = mutableListOf<String>()
-            val seen = mutableSetOf<String>()
-            fun add(raw: String) {
-                val clean = raw.lowercase().trim().removePrefix("#")
-                if (clean.length >= 2 && !MediaMetaRegistry.isStopTag(clean) && seen.add(clean)) {
-                    out.add(clean)
-                }
-            }
-            for (t in MediaMetaRegistry.tags(post.id)) add(t)
-            val title = post.title ?: ""
-            for (m in Regex("#([A-Za-z0-9_]+)").findAll(title)) add(m.groupValues[1])
-            post.subreddit?.let { sub ->
-                val lowerSub = sub.lowercase()
-                add(lowerSub)
-                categories.firstOrNull { cat -> cat.subreddits.any { it.equals(lowerSub, ignoreCase = true) } }
-                    ?.let { add(it.name) }
-            }
-            return out
-        }
     }
 }
