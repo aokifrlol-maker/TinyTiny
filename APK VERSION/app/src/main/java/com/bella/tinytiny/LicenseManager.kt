@@ -37,6 +37,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -111,6 +113,7 @@ object LicenseManager {
     val dismissedAnnouncementId = MutableStateFlow("")
     @Volatile private var lastRemoteBackupJson: JsonObject? = null
     @Volatile private var lastSyncError: String? = null
+    private val syncMutex = Mutex()
     private var cloudSyncJob: kotlinx.coroutines.Job? = null
 
     fun scheduleCloudSync() {
@@ -372,6 +375,7 @@ object LicenseManager {
     suspend fun syncEncryptedBackupNow() = withContext(Dispatchers.IO) {
         val s = status.value
         if (!isValidAccess || s.licenseKey.isEmpty()) return@withContext
+        lastSyncError = null
         try {
             val snapshot = EncryptedProfileBackup(
                 userData = UserStore.shared.exportSnapshotForBackup(),
@@ -394,7 +398,8 @@ object LicenseManager {
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    lastSyncError = "Upload failed (HTTP ${resp.code})"
+                    val errDetail = try { JSONObject(resp.body?.string() ?: "").optString("error", "") } catch (_: Throwable) { "" }
+                    lastSyncError = "Upload failed (HTTP ${resp.code}${if (errDetail.isNotEmpty()) ": $errDetail" else ""})"
                 } else {
                     lastRemoteBackupJson = finalObj
                 }
@@ -459,15 +464,27 @@ object LicenseManager {
                     backup.userData.followedIGUsers.isNotEmpty() || backup.userData.followedSubreddits.isNotEmpty() ||
                     backup.userData.followedOFCreators.isNotEmpty()
                 if (isTrulyEmpty && remoteHasData) {
-                    UserStore.shared.replaceWithBackup(backup.userData)
+                    UserStore.shared.replaceWithBackup(
+                        backup.userData.copy(
+                            liked = backup.userData.liked.distinctBy { it.id },
+                            downloaded = backup.userData.downloaded.distinctBy { it.id }
+                        )
+                    )
                 } else {
-                    val mergedLikes = (local.liked + backup.userData.liked).distinctBy { it.id }
-                    val mergedDl = (local.downloaded + backup.userData.downloaded).distinctBy { it.id }
-                    val mergedU = (local.followedUsers + backup.userData.followedUsers).distinct()
-                    val mergedSub = (local.followedSubreddits + backup.userData.followedSubreddits).distinct()
-                    val mergedX = (local.followedXUsers + backup.userData.followedXUsers).distinct()
-                    val mergedIG = (local.followedIGUsers + backup.userData.followedIGUsers).distinct()
-                    val mergedOF = (local.followedOFCreators + backup.userData.followedOFCreators)
+                    // Put newly synced remote likes/downloads at the TOP (index 0) so they appear immediately!
+                    val localLikeIds = local.liked.mapTo(HashSet()) { it.id }
+                    val newRemoteLikes = backup.userData.liked.filter { it.id !in localLikeIds }
+                    val mergedLikes = (newRemoteLikes + local.liked).distinctBy { it.id }
+
+                    val localDlIds = local.downloaded.mapTo(HashSet()) { it.id }
+                    val newRemoteDl = backup.userData.downloaded.filter { it.id !in localDlIds }
+                    val mergedDl = (newRemoteDl + local.downloaded).distinctBy { it.id }
+
+                    val mergedU = (backup.userData.followedUsers + local.followedUsers).distinct()
+                    val mergedSub = (backup.userData.followedSubreddits + local.followedSubreddits).distinct()
+                    val mergedX = (backup.userData.followedXUsers + local.followedXUsers).distinct()
+                    val mergedIG = (backup.userData.followedIGUsers + local.followedIGUsers).distinct()
+                    val mergedOF = (backup.userData.followedOFCreators + local.followedOFCreators)
                         .distinctBy { it.id.ifEmpty { it.handle.lowercase() } }
                     UserStore.shared.replaceWithBackup(
                         local.copy(
@@ -526,21 +543,27 @@ object LicenseManager {
         cm.flush()
     }
 
-    suspend fun syncBidirectionalBackup(): String {
+    suspend fun syncBidirectionalBackup(): String = syncMutex.withLock {
         val ok = restoreEncryptedBackupIfPresent()
         if (!ok) {
             val reason = lastSyncError?.let { " ($it)" } ?: ""
-            return "Sync paused: couldn't restore cloud backup$reason."
+            return@withLock "Sync paused: couldn't restore cloud backup$reason."
         }
         val d = UserStore.shared.data.value
         val hasData = d.liked.isNotEmpty() || d.downloaded.isNotEmpty() || d.xSession.isConnected ||
             d.igSession.isConnected || d.followedUsers.isNotEmpty() || d.followedXUsers.isNotEmpty() ||
             d.followedIGUsers.isNotEmpty() || d.followedSubreddits.isNotEmpty() || d.followedOFCreators.isNotEmpty()
-        if (hasData) syncEncryptedBackupNow()
+        if (hasData) {
+            syncEncryptedBackupNow()
+            val upErr = lastSyncError
+            if (!upErr.isNullOrEmpty()) {
+                return@withLock "Restored ${d.liked.size} likes, but upload failed: $upErr"
+            }
+        }
         val parts = mutableListOf("${d.liked.size} likes", "${d.downloaded.size} saved")
         if (d.xSession.isConnected) parts.add("X login")
         if (d.igSession.isConnected) parts.add("IG login")
-        return "Synced: ${parts.joinToString(" · ")}"
+        "Synced: ${parts.joinToString(" · ")}"
     }
 
     fun reportError(source: String, detail: String) {

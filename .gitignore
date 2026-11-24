@@ -17,3 +17,12 @@ DirectStuff/*.webm
 DirectStuff/*.mkv
 DirectStuff/*.avi
 
+
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+
+.gradle/
+APK VERSION/.gradle/
+

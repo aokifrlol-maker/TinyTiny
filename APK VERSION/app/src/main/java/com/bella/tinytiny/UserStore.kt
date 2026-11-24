@@ -112,6 +112,7 @@ class UserStore private constructor() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var saveJob: Job? = null
+    private val saveFileLock = Any()
 
     private val seenSet = ConcurrentHashMap.newKeySet<String>()
     private val seenList = mutableListOf<String>()
@@ -167,11 +168,13 @@ class UserStore private constructor() {
         val snapshot = exportSnapshotForBackup()
         val f = dataFile
         scope.launch {
-            CryptoBox.sealCodable(snapshot)?.let { bytes ->
-                val tmp = File(f.parentFile, f.name + ".tmp")
-                tmp.writeBytes(bytes)
-                if (f.exists()) f.delete()
-                tmp.renameTo(f)
+            synchronized(saveFileLock) {
+                CryptoBox.sealCodable(snapshot)?.let { bytes ->
+                    val tmp = File(f.parentFile, f.name + ".tmp")
+                    tmp.writeBytes(bytes)
+                    if (f.exists()) f.delete()
+                    tmp.renameTo(f)
+                }
             }
         }
     }
@@ -685,7 +688,11 @@ class UserStore private constructor() {
             seenSet.clear()
             seenSet.addAll(restored.seenIDs)
         }
-        data.value = sanitizeLoadedData(restored)
+        val deduped = restored.copy(
+            liked = restored.liked.distinctBy { it.id },
+            downloaded = restored.downloaded.distinctBy { it.id }
+        )
+        data.value = sanitizeLoadedData(deduped)
         saveNow()
     }
 

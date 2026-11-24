@@ -417,12 +417,20 @@ final class LicenseManager: ObservableObject {
             UserStore.shared.data = backup.userData
         } else {
             var existingIds = Set(UserStore.shared.data.liked.map(\.id))
+            var newRemoteLikes: [Gif] = []
             for item in backup.userData.liked where existingIds.insert(item.id).inserted {
-                UserStore.shared.data.liked.append(item)
+                newRemoteLikes.append(item)
+            }
+            if !newRemoteLikes.isEmpty {
+                UserStore.shared.data.liked.insert(contentsOf: newRemoteLikes, at: 0)
             }
             var dlIds = Set(UserStore.shared.data.downloaded.map(\.id))
+            var newRemoteDl: [Gif] = []
             for item in backup.userData.downloaded where dlIds.insert(item.id).inserted {
-                UserStore.shared.data.downloaded.append(item)
+                newRemoteDl.append(item)
+            }
+            if !newRemoteDl.isEmpty {
+                UserStore.shared.data.downloaded.insert(contentsOf: newRemoteDl, at: 0)
             }
             for u in backup.userData.followedUsers where !UserStore.shared.isFollowingUser(u) {
                 UserStore.shared.toggleFollowUser(u)

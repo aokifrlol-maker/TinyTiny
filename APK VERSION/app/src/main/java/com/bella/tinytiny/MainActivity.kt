@@ -99,7 +99,11 @@ class MainActivity : FragmentActivity() {
         AppState.lock()
         UserStore.shared.saveNow()
         SmartTasteEngine.shared.saveNow()
-        bgScope.launch { LicenseManager.syncEncryptedBackupNow() }
+        bgScope.launch {
+            if (LicenseManager.isValidAccess) {
+                LicenseManager.syncBidirectionalBackup()
+            }
+        }
     }
 
     private fun syncFlagSecure() {

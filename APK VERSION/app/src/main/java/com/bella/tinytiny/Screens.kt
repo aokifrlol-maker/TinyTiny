@@ -856,7 +856,9 @@ fun GoonedLikesView(
 
     LaunchedEffect(Unit) { OfflineManager.refreshDiskUsage() }
 
-    val list = if (tab == 0) userData.liked else userData.downloaded
+    val list = remember(tab, userData.liked, userData.downloaded) {
+        (if (tab == 0) userData.liked else userData.downloaded).distinctBy { it.id }
+    }
 
     fun showBulkToast(msg: String) {
         bulkToast = msg
@@ -895,6 +897,19 @@ fun GoonedLikesView(
                         Text(if (selectMode) "Done" else "Select", color = Theme.accentBright, fontWeight = FontWeight.Bold)
                     }
                 }
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            showBulkToast("Syncing cloud backup...")
+                            val res = LicenseManager.syncBidirectionalBackup()
+                            showBulkToast(res)
+                        }
+                    },
+                    modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)
+                ) {
+                    Icon(Icons.Default.Sync, contentDescription = "Sync", tint = Color.White, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(6.dp))
                 IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
@@ -1125,25 +1140,67 @@ fun GoonedLikesView(
 @Composable
 fun GridThumb(gif: Gif, showUpvotes: Boolean = false) {
     val ctx = LocalContext.current
-    val urls = remember(gif.id) { gif.posterFallbackURLs }
+    val urls = remember(gif.id, gif.posterUrl, gif.thumbnailUrl, gif.mediaUrl) { gif.posterFallbackURLs }
     var urlIdx by remember(gif.id) { mutableIntStateOf(0) }
+    var useReferer by remember(gif.id, urlIdx) { mutableStateOf(true) }
+    var loaded by remember(gif.id) { mutableStateOf(false) }
+    var exhausted by remember(gif.id) { mutableStateOf(false) }
     val activeUrl = urls.getOrNull(urlIdx)
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF1A0B12))) {
-        ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
-        if (activeUrl != null) {
-            val req = remember(activeUrl) {
+        if (!loaded && !exhausted && activeUrl != null) {
+            ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
+        }
+        if (activeUrl != null && !exhausted) {
+            val req = remember(activeUrl, useReferer) {
                 ImageRequest.Builder(ctx).data(activeUrl).crossfade(true).apply {
-                    for ((k, v) in MediaHeaders.headers(activeUrl)) addHeader(k, v)
+                    for ((k, v) in MediaHeaders.headers(activeUrl, includeReferer = useReferer)) addHeader(k, v)
                 }.build()
             }
             AsyncImage(
                 model = req,
                 contentDescription = gif.title,
                 contentScale = ContentScale.Crop,
-                onError = { if (urlIdx + 1 < urls.size) urlIdx += 1 },
+                onSuccess = { loaded = true },
+                onError = {
+                    if (useReferer && !activeUrl.startsWith("file://")) {
+                        useReferer = false
+                    } else if (urlIdx + 1 < urls.size) {
+                        urlIdx += 1
+                    } else {
+                        exhausted = true
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
+        }
+        if (activeUrl == null || exhausted) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(8.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Default.PlayCircleOutline,
+                    contentDescription = null,
+                    tint = Color.White.copy(0.55f),
+                    modifier = Modifier.size(28.dp)
+                )
+                val fallbackLabel = gif.author?.takeIf { it.isNotBlank() }?.let { "@$it" }
+                    ?: gif.title?.takeIf { it.isNotBlank() }
+                    ?: gif.subreddit?.takeIf { it.isNotBlank() }
+                if (!fallbackLabel.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        fallbackLabel,
+                        color = Color.White.copy(0.65f),
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
         }
         // Bottom-left source badge + optional upvote count
         Row(
