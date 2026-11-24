@@ -422,6 +422,8 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private var seenIds = Set<String>()
     private var seenIdsByRoute: [String: Set<String>] = [:]
     private var routePayloadCounts: [String: Int] = [:]
+    private var searchStageByQuery: [String: Int] = [:]
+    private var searchDryByQuery: [String: Int] = [:]
     private var waiters: [(routeKey: String, token: UUID, cont: CheckedContinuation<[Gif], Never>)] = []
     private var pageCounter: Int = 0
     private var dryPayloadCount: Int = 0
@@ -1166,7 +1168,51 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
     }
 
-    /// Fast authenticated X Search on the dedicated search/profile lane using in-app SPA navigation (no full reload, fresh transaction headers).
+    private static func xSearchTarget(baseQuery: String, sort: String, stage: Int) -> (routeKey: String, url: URL) {
+        let wantsLive = sort.lowercased() == "new" || sort.lowercased() == "latest"
+        let firstTab = wantsLive ? "live" : "top"
+        let altTab = wantsLive ? "top" : "live"
+        let cleanKey = baseQuery.lowercased()
+
+        let qStr: String
+        let tab: String
+        switch stage {
+        case 0:
+            qStr = "\(baseQuery) filter:videos"
+            tab = firstTab
+        case 1:
+            qStr = "\(baseQuery) filter:videos"
+            tab = altTab
+        case 2:
+            qStr = "\(baseQuery) filter:media"
+            tab = "media"
+        case 3:
+            qStr = "\(baseQuery) filter:native_video"
+            tab = firstTab
+        case 4:
+            qStr = "\(baseQuery) nsfw filter:videos"
+            tab = altTab
+        default:
+            // Infinite rolling historical time-windows (`until:YYYY-MM-DD`) so search NEVER runs out of videos!
+            let step = stage - 5
+            let daysBackList = [14, 35, 75, 130, 210, 320, 460, 640, 860, 1120]
+            let daysBack = step < daysBackList.count ? daysBackList[step] : (1120 + (step - daysBackList.count + 1) * 240)
+            let cutoffDate = Date().addingTimeInterval(-Double(daysBack) * 86_400)
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd"
+            fmt.timeZone = TimeZone(secondsFromGMT: 0)
+            let untilStr = fmt.string(from: cutoffDate)
+            qStr = "\(baseQuery) filter:videos until:\(untilStr)"
+            tab = (step % 2 == 0) ? "top" : "live"
+        }
+
+        let encoded = qStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
+        let url = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")
+            ?? URL(string: "https://x.com/explore")!
+        return (routeKey: "x_search_\(cleanKey)_s\(stage)_\(tab)", url: url)
+    }
+
+    /// Fast authenticated X Search with infinite multi-stage & historical time-window pagination.
     func searchFast(query: String, sort: String, after: String?) async -> GoonedFeedResponse {
         let session = UserStore.shared.data.xSession
         guard session.isConnected, !isRateLimited else { return GoonedFeedResponse(posts: [], after: nil) }
@@ -1175,24 +1221,44 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             .replacingOccurrences(of: "x:", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let baseQuery = cleaned.isEmpty ? "nsfw" : cleaned
+        let qKey = "\(baseQuery.lowercased()):\(sort.lowercased())"
 
-        let encoded = "\(baseQuery) filter:videos".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
-        let tab = (sort == "Latest") ? "live" : "top"
-        let searchURL = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=\(tab)")!
+        if after == nil {
+            searchStageByQuery[qKey] = 0
+            searchDryByQuery[qKey] = 0
+        }
+
+        var stage = searchStageByQuery[qKey] ?? 0
+        var target = Self.xSearchTarget(baseQuery: baseQuery, sort: sort, stage: stage)
+        let isStageStart = (after == nil) || (activeRouteKey != target.routeKey)
+
         let res = await fetchFeed(
-            routeKey: "x_search_\(cleaned.lowercased())_\(tab)",
-            targetURL: searchURL,
-            isRefresh: after == nil
+            routeKey: target.routeKey,
+            targetURL: target.url,
+            isRefresh: isStageStart
         )
-        if !res.posts.isEmpty || isRateLimited { return res }
+        if !res.posts.isEmpty || isRateLimited {
+            searchDryByQuery[qKey] = 0
+            return res
+        }
 
-        let broadEncoded = baseQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw"
-        let broadURL = URL(string: "https://x.com/search?q=\(broadEncoded)&src=typed_query&f=\(tab)")!
-        return await fetchFeed(
-            routeKey: "x_search_broad_\(cleaned.lowercased())_\(tab)",
-            targetURL: broadURL,
-            isRefresh: true
-        )
+        // Current search tab/window ran dry — advance to the next pivot (Live / Media / Native Video / Historical `until:`)!
+        let dry = (searchDryByQuery[qKey] ?? 0) + 1
+        searchDryByQuery[qKey] = dry
+        if dry >= 1 {
+            stage += 1
+            searchStageByQuery[qKey] = stage
+            searchDryByQuery[qKey] = 0
+            target = Self.xSearchTarget(baseQuery: baseQuery, sort: sort, stage: stage)
+            let nextRes = await fetchFeed(
+                routeKey: target.routeKey,
+                targetURL: target.url,
+                isRefresh: true
+            )
+            return GoonedFeedResponse(posts: nextRes.posts, after: "xsearch_s\(stage)_\(pageCounter)")
+        }
+
+        return GoonedFeedResponse(posts: [], after: "xsearch_s\(stage)_\(pageCounter)")
     }
 
     /// Executes a captured X GraphQL query directly inside the warmed `x.com` WebView context (~250-450ms, no full page reload).
