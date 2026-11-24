@@ -521,20 +521,39 @@ object LicenseManager {
                         )
                     )
                 } else {
-                    // Merge unlike/unfollow tombstones so unliking or unfollowing on iPhone propagates live!
+                    // Merge unlike/unfollow/delete-download tombstones so deletions propagate live without undoing newer local re-adds!
+                    val localAdded = UserStore.shared.localAddedTimestamps
                     val mergedRemovedLikes = local.removedLikedIDs.toMutableMap()
                     for ((k, ts) in backup.userData.removedLikedIDs) {
+                        val addedAt = localAdded["like:$k"]
+                        if (addedAt != null && addedAt > ts) continue
                         if (ts > (mergedRemovedLikes[k] ?: 0.0)) mergedRemovedLikes[k] = ts
                     }
                     val remoteRemLikes = backup.userData.removedLikedIDs
-                    val keptLocalLikes = local.liked.filter { it.id !in remoteRemLikes }
+                    val keptLocalLikes = local.liked.filter { item ->
+                        val remTs = remoteRemLikes[item.id] ?: return@filter true
+                        val addedAt = localAdded["like:${item.id}"]
+                        addedAt != null && addedAt > remTs
+                    }
                     val localLikeIds = keptLocalLikes.mapTo(HashSet()) { it.id }
                     val newRemoteLikes = backup.userData.liked.filter { it.id !in mergedRemovedLikes && it.id !in localLikeIds }
                     val mergedLikes = (newRemoteLikes + keptLocalLikes).distinctBy { it.id }
 
-                    val localDlIds = local.downloaded.mapTo(HashSet()) { it.id }
-                    val newRemoteDl = backup.userData.downloaded.filter { it.id !in localDlIds }
-                    val mergedDl = (newRemoteDl + local.downloaded).distinctBy { it.id }
+                    val mergedRemovedDl = local.removedDownloadedIDs.toMutableMap()
+                    for ((k, ts) in backup.userData.removedDownloadedIDs) {
+                        val addedAt = localAdded["dl:$k"]
+                        if (addedAt != null && addedAt > ts) continue
+                        if (ts > (mergedRemovedDl[k] ?: 0.0)) mergedRemovedDl[k] = ts
+                    }
+                    val remoteRemDl = backup.userData.removedDownloadedIDs
+                    val keptLocalDl = local.downloaded.filter { item ->
+                        val remTs = remoteRemDl[item.id] ?: return@filter true
+                        val addedAt = localAdded["dl:${item.id}"]
+                        addedAt != null && addedAt > remTs
+                    }
+                    val localDlIds = keptLocalDl.mapTo(HashSet()) { it.id }
+                    val newRemoteDl = backup.userData.downloaded.filter { it.id !in mergedRemovedDl && it.id !in localDlIds }
+                    val mergedDl = (newRemoteDl + keptLocalDl).distinctBy { it.id }
 
                     val mergedRemovedFollows = local.removedFollows.toMutableMap()
                     for ((k, ts) in backup.userData.removedFollows) {
@@ -576,6 +595,7 @@ object LicenseManager {
                             followedOFCreators = mergedOF,
                             algorithm = mergedAlgo,
                             removedLikedIDs = mergedRemovedLikes,
+                            removedDownloadedIDs = mergedRemovedDl,
                             removedFollows = mergedRemovedFollows,
                             xSession = if (!local.xSession.isConnected && backup.userData.xSession.isConnected) backup.userData.xSession else local.xSession,
                             igSession = if (!local.igSession.isConnected && backup.userData.igSession.isConnected) backup.userData.igSession else local.igSession,

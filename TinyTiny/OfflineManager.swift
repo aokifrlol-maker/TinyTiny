@@ -282,7 +282,7 @@ final class OfflineManager: ObservableObject {
                 try? FileManager.default.removeItem(at: f)
             }
         }
-        UserStore.shared.data.downloaded.removeAll()
+        UserStore.shared.clearAllDownloadedRecords()
         objectWillChange.send()
     }
 

@@ -103,6 +103,7 @@ data class UserData(
     var r34Credentials: Rule34Credentials = Rule34Credentials(),
     var algorithm: AlgorithmProfile = AlgorithmProfile(),
     var removedLikedIDs: Map<String, Double> = emptyMap(),
+    var removedDownloadedIDs: Map<String, Double> = emptyMap(),
     var removedFollows: Map<String, Double> = emptyMap()
 )
 
@@ -118,6 +119,7 @@ class UserStore private constructor() {
 
     private val seenSet = ConcurrentHashMap.newKeySet<String>()
     private val seenList = mutableListOf<String>()
+    val localAddedTimestamps = ConcurrentHashMap<String, Double>()
 
     val data = MutableStateFlow(UserData())
     val categories = MutableStateFlow(GoonedCategory.defaultCategories)
@@ -248,11 +250,13 @@ class UserStore private constructor() {
         if (idx >= 0) {
             next.removeAt(idx)
             nextRemoved[gif.id] = now
+            localAddedTimestamps.remove("like:${gif.id}")
             data.value = cur.copy(liked = next, removedLikedIDs = trimTombstones(nextRemoved))
             recordAlgorithmSignal(gif, -2.5)
         } else {
             next.add(0, gif)
             nextRemoved.remove(gif.id)
+            localAddedTimestamps["like:${gif.id}"] = now
             data.value = cur.copy(liked = next, removedLikedIDs = nextRemoved)
             markSeen(gif)
             recordAlgorithmSignal(gif, 5.0)
@@ -263,10 +267,13 @@ class UserStore private constructor() {
 
     fun recordDownloaded(gif: Gif) {
         val cur = data.value
+        val now = System.currentTimeMillis() / 1000.0
         val existed = cur.downloaded.any { it.id == gif.id }
         val next = cur.downloaded.filterNot { it.id == gif.id }.toMutableList()
         next.add(0, gif)
-        data.value = cur.copy(downloaded = next)
+        val nextRemDl = cur.removedDownloadedIDs.toMutableMap().apply { remove(gif.id) }
+        localAddedTimestamps["dl:${gif.id}"] = now
+        data.value = cur.copy(downloaded = next, removedDownloadedIDs = nextRemDl)
         if (!existed) recordAlgorithmSignal(gif, 6.5)
         scheduleSave()
         LicenseManager.scheduleCloudSync()
@@ -274,14 +281,30 @@ class UserStore private constructor() {
 
     fun removeDownloaded(id: String) {
         val cur = data.value
-        data.value = cur.copy(downloaded = cur.downloaded.filterNot { it.id == id })
+        val now = System.currentTimeMillis() / 1000.0
+        val nextRemDl = cur.removedDownloadedIDs.toMutableMap().apply { put(id, now) }
+        localAddedTimestamps.remove("dl:$id")
+        data.value = cur.copy(
+            downloaded = cur.downloaded.filterNot { it.id == id },
+            removedDownloadedIDs = trimTombstones(nextRemDl)
+        )
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
 
     fun clearAllDownloaded() {
-        data.value = data.value.copy(downloaded = emptyList())
-        scheduleSave()
+        val cur = data.value
+        val now = System.currentTimeMillis() / 1000.0
+        val nextRemDl = cur.removedDownloadedIDs.toMutableMap()
+        for (g in cur.downloaded) {
+            nextRemDl[g.id] = now
+            localAddedTimestamps.remove("dl:${g.id}")
+        }
+        data.value = cur.copy(
+            downloaded = emptyList(),
+            removedDownloadedIDs = trimTombstones(nextRemDl)
+        )
+        saveNow()
         LicenseManager.scheduleCloudSync()
     }
 

@@ -518,15 +518,21 @@ final class LicenseManager: ObservableObject {
             deduped.downloaded = deduped.downloaded.filter { seenDl.insert($0.id).inserted }
             UserStore.shared.data = deduped
         } else {
-            // Merge unlike/unfollow tombstones so unliking or unfollowing on another device propagates live!
+            // Merge unlike/unfollow/delete-download tombstones so deletions propagate live without undoing newer local re-adds!
+            let localAdded = UserStore.shared.localAddedTimestamps
             var mergedRemovedLikes = UserStore.shared.data.removedLikedIDs
             for (k, ts) in backup.userData.removedLikedIDs {
+                if let addedAt = localAdded["like:\(k)"], addedAt > ts { continue }
                 if ts > (mergedRemovedLikes[k] ?? 0) { mergedRemovedLikes[k] = ts }
             }
             UserStore.shared.data.removedLikedIDs = mergedRemovedLikes
             let remoteRemovedLikes = backup.userData.removedLikedIDs
             if !remoteRemovedLikes.isEmpty {
-                UserStore.shared.data.liked.removeAll { remoteRemovedLikes[$0.id] != nil }
+                UserStore.shared.data.liked.removeAll { item in
+                    guard let remTs = remoteRemovedLikes[item.id] else { return false }
+                    if let addedAt = localAdded["like:\(item.id)"], addedAt > remTs { return false }
+                    return true
+                }
             }
 
             var existingIds = Set(UserStore.shared.data.liked.map(\.id))
@@ -537,9 +543,25 @@ final class LicenseManager: ObservableObject {
             if !newRemoteLikes.isEmpty {
                 UserStore.shared.data.liked.insert(contentsOf: newRemoteLikes, at: 0)
             }
+
+            var mergedRemovedDl = UserStore.shared.data.removedDownloadedIDs
+            for (k, ts) in backup.userData.removedDownloadedIDs {
+                if let addedAt = localAdded["dl:\(k)"], addedAt > ts { continue }
+                if ts > (mergedRemovedDl[k] ?? 0) { mergedRemovedDl[k] = ts }
+            }
+            UserStore.shared.data.removedDownloadedIDs = mergedRemovedDl
+            let remoteRemovedDl = backup.userData.removedDownloadedIDs
+            if !remoteRemovedDl.isEmpty {
+                UserStore.shared.data.downloaded.removeAll { item in
+                    guard let remTs = remoteRemovedDl[item.id] else { return false }
+                    if let addedAt = localAdded["dl:\(item.id)"], addedAt > remTs { return false }
+                    return true
+                }
+            }
+
             var dlIds = Set(UserStore.shared.data.downloaded.map(\.id))
             var newRemoteDl: [Gif] = []
-            for item in backup.userData.downloaded where dlIds.insert(item.id).inserted {
+            for item in backup.userData.downloaded where mergedRemovedDl[item.id] == nil && dlIds.insert(item.id).inserted {
                 newRemoteDl.append(item)
             }
             if !newRemoteDl.isEmpty {

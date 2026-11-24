@@ -89,12 +89,13 @@ struct UserData: Codable {
     var r34Credentials = Rule34Credentials()
     var algorithm = AlgorithmProfile()
     var removedLikedIDs: [String: Double] = [:]
+    var removedDownloadedIDs: [String: Double] = [:]
     var removedFollows: [String: Double] = [:]
 
     enum CodingKeys: String, CodingKey {
         case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers, followedOFCreators
         case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, r34Credentials, algorithm
-        case removedLikedIDs, removedFollows
+        case removedLikedIDs, removedDownloadedIDs, removedFollows
     }
 
     init() {}
@@ -118,6 +119,7 @@ struct UserData: Codable {
         r34Credentials = (try? c.decode(Rule34Credentials.self, forKey: .r34Credentials)) ?? Rule34Credentials()
         algorithm = (try? c.decode(AlgorithmProfile.self, forKey: .algorithm)) ?? AlgorithmProfile()
         removedLikedIDs = (try? c.decode([String: Double].self, forKey: .removedLikedIDs)) ?? [:]
+        removedDownloadedIDs = (try? c.decode([String: Double].self, forKey: .removedDownloadedIDs)) ?? [:]
         removedFollows = (try? c.decode([String: Double].self, forKey: .removedFollows)) ?? [:]
     }
 }
@@ -128,6 +130,7 @@ final class UserStore: ObservableObject {
 
     private(set) var seenSet: Set<String>
     private var _seenIDs: [String]
+    var localAddedTimestamps: [String: Double] = [:]
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
@@ -375,11 +378,13 @@ final class UserStore: ObservableObject {
         if let i = data.liked.firstIndex(where: { $0.id == g.id }) {
             data.liked.remove(at: i)
             data.removedLikedIDs[g.id] = now
+            localAddedTimestamps.removeValue(forKey: "like:\(g.id)")
             trimTombstones(&data.removedLikedIDs)
             recordAlgorithmSignal(for: g, weight: -2.5)
         } else {
             data.liked.insert(g, at: 0)
             data.removedLikedIDs.removeValue(forKey: g.id)
+            localAddedTimestamps["like:\(g.id)"] = now
             recordAlgorithmSignal(for: g, weight: 5.0)
         }
         LicenseManager.shared.scheduleCloudSync()
@@ -390,17 +395,36 @@ final class UserStore: ObservableObject {
     }
 
     func recordDownload(_ g: Gif) {
+        let now = Date().timeIntervalSince1970
         if let i = data.downloaded.firstIndex(where: { $0.id == g.id }) {
             data.downloaded[i] = g
         } else {
             data.downloaded.insert(g, at: 0)
             recordAlgorithmSignal(for: g, weight: 6.5)
         }
+        data.removedDownloadedIDs.removeValue(forKey: g.id)
+        localAddedTimestamps["dl:\(g.id)"] = now
         LicenseManager.shared.scheduleCloudSync()
     }
 
     func removeDownloadedRecord(_ g: Gif) {
+        let now = Date().timeIntervalSince1970
         data.downloaded.removeAll { $0.id == g.id }
+        data.removedDownloadedIDs[g.id] = now
+        localAddedTimestamps.removeValue(forKey: "dl:\(g.id)")
+        trimTombstones(&data.removedDownloadedIDs)
+        LicenseManager.shared.scheduleCloudSync()
+    }
+
+    func clearAllDownloadedRecords() {
+        let now = Date().timeIntervalSince1970
+        for g in data.downloaded {
+            data.removedDownloadedIDs[g.id] = now
+            localAddedTimestamps.removeValue(forKey: "dl:\(g.id)")
+        }
+        trimTombstones(&data.removedDownloadedIDs)
+        data.downloaded.removeAll()
+        saveNow()
         LicenseManager.shared.scheduleCloudSync()
     }
 
