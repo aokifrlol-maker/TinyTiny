@@ -13,8 +13,8 @@ android {
         applicationId = "com.bella.tinytiny"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.1.2"
+        versionCode = 5
+        versionName = "1.2.0"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -77,6 +77,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
+    implementation("androidx.media3:media3-database:1.4.1")
 
     // Networking & Serialization
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

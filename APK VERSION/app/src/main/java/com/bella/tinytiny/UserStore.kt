@@ -1,6 +1,5 @@
 package com.bella.tinytiny
 
-import android.content.Context
 import android.webkit.WebStorage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,17 +20,29 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.log10
+import kotlin.random.Random
 
+// iOS Swift JSONEncoder encodes Date as seconds since Jan 1, 2001 (Apple Reference Date = Unix - 978307200.0).
 object FlexibleEpochSecondsSerializer : KSerializer<Double> {
+    private const val APPLE_REF_OFFSET = 978_307_200.0
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("FlexibleEpochSeconds", PrimitiveKind.DOUBLE)
-    override fun serialize(encoder: Encoder, value: Double) = encoder.encodeDouble(value)
+
+    override fun serialize(encoder: Encoder, value: Double) {
+        // Always serialize as Apple Reference Date seconds so iOS decodes exact dates!
+        val appleSec = if (value > 1_200_000_000.0) value - APPLE_REF_OFFSET else value
+        encoder.encodeDouble(appleSec)
+    }
+
     override fun deserialize(decoder: Decoder): Double {
-        return if (decoder is JsonDecoder) {
-            val prim = decoder.decodeJsonElement().jsonPrimitive
-            prim.content.toDoubleOrNull() ?: (System.currentTimeMillis() / 1000.0)
+        val raw = if (decoder is JsonDecoder) {
+            decoder.decodeJsonElement().jsonPrimitive.content.toDoubleOrNull()
+                ?: ((System.currentTimeMillis() / 1000.0) - APPLE_REF_OFFSET)
         } else {
             decoder.decodeDouble()
         }
+        // Normalize internally to Unix epoch seconds
+        return if (raw > 1_200_000_000.0) raw else raw + APPLE_REF_OFFSET
     }
 }
 
@@ -54,11 +65,9 @@ data class AppSettings(
 data class AlgorithmProfile(
     var boostedTags: List<String> = emptyList(),
     var blockedTags: List<String> = emptyList(),
-    var tagWeights: MutableMap<String, Double> = mutableMapOf(),
-    var preferredAuthors: MutableMap<String, Double> = mutableMapOf(),
-    var preferredSubreddits: MutableMap<String, Double> = mutableMapOf(),
-    var subredditWeights: MutableMap<String, Double> = mutableMapOf(),
-    var creatorWeights: MutableMap<String, Double> = mutableMapOf(),
+    var tagWeights: Map<String, Double> = emptyMap(),
+    var subredditWeights: Map<String, Double> = emptyMap(),
+    var creatorWeights: Map<String, Double> = emptyMap(),
     var videoPreference: Double = 0.5,
     var totalSignals: Int = 0
 )
@@ -86,7 +95,7 @@ data class UserData(
     var followedOFCreators: List<FollowedOFCreator> = emptyList(),
     var recentFeeds: List<RecentFeedEntry> = emptyList(),
     var seenIDs: List<String> = emptyList(),
-    var savedCursors: MutableMap<String, String> = mutableMapOf(),
+    var savedCursors: Map<String, String> = emptyMap(),
     var swipedTotal: Int = 0,
     var settings: AppSettings = AppSettings(),
     var xSession: XAccountSession = XAccountSession(),
@@ -123,7 +132,7 @@ class UserStore private constructor() {
         }
         seenList.addAll(loaded.seenIDs)
         seenSet.addAll(loaded.seenIDs)
-        data.value = loaded
+        data.value = sanitizeLoadedData(loaded)
         scope.launch {
             try {
                 val remote = GoonedAPI.categories()
@@ -132,10 +141,18 @@ class UserStore private constructor() {
         }
     }
 
+    private fun sanitizeLoadedData(d: UserData): UserData {
+        val algo = d.algorithm
+        val cleanTagW = algo.tagWeights.filterKeys { !MediaMetaRegistry.isStopTag(it) }
+        val cleanBoost = algo.boostedTags.map { PornTagCatalog.normalize(it) }.filter { it.isNotEmpty() && !MediaMetaRegistry.isStopTag(it) }.distinct()
+        val cleanBlock = algo.blockedTags.map { PornTagCatalog.normalize(it) }.filter { it.isNotEmpty() && !MediaMetaRegistry.isStopTag(it) }.distinct()
+        return d.copy(algorithm = algo.copy(tagWeights = cleanTagW, boostedTags = cleanBoost, blockedTags = cleanBlock))
+    }
+
     private fun scheduleSave() {
         saveJob?.cancel()
         saveJob = scope.launch {
-            delay(1500)
+            delay(500)
             saveNow()
         }
     }
@@ -153,6 +170,7 @@ class UserStore private constructor() {
             CryptoBox.sealCodable(snapshot)?.let { bytes ->
                 val tmp = File(f.parentFile, f.name + ".tmp")
                 tmp.writeBytes(bytes)
+                if (f.exists()) f.delete()
                 tmp.renameTo(f)
             }
         }
@@ -186,6 +204,15 @@ class UserStore private constructor() {
         scheduleSave()
     }
 
+    fun clearSeenHistory() {
+        synchronized(seenList) {
+            seenList.clear()
+            seenSet.clear()
+        }
+        data.value = data.value.copy(seenIDs = emptyList(), savedCursors = emptyMap())
+        saveNow()
+    }
+
     fun savedCursor(key: String): String? = data.value.savedCursors[key]
 
     fun saveCursor(cursor: String?, key: String) {
@@ -198,108 +225,143 @@ class UserStore private constructor() {
 
     fun isLiked(gif: Gif): Boolean = data.value.liked.any { it.id == gif.id }
 
+    fun like(gif: Gif) {
+        if (!isLiked(gif)) toggleLike(gif)
+    }
+
     fun toggleLike(gif: Gif) {
         val cur = data.value
         val next = cur.liked.toMutableList()
         val idx = next.indexOfFirst { it.id == gif.id }
         if (idx >= 0) {
             next.removeAt(idx)
+            data.value = cur.copy(liked = next)
+            recordAlgorithmSignal(gif, -2.5)
         } else {
             next.add(0, gif)
+            data.value = cur.copy(liked = next)
             markSeen(gif)
-            SmartTasteEngine.shared.recordPositiveEngagement(gif, 1.0, categories.value)
+            recordAlgorithmSignal(gif, 5.0)
         }
-        data.value = cur.copy(liked = next)
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
 
     fun recordDownloaded(gif: Gif) {
         val cur = data.value
+        val existed = cur.downloaded.any { it.id == gif.id }
         val next = cur.downloaded.filterNot { it.id == gif.id }.toMutableList()
         next.add(0, gif)
         data.value = cur.copy(downloaded = next)
+        if (!existed) recordAlgorithmSignal(gif, 6.5)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun removeDownloaded(id: String) {
         val cur = data.value
         data.value = cur.copy(downloaded = cur.downloaded.filterNot { it.id == id })
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun clearAllDownloaded() {
         data.value = data.value.copy(downloaded = emptyList())
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
-    fun isFollowingUser(u: String): Boolean =
-        data.value.followedUsers.any { it.equals(u, ignoreCase = true) }
+    fun isFollowingUser(u: String): Boolean {
+        val clean = u.trim().replace("@", "")
+        return data.value.followedUsers.any { it.equals(clean, ignoreCase = true) }
+    }
 
     fun toggleFollowUser(u: String) {
+        val clean = u.trim().replace("@", "")
+        if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedUsers.toMutableList()
-        val idx = next.indexOfFirst { it.equals(u, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(u)
+        val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(0, clean)
         data.value = cur.copy(followedUsers = next)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
-    fun isFollowingSubreddit(s: String): Boolean =
-        data.value.followedSubreddits.any { it.equals(s, ignoreCase = true) }
+    fun isFollowingSubreddit(s: String): Boolean {
+        val clean = s.trim().removePrefix("r/").removePrefix("R/")
+        return data.value.followedSubreddits.any { it.equals(clean, ignoreCase = true) }
+    }
 
     fun toggleFollowSubreddit(s: String) {
+        val clean = s.trim().removePrefix("r/").removePrefix("R/")
+        if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedSubreddits.toMutableList()
-        val idx = next.indexOfFirst { it.equals(s, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(s)
+        val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(0, clean)
         data.value = cur.copy(followedSubreddits = next)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun isFollowingXUser(handle: String): Boolean {
-        val clean = handle.removePrefix("@")
+        val clean = handle.trim().replace("@", "")
         return data.value.followedXUsers.any { it.equals(clean, ignoreCase = true) }
     }
 
     fun toggleFollowXUser(handle: String) {
-        val clean = handle.removePrefix("@")
+        val clean = handle.trim().replace("@", "")
+        if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedXUsers.toMutableList()
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(clean)
+        val nowFollowing = if (idx >= 0) { next.removeAt(idx); false } else { next.add(0, clean); true }
         data.value = cur.copy(followedXUsers = next)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
+        if (cur.xSession.isConnected) {
+            scope.launch { XWebEngine.followUser(clean, nowFollowing) }
+        }
     }
 
     fun isFollowingIGUser(handle: String): Boolean {
-        val clean = handle.removePrefix("@")
+        val clean = handle.trim().replace("@", "")
         return data.value.followedIGUsers.any { it.equals(clean, ignoreCase = true) }
     }
 
     fun toggleFollowIGUser(handle: String) {
-        val clean = handle.removePrefix("@")
+        val clean = handle.trim().replace("@", "")
+        if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedIGUsers.toMutableList()
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(clean)
+        val nowFollowing = if (idx >= 0) { next.removeAt(idx); false } else { next.add(0, clean); true }
         data.value = cur.copy(followedIGUsers = next)
         scheduleSave()
-    }
-
-    fun isFollowingOFCreator(id: String?, handle: String?): Boolean {
-        return data.value.followedOFCreators.any {
-            (!id.isNullOrEmpty() && it.id == id) || (!handle.isNullOrEmpty() && it.name.equals(handle, ignoreCase = true))
+        LicenseManager.scheduleCloudSync()
+        if (cur.igSession.isConnected) {
+            scope.launch { InstagramWebEngine.followUser(clean, nowFollowing) }
         }
     }
 
-    fun toggleFollowOFCreator(id: String, name: String, displayName: String? = null) {
+    fun isFollowingOFCreator(id: String?, handle: String?): Boolean {
+        val cleanH = handle?.trim()?.replace("@", "")
+        return data.value.followedOFCreators.any {
+            (!id.isNullOrEmpty() && it.id == id) || (!cleanH.isNullOrEmpty() && it.handle.equals(cleanH, ignoreCase = true))
+        }
+    }
+
+    fun toggleFollowOFCreator(id: String, name: String, displayName: String? = null, avatarURL: String? = null) {
+        val cleanName = name.trim().replace("@", "")
+        if (id.isEmpty() && cleanName.isEmpty()) return
         val cur = data.value
         val next = cur.followedOFCreators.toMutableList()
-        val idx = next.indexOfFirst { it.id == id || it.name.equals(name, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(FollowedOFCreator(id, name, displayName))
+        val idx = next.indexOfFirst { (id.isNotEmpty() && it.id == id) || it.handle.equals(cleanName, ignoreCase = true) }
+        if (idx >= 0) next.removeAt(idx) else next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
         data.value = cur.copy(followedOFCreators = next)
         scheduleSave()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -311,22 +373,40 @@ class UserStore private constructor() {
     fun updateXSession(session: XAccountSession) {
         data.value = data.value.copy(xSession = session)
         saveNow()
+        LicenseManager.scheduleCloudSync()
+    }
+
+    fun disconnectX() {
+        data.value = data.value.copy(xSession = XAccountSession())
+        XWebEngine.resetSession()
+        saveNow()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun updateIGSession(session: InstagramAccountSession) {
         data.value = data.value.copy(igSession = session)
         saveNow()
+        LicenseManager.scheduleCloudSync()
+    }
+
+    fun disconnectIG() {
+        data.value = data.value.copy(igSession = InstagramAccountSession())
+        InstagramWebEngine.resetSession()
+        saveNow()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun updateR34Credentials(creds: Rule34Credentials) {
         data.value = data.value.copy(r34Credentials = creds)
         saveNow()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun updateAlgorithm(transform: (AlgorithmProfile) -> AlgorithmProfile) {
         val cur = data.value
         data.value = cur.copy(algorithm = transform(cur.algorithm))
         saveNow()
+        LicenseManager.scheduleCloudSync()
     }
 
     fun recordSwipe(kind: String, name: String, displayTitle: String, postID: String? = null) {
@@ -341,58 +421,262 @@ class UserStore private constructor() {
         } else {
             nextRecent.add(0, RecentFeedEntry(kind, name, displayTitle, 1, now))
         }
-        data.value = cur.copy(swipedTotal = cur.swipedTotal + 1, recentFeeds = nextRecent.take(24))
+        data.value = cur.copy(swipedTotal = cur.swipedTotal + 1, recentFeeds = nextRecent.take(8))
+        scheduleSave()
+    }
+
+    // Full iOS algorithm signal pipeline with 35-signal 0.92 decay, contrastive protection & videoPreference EMA
+    fun recordAlgorithmSignal(post: Gif, weight: Double) {
+        val cur = data.value
+        if (!cur.settings.algorithmEnabled) return
+        val cats = categories.value
+        val algo = cur.algorithm
+        var total = algo.totalSignals + 1
+        var subW = algo.subredditWeights.toMutableMap()
+        var creW = algo.creatorWeights.toMutableMap()
+        var tagW = algo.tagWeights.toMutableMap()
+
+        if (total % 35 == 0) {
+            subW = subW.mapValues { (_, v) -> v * 0.92 }.filterValues { kotlin.math.abs(it) > 0.08 }.toMutableMap()
+            creW = creW.mapValues { (_, v) -> v * 0.92 }.filterValues { kotlin.math.abs(it) > 0.08 }.toMutableMap()
+            tagW = tagW.mapValues { (_, v) -> v * 0.92 }.filterValues { kotlin.math.abs(it) > 0.08 }.toMutableMap()
+        }
+
+        post.subreddit?.trim()?.lowercase()?.takeIf { it.isNotEmpty() && !MediaMetaRegistry.isStopTag(it) }?.let { sub ->
+            subW[sub] = ((subW[sub] ?: 0.0) + weight).coerceIn(-12.0, 45.0)
+        }
+        post.author?.trim()?.lowercase()?.replace("@", "")?.takeIf { it.isNotEmpty() }?.let { author ->
+            creW[author] = ((creW[author] ?: 0.0) + weight).coerceIn(-12.0, 45.0)
+        }
+
+        val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats)
+        val pinnedSet = algo.boostedTags.map { it.lowercase() }.toSet()
+        for (t in tags) {
+            if (weight < 0 && (t in pinnedSet || (tagW[t] ?: 0.0) >= 2.2)) continue // contrastive protection
+            tagW[t] = ((tagW[t] ?: 0.0) + weight * 0.75).coerceIn(-12.0, 45.0)
+        }
+
+        val isVid = !post.isImage
+        val alpha = if (weight > 0) 0.06 else 0.02
+        val target = if (isVid) (if (weight > 0) 1.0 else 0.0) else (if (weight > 0) 0.0 else 1.0)
+        val nextVidPref = (algo.videoPreference * (1.0 - alpha) + target * alpha).coerceIn(0.1, 0.95)
+
+        data.value = cur.copy(
+            algorithm = algo.copy(
+                tagWeights = tagW,
+                subredditWeights = subW,
+                creatorWeights = creW,
+                videoPreference = nextVidPref,
+                totalSignals = total
+            )
+        )
+        if (weight > 0) {
+            SmartTasteEngine.shared.recordPositiveEngagement(post, weight, cats)
+        }
         scheduleSave()
     }
 
     fun recordDwellSignal(post: Gif, secondsWatched: Double) {
-        if (secondsWatched >= 3.8) {
-            SmartTasteEngine.shared.recordPositiveEngagement(post, if (secondsWatched >= 9.0) 1.0 else 0.5, categories.value)
-        } else if (secondsWatched < 1.6) {
-            SmartTasteEngine.shared.recordFastSkip(post, categories.value)
+        if (!data.value.settings.algorithmEnabled) return
+        when {
+            secondsWatched >= 9.0 -> recordAlgorithmSignal(post, 3.2)
+            secondsWatched >= 3.8 -> recordAlgorithmSignal(post, 1.6)
+            secondsWatched < 1.6 -> {
+                recordAlgorithmSignal(post, -1.1)
+                SmartTasteEngine.shared.recordFastSkip(post, categories.value)
+            }
         }
+    }
+
+    fun recordLoopSignal(post: Gif) {
+        if (!data.value.settings.algorithmEnabled) return
+        recordAlgorithmSignal(post, 3.8)
+    }
+
+    fun recordSearchSignal(query: String) {
+        if (!data.value.settings.algorithmEnabled) return
+        val tags = PornTagCatalog.extractRecognizedTagsFromQuery(query)
+        if (tags.isEmpty()) return
+        val cur = data.value
+        val tagW = cur.algorithm.tagWeights.toMutableMap()
+        for (t in tags) tagW[t] = ((tagW[t] ?: 0.0) + 4.5).coerceIn(-12.0, 45.0)
+        data.value = cur.copy(algorithm = cur.algorithm.copy(tagWeights = tagW))
+        scheduleSave()
     }
 
     fun dislike(post: Gif): SmartTasteEngine.DislikeOutcome {
         markSeen(post)
+        recordAlgorithmSignal(post, -8.0)
         return SmartTasteEngine.shared.recordDislike(post, categories.value)
     }
 
-    fun isEligibleAdultPost(post: Gif): Boolean {
-        if (post.isOnlyFansPost || post.isRule34Post || post.isLongVideoPost) return true
-        val sub = (post.subreddit ?: "").lowercase()
-        if (sub in AdultContentClassifier.sfwBlockedSubreddits) return false
-        val combined = "${post.title ?: ""} ${post.author ?: ""} $sub"
-        if (AdultContentClassifier.containsSFWBlockedTerm(combined)) return false
-        return post.hasPlayableMedia
-    }
-
-    fun rankWithAlgorithm(posts: List<Gif>): List<Gif> {
-        if (!data.value.settings.algorithmEnabled) return posts
+    fun isBlockedByAlgorithm(post: Gif): Boolean {
         val algo = data.value.algorithm
-        val boosted = algo.boostedTags.map { it.lowercase() }.toSet()
-        val blocked = algo.blockedTags.map { it.lowercase() }.toSet()
-        val engine = SmartTasteEngine.shared
         val cats = categories.value
+        if (SmartTasteEngine.shared.isSuppressedInDiscovery(post, cats)) return true
+        if (algo.blockedTags.isEmpty()) return false
+        val blockedSet = algo.blockedTags.map { PornTagCatalog.normalize(it) }.toSet()
+        val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats)
+        if (tags.any { it in blockedSet }) return true
+        val hay = "${post.title ?: ""} ${post.subreddit ?: ""} ${post.author ?: ""}".lowercase()
+        return blockedSet.any { b -> b.length >= 4 && hay.contains(b.replace("_", " ")) }
+    }
 
-        val filtered = posts.filter { post ->
-            if (engine.isSuppressedInDiscovery(post, cats)) return@filter false
-            val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats).map { it.lowercase() }
-            if (tags.any { it in blocked }) return@filter false
-            true
-        }
-        return filtered.sortedByDescending { post ->
-            var score = engine.scoreAdjustment(post, cats)
-            val tags = SmartTasteEngine.extractDirectTagsOnly(post, cats).map { it.lowercase() }
-            for (t in tags) {
-                if (t in boosted) score += 2.5
-                score += (algo.tagWeights[t] ?: 0.0)
-            }
-            post.author?.lowercase()?.let { score += (algo.preferredAuthors[it] ?: 0.0) }
-            post.subreddit?.lowercase()?.let { score += (algo.preferredSubreddits[it] ?: 0.0) }
-            score
+    fun adjustLearnedTag(tag: String, delta: Double) {
+        val clean = PornTagCatalog.normalize(tag)
+        if (clean.isEmpty()) return
+        updateAlgorithm { algo ->
+            val nextW = algo.tagWeights.toMutableMap()
+            nextW[clean] = ((nextW[clean] ?: 0.0) + delta).coerceIn(-12.0, 45.0)
+            algo.copy(tagWeights = nextW)
         }
     }
+
+    fun addBoostedTags(raw: String) {
+        val tokens = raw.split(Regex("[\\s,]+")).map { PornTagCatalog.normalize(it) }
+            .filter { it.isNotEmpty() && !MediaMetaRegistry.isStopTag(it) }
+        if (tokens.isEmpty()) return
+        updateAlgorithm { algo ->
+            val nextBoost = (algo.boostedTags + tokens).distinct()
+            val nextBlock = algo.blockedTags.filterNot { it in tokens }
+            tokens.forEach { SmartTasteEngine.shared.unblockTag(it) }
+            algo.copy(boostedTags = nextBoost, blockedTags = nextBlock)
+        }
+    }
+
+    fun removeBoostedTag(tag: String) {
+        val clean = PornTagCatalog.normalize(tag)
+        updateAlgorithm { algo -> algo.copy(boostedTags = algo.boostedTags.filterNot { it.equals(clean, ignoreCase = true) }) }
+    }
+
+    fun addBlockedTags(raw: String) {
+        val tokens = raw.split(Regex("[\\s,]+")).map { PornTagCatalog.normalize(it) }
+            .filter { it.isNotEmpty() && !MediaMetaRegistry.isStopTag(it) }
+        if (tokens.isEmpty()) return
+        updateAlgorithm { algo ->
+            val nextBlock = (algo.blockedTags + tokens).distinct()
+            val nextBoost = algo.boostedTags.filterNot { it in tokens }
+            tokens.forEach { SmartTasteEngine.shared.blockDislikedTag(it) }
+            algo.copy(blockedTags = nextBlock, boostedTags = nextBoost)
+        }
+    }
+
+    fun removeBlockedTag(tag: String) {
+        val clean = PornTagCatalog.normalize(tag)
+        SmartTasteEngine.shared.unblockTag(clean)
+        updateAlgorithm { algo -> algo.copy(blockedTags = algo.blockedTags.filterNot { it.equals(clean, ignoreCase = true) }) }
+    }
+
+    fun removeLearnedTag(tag: String) {
+        updateAlgorithm { algo -> algo.copy(tagWeights = algo.tagWeights - tag) }
+    }
+
+    fun removeLearnedSubreddit(sub: String) {
+        updateAlgorithm { algo -> algo.copy(subredditWeights = algo.subredditWeights - sub) }
+    }
+
+    fun topAlgorithmTags(limit: Int = 12): List<Pair<String, Double>> =
+        data.value.algorithm.tagWeights.entries
+            .filter { it.value > 0.4 && !MediaMetaRegistry.isStopTag(it.key) }
+            .sortedByDescending { it.value }
+            .take(limit)
+            .map { it.key to it.value }
+
+    fun topAlgorithmSubredditEntries(limit: Int = 8): List<Pair<String, Double>> =
+        data.value.algorithm.subredditWeights.entries
+            .filter { it.value > 0.5 }
+            .sortedByDescending { it.value }
+            .take(limit)
+            .map { it.key to it.value }
+
+    fun topAlgorithmSubreddits(limit: Int = 6): List<String> =
+        topAlgorithmSubredditEntries(limit).map { it.first }
+
+    val topTasteSummary: String
+        get() {
+            val algo = data.value.algorithm
+            val picks = (algo.boostedTags.take(3) + topAlgorithmTags(4).map { it.first }).distinct().take(4)
+            return if (picks.isEmpty()) "Learning your taste as you watch & like"
+            else "Tuned for: ${picks.joinToString(" · ") { "#$it" }}"
+        }
+
+    fun resetAlgorithm() {
+        updateAlgorithm { AlgorithmProfile() }
+        SmartTasteEngine.shared.reset()
+    }
+
+    fun scorePost(post: Gif): Double {
+        val cur = data.value
+        val algo = cur.algorithm
+        val cats = categories.value
+        val engine = SmartTasteEngine.shared
+        var score = engine.scoreAdjustment(post, cats)
+
+        val sub = post.subreddit?.trim()?.lowercase()
+        if (!sub.isNullOrEmpty()) {
+            score += (algo.subredditWeights[sub] ?: 0.0) * 1.4
+            if (cur.followedSubreddits.any { it.equals(sub, ignoreCase = true) }) score += 3.5
+        }
+        val author = post.author?.trim()?.lowercase()?.replace("@", "")
+        if (!author.isNullOrEmpty()) {
+            score += (algo.creatorWeights[author] ?: 0.0) * 1.6
+            if (cur.followedUsers.any { it.equals(author, ignoreCase = true) } ||
+                cur.followedXUsers.any { it.equals(author, ignoreCase = true) } ||
+                cur.followedIGUsers.any { it.equals(author, ignoreCase = true) } ||
+                cur.followedOFCreators.any { it.handle.equals(author, ignoreCase = true) }
+            ) score += 4.0
+        }
+
+        val tags = SmartTasteEngine.extractExtendedTags(post, cats)
+        val boostedSet = algo.boostedTags.map { PornTagCatalog.normalize(it) }.toSet()
+        val hay = "${post.title ?: ""} ${post.subreddit ?: ""} ${post.author ?: ""}".lowercase()
+        var relatedSynergy = 0.0
+        for (t in tags) {
+            if (t in boostedSet) score += 48.0
+            score += (algo.tagWeights[t] ?: 0.0) * 1.9
+            PornTagCatalog.relatedTags[t]?.forEach { rel ->
+                val rw = algo.tagWeights[rel] ?: 0.0
+                if (rw >= 2.5) relatedSynergy += rw * 0.32
+            }
+        }
+        for (b in boostedSet) {
+            if (b !in tags && b.length >= 3 && hay.contains(b.replace("_", " "))) score += 48.0
+        }
+        score += minOf(7.0, relatedSynergy)
+
+        if (!post.isImage) score += (algo.videoPreference - 0.5) * 4.0
+        val up = post.upvotes ?: 0
+        if (up > 1) score += minOf(2.2, log10(up.toDouble()) * 0.55)
+        score += Random.nextDouble(-0.65, 0.65)
+        return score
+    }
+
+    // Full iOS 75/25 Exploit-Explore ranking with jitter & blocked filtering
+    fun rankWithAlgorithm(posts: List<Gif>): List<Gif> {
+        val filtered = posts.filter { !isBlockedByAlgorithm(it) }
+        if (!data.value.settings.algorithmEnabled || filtered.size <= 3) return filtered.shuffled()
+        val cats = categories.value
+        for (p in filtered) SmartTasteEngine.shared.ingestPostIntoCreatorGraph(p, cats, boost = 0.4)
+
+        val scored = filtered.map { it to scorePost(it) }.sortedByDescending { it.second }.map { it.first }
+        val exploitCut = maxOf(1, (scored.size * 3) / 4)
+        val exploit = scored.take(exploitCut).toMutableList()
+        val explore = scored.drop(exploitCut).shuffled().toMutableList()
+
+        val result = mutableListOf<Gif>()
+        var counter = 0
+        while (exploit.isNotEmpty() || explore.isNotEmpty()) {
+            val pickExplore = (counter % 4 == 3) && explore.isNotEmpty()
+            if (pickExplore) result.add(explore.removeAt(0))
+            else if (exploit.isNotEmpty()) result.add(exploit.removeAt(0))
+            else result.add(explore.removeAt(0))
+            counter++
+        }
+        return result
+    }
+
+    fun isEligibleAdultPost(post: Gif, source: FeedSource = FeedSource.ForYou): Boolean =
+        AdultContentClassifier.isEligible(post, source, categories.value, this)
 
     fun replaceWithBackup(restored: UserData) {
         synchronized(seenList) {
@@ -401,7 +685,7 @@ class UserStore private constructor() {
             seenSet.clear()
             seenSet.addAll(restored.seenIDs)
         }
-        data.value = restored
+        data.value = sanitizeLoadedData(restored)
         saveNow()
     }
 
@@ -428,24 +712,20 @@ class UserStore private constructor() {
             igSession = if (options.keepAccounts) cur.igSession else InstagramAccountSession(),
             r34Credentials = if (options.keepAccounts) cur.r34Credentials else Rule34Credentials(),
             algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile(),
-            settings = cur.settings
+            settings = AppSettings()
         )
-        if (!options.keepAlgorithm) {
-            synchronized(seenList) {
-                seenList.clear()
-                seenSet.clear()
-            }
-            SmartTasteEngine.shared.reset()
-        } else {
-            val copySeen = synchronized(seenList) { seenList.toList() }
-            fresh.seenIDs = copySeen
+        synchronized(seenList) {
+            seenList.clear()
+            seenSet.clear()
         }
+        if (!options.keepAlgorithm) SmartTasteEngine.shared.reset()
         data.value = fresh
         if (!options.keepOfflineVault) OfflineManager.clearAllDownloads()
         if (!options.keepPasscode) AppState.removePasscodeKeepingData()
 
         val ctx = TinyTinyApplication.instance
         File(ctx.cacheDir, "FeedDiskCache").deleteRecursively()
+        File(ctx.cacheDir, "http_cache").deleteRecursively()
         ctx.cacheDir.listFiles()?.forEach { if (it.name.startsWith("tt_")) it.deleteRecursively() }
 
         if (!options.keepAccounts) {
@@ -487,6 +767,14 @@ object AdultContentClassifier {
         "sponsored", "promoted", "airdrop", "giveaway", "retweet to win"
     )
 
+    private val sfwIGNoise = listOf(
+        "recipe", "cooking", "baby", "toddler", "kindergarten", "homework",
+        "stock market", "real estate", "mortgage", "nfl", "nba", "premier league",
+        "unboxing", "tech review", "sermon", "bible study", "tutorial", "coding",
+        "excel", "tax", "insurance", "dentist", "minecraft", "fortnite",
+        "politics", "election", "news", "weather forecast"
+    )
+
     private val explicitAdultMarkers = listOf(
         "nsfw", "18+", "onlyfans", "fansly", "manyvids", "pornhub", "xvideos", "xhamster",
         "redgifs", "brazzers", "chaturbate", "camgirl", "xxx", "porn", "nude", "nudes",
@@ -507,7 +795,8 @@ object AdultContentClassifier {
 
     fun hasExplicitAdultIndicators(text: String): Boolean {
         val lower = text.lowercase()
-        return explicitAdultMarkers.any { it in lower }
+        if (explicitAdultMarkers.any { it in lower }) return true
+        return PornTagCatalog.extractRecognizedTagsFromQuery(lower).isNotEmpty()
     }
 
     fun isEligibleXTweet(
@@ -516,20 +805,154 @@ object AdultContentClassifier {
         authorBio: String,
         possiblySensitive: Boolean,
         hasAdultWarning: Boolean,
-        hasGraphicViolenceOnly: Boolean
+        hasGraphicViolenceOnly: Boolean,
+        routeKey: String = ""
     ): Boolean {
         if (hasGraphicViolenceOnly) return false
         val combined = "$text $author $authorBio"
         if (containsSFWBlockedTerm(combined)) return false
         return hasAdultWarning || possiblySensitive || hasExplicitAdultIndicators(combined)
     }
+
+    fun isEligibleIGReel(caption: String, author: String, routeKey: String = ""): Boolean {
+        val combined = "$caption $author".lowercase()
+        if (containsSFWBlockedTerm(combined)) return false
+        if (routeKey == "ig_following" || routeKey == "ig_saved" || routeKey.startsWith("ig_user_")) return true
+        if (sfwIGNoise.any { it in combined }) return false
+        return true
+    }
+
+    fun isEligible(post: Gif, source: FeedSource, categories: List<GoonedCategory>, store: UserStore): Boolean {
+        if (!post.hasPlayableMedia) return false
+        if (source.isList) return true
+        val sub = (post.subreddit ?: "").lowercase()
+        if (sub in sfwBlockedSubreddits) return false
+        val combined = "${post.title ?: ""} ${post.author ?: ""} $sub"
+        if (containsSFWBlockedTerm(combined)) return false
+        if (post.isRule34Post || post.isXPost || post.isIGPost || post.isOnlyFansPost || post.isLongVideoPost) return true
+        // Verify Reddit/Gooned posts are genuinely adult
+        if (sub.contains("porn") || sub.contains("nsfw") || sub.contains("gonewild") ||
+            sub.contains("hentai") || sub.contains("rule34") || sub.contains("xxx") ||
+            sub.contains("sluts") || sub.contains("fetish") || sub.contains("goon")
+        ) return true
+        if ((post.mediaUrl ?: "").contains("redgifs.com", ignoreCase = true) ||
+            (post.sourceUrl ?: "").contains("redgifs.com", ignoreCase = true)
+        ) return true
+        if (categories.any { cat -> cat.subreddits.any { it.equals(sub, ignoreCase = true) } }) return true
+        return hasExplicitAdultIndicators(combined)
+    }
 }
 
 object PornTagCatalog {
     val quickPickerCategories: List<Pair<String, List<String>>> = listOf(
-        "Popular" to listOf("amateur", "asian", "latina", "ebony", "milf", "petite", "curvy", "goth", "redheads", "bbw"),
-        "Actions" to listOf("blowjob", "anal", "creampie", "cumshot", "squirt", "hardcore", "pov", "threesome", "bdsm", "femdom"),
+        "Popular" to listOf("amateur", "asian", "latina", "ebony", "milf", "petite", "curvy", "goth", "redhead", "bbw", "pawg", "interracial"),
+        "Actions" to listOf("blowjob", "anal", "creampie", "cumshot", "squirt", "hardcore", "pov", "threesome", "bdsm", "femdom", "deepthroat", "doggystyle"),
         "Animated" to listOf("hentai", "rule34", "ahegao", "futanari", "3d", "animated", "sound", "cosplay"),
-        "Body & Vibes" to listOf("ass", "big_tits", "pussy", "solo", "toys", "public", "lesbian", "femboy", "trans")
+        "Body & Vibes" to listOf("ass", "big_tits", "pussy", "solo", "toys", "public", "lesbian", "femboy", "trans_woman", "lingerie", "feet")
     )
+
+    val canonicalTags: Set<String> = setOf(
+        "amateur", "anal", "asian", "ass", "ahegao", "bbw", "bdsm", "big_ass", "big_cock",
+        "big_tits", "bimbo", "blonde", "blowjob", "bondage", "boobs", "brunette", "bukkake",
+        "camgirl", "chubby", "college", "cosplay", "couple", "creampie", "cuckold", "cumshot",
+        "curvy", "deepthroat", "doggystyle", "dp", "ebony", "edging", "exhibitionist", "facefuck",
+        "facial", "feet", "femboy", "femdom", "fisting", "footjob", "freeuse", "furry", "futanari",
+        "gangbang", "gay", "goth", "group", "handjob", "hardcore", "hentai", "homemade", "hotwife",
+        "indian", "interracial", "jav", "joi", "latina", "lesbian", "lingerie", "masturbation",
+        "mature", "milf", "natural_tits", "nude", "office", "oiled", "orgasm", "orgy", "outdoor",
+        "paizuri", "panties", "pawg", "pegging", "petite", "pierced", "pov", "pregnant", "public",
+        "pussy", "redhead", "riding", "rimjob", "rough", "rule34", "selfie", "shemale", "shibari",
+        "shower", "sissy", "small_tits", "solo", "sound", "spanking", "squirt", "stepmom",
+        "stockings", "striptease", "tattooed", "tattoos", "tease", "threesome", "titfuck",
+        "toys", "trans_woman", "uniform", "vintage", "voyeur", "yaoi", "3d", "animated"
+    )
+
+    val aliases: Map<String, String> = mapOf(
+        "bj" to "blowjob", "oral" to "blowjob", "sucking" to "blowjob", "head" to "blowjob",
+        "dt" to "deepthroat", "throatpie" to "deepthroat", "gagging" to "deepthroat",
+        "booty" to "ass", "butt" to "ass", "buttocks" to "ass", "cake" to "ass",
+        "bigass" to "big_ass", "phatass" to "big_ass", "fatass" to "big_ass", "hugeass" to "big_ass",
+        "bigtits" to "big_tits", "bigboobs" to "big_tits", "busty" to "big_tits", "hugetits" to "big_tits", "stacked" to "big_tits",
+        "tits" to "boobs", "titties" to "boobs", "breasts" to "boobs",
+        "smalltits" to "small_tits", "ittybitty" to "small_tits", "flatchest" to "small_tits",
+        "bbc" to "interracial", "bwc" to "big_cock", "bigdick" to "big_cock", "hung" to "big_cock",
+        "redheads" to "redhead", "ginger" to "redhead",
+        "trans" to "trans_woman", "tgirl" to "trans_woman", "transgirl" to "trans_woman", "transwoman" to "trans_woman", "mtf" to "trans_woman", "ladyboy" to "trans_woman",
+        "futa" to "futanari", "dickgirl" to "futanari",
+        "femboys" to "femboy", "trap" to "femboy", "traps" to "femboy", "crossdresser" to "femboy",
+        "egirl" to "goth", "altgirl" to "goth", "emo" to "goth",
+        "black" to "ebony", "blackgirl" to "ebony",
+        "japanese" to "asian", "korean" to "asian", "chinese" to "asian",
+        "mexican" to "latina", "colombian" to "latina", "brazilian" to "latina",
+        "mommy" to "milf", "cougar" to "milf",
+        "dildo" to "toys", "vibrator" to "toys", "buttplug" to "toys",
+        "cum" to "cumshot", "jizz" to "cumshot", "load" to "cumshot",
+        "squirting" to "squirt",
+        "cowgirl" to "riding", "reversecowgirl" to "riding",
+        "doggy" to "doggystyle", "frombehind" to "doggystyle",
+        "tittyfuck" to "titfuck", "boobjob" to "titfuck",
+        "fishnets" to "stockings", "thighhighs" to "stockings", "pantyhose" to "stockings", "nylons" to "stockings",
+        "ffm" to "threesome", "mmf" to "threesome", "3some" to "threesome",
+        "f4f" to "lesbian", "girlxgirl" to "lesbian", "sapphic" to "lesbian", "yuri" to "lesbian",
+        "sfm" to "3d", "blender" to "3d",
+        "r34" to "rule34", "anime" to "hentai", "ecchi" to "hentai", "doujin" to "hentai",
+        "foot" to "feet", "soles" to "feet", "toes" to "feet",
+        "tattoo" to "tattoos", "inked" to "tattoos", "alt" to "goth",
+        "tiny" to "petite", "spinner" to "petite",
+        "thick" to "curvy", "thicc" to "curvy", "slimthick" to "curvy",
+        "bara" to "yaoi", "m4m" to "gay", "twink" to "gay"
+    )
+
+    val relatedTags: Map<String, List<String>> = mapOf(
+        "blowjob" to listOf("deepthroat", "facefuck", "facial", "cumshot", "pov"),
+        "anal" to listOf("ass", "big_ass", "doggystyle", "creampie", "hardcore"),
+        "ass" to listOf("big_ass", "pawg", "doggystyle", "anal", "curvy"),
+        "big_tits" to listOf("boobs", "titfuck", "paizuri", "milf", "curvy"),
+        "creampie" to listOf("cumshot", "pussy", "breeding", "amateur", "homemade"),
+        "hentai" to listOf("rule34", "ahegao", "futanari", "animated", "3d"),
+        "rule34" to listOf("hentai", "3d", "animated", "ahegao", "futanari"),
+        "femboy" to listOf("sissy", "trans_woman", "stockings", "lingerie", "anal"),
+        "trans_woman" to listOf("femboy", "shemale", "futanari", "lingerie", "anal"),
+        "goth" to listOf("tattoos", "pierced", "cosplay", "stockings", "femdom"),
+        "cosplay" to listOf("goth", "hentai", "ahegao", "lingerie", "uniform"),
+        "bdsm" to listOf("bondage", "femdom", "spanking", "shibari", "rough"),
+        "milf" to listOf("mature", "big_tits", "curvy", "hotwife", "stepmom"),
+        "asian" to listOf("jav", "petite", "cosplay", "schoolgirl", "amateur"),
+        "latina" to listOf("big_ass", "curvy", "pawg", "amateur", "doggystyle"),
+        "ebony" to listOf("big_ass", "curvy", "twerk", "interracial", "amateur"),
+        "petite" to listOf("small_tits", "amateur", "asian", "pov", "riding"),
+        "lesbian" to listOf("threesome", "toys", "squirt", "lingerie", "orgasm"),
+        "amateur" to listOf("homemade", "pov", "couple", "creampie", "riding"),
+        "feet" to listOf("footjob", "stockings", "femdom", "lingerie")
+    )
+
+    fun normalize(raw: String): String {
+        val clean = raw.trim().lowercase().replace("#", "").replace("-", "_").replace(Regex("\\s+"), "_")
+        return aliases[clean] ?: clean
+    }
+
+    fun extractRecognizedTagsFromQuery(query: String): List<String> {
+        if (query.isBlank()) return emptyList()
+        val lower = query.lowercase()
+        val words = lower.split(Regex("[^a-z0-9_]+")).filter { it.length >= 2 }
+        val out = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        fun tryAdd(token: String) {
+            val mapped = aliases[token] ?: token
+            if (mapped in canonicalTags && seen.add(mapped)) out.add(mapped)
+        }
+        for (i in words.indices) {
+            tryAdd(words[i])
+            if (i + 1 < words.size) {
+                tryAdd("${words[i]}_${words[i + 1]}")
+                tryAdd("${words[i]}${words[i + 1]}")
+            }
+        }
+        return out
+    }
+
+    fun displayTitle(tag: String): String =
+        tag.replace("_", " ").split(" ").joinToString(" ") { w ->
+            w.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
 }

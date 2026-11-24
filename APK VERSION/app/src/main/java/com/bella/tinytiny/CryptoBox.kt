@@ -28,8 +28,15 @@ object CryptoBox {
         encodeDefaults = true
     }
 
-    private fun securePrefs(context: Context = TinyTinyApplication.instance): SharedPreferences {
-        return try {
+    @Volatile
+    private var cachedLocalKey: ByteArray? = null
+
+    @Volatile
+    private var cachedSeedrKey: ByteArray? = null
+
+    private val cachedSecurePrefs: SharedPreferences by lazy {
+        val context = TinyTinyApplication.instance
+        try {
             val masterKey = MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build()
@@ -45,33 +52,47 @@ object CryptoBox {
         }
     }
 
+    private fun securePrefs(): SharedPreferences = cachedSecurePrefs
+
     fun generateKey(): ByteArray {
         val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)
         return bytes
     }
 
+    @Synchronized
     fun localVaultKey(): ByteArray {
+        cachedLocalKey?.let { return it }
         val prefs = securePrefs()
         val existing = prefs.getString(LOCAL_VAULT_KEY_PREF, null)
         if (!existing.isNullOrEmpty()) {
             val decoded = importKeyBase64URL(existing)
-            if (decoded != null && decoded.size == 32) return decoded
+            if (decoded != null && decoded.size == 32) {
+                cachedLocalKey = decoded
+                return decoded
+            }
         }
         val fresh = generateKey()
         prefs.edit().putString(LOCAL_VAULT_KEY_PREF, exportKeyBase64URL(fresh)).apply()
+        cachedLocalKey = fresh
         return fresh
     }
 
+    @Synchronized
     fun seedrVaultKey(): ByteArray {
+        cachedSeedrKey?.let { return it }
         val prefs = securePrefs()
         val existing = prefs.getString(SEEDR_MASTER_KEY_PREF, null)
         if (!existing.isNullOrEmpty()) {
             val decoded = importKeyBase64URL(existing)
-            if (decoded != null && decoded.size == 32) return decoded
+            if (decoded != null && decoded.size == 32) {
+                cachedSeedrKey = decoded
+                return decoded
+            }
         }
         val fresh = generateKey()
         prefs.edit().putString(SEEDR_MASTER_KEY_PREF, exportKeyBase64URL(fresh)).apply()
+        cachedSeedrKey = fresh
         return fresh
     }
 
@@ -92,11 +113,13 @@ object CryptoBox {
 
     fun exportSeedrMasterKeyString(): String = exportKeyBase64URL(seedrVaultKey())
 
+    @Synchronized
     fun restoreSeedrMasterKeyIfMissing(token: String) {
         val prefs = securePrefs()
         if (prefs.contains(SEEDR_MASTER_KEY_PREF)) return
         val key = importKeyBase64URL(token) ?: return
         prefs.edit().putString(SEEDR_MASTER_KEY_PREF, exportKeyBase64URL(key)).apply()
+        cachedSeedrKey = key
     }
 
     fun seal(plaintext: ByteArray, key: ByteArray): ByteArray {
@@ -116,7 +139,7 @@ object CryptoBox {
     fun open(ciphertext: ByteArray, key: ByteArray): ByteArray {
         require(key.size == 32) { "Key must be 256-bit" }
         val offset = if (isEncryptedEnvelope(ciphertext)) MAGIC_HEADER.size else 0
-        require(ciphertext.size > offset + 12 + 16) { "Ciphertext too short" }
+        require(ciphertext.size >= offset + 12 + 16) { "Ciphertext too short" }
         val iv = ciphertext.copyOfRange(offset, offset + 12)
         val payload = ciphertext.copyOfRange(offset + 12, ciphertext.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")

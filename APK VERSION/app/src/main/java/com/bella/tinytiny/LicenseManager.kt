@@ -1,23 +1,29 @@
 package com.bella.tinytiny
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.util.Base64
 import android.webkit.CookieManager
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyOff
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -28,12 +34,12 @@ import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import okhttp3.MediaType.Companion.toMediaType
@@ -95,6 +101,7 @@ object LicenseManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = TinyTinyApplication.sharedHttpClient
+    private val transferClient = TinyTinyApplication.longTransferHttpClient
     private val lastErrorReportAt = ConcurrentHashMap<String, Long>()
 
     val status = MutableStateFlow(LicenseStatus())
@@ -109,8 +116,8 @@ object LicenseManager {
     fun scheduleCloudSync() {
         cloudSyncJob?.cancel()
         cloudSyncJob = scope.launch {
-            kotlinx.coroutines.delay(4_000L)
-            syncEncryptedBackupNow()
+            delay(3_500L)
+            syncBidirectionalBackup()
         }
     }
 
@@ -155,6 +162,7 @@ object LicenseManager {
             if (!s.isActivated || s.isExpiredOrRevoked) return false
             if (s.isLifetime) return true
             val exp = s.expiresAt ?: return true
+            if (exp.isNaN()) return true
             return (System.currentTimeMillis() / 1000.0) < exp
         }
 
@@ -179,6 +187,13 @@ object LicenseManager {
         dismissedAnnouncementId.value = id
         TinyTinyApplication.instance.getSharedPreferences("tt_ui_prefs", Context.MODE_PRIVATE)
             .edit().putString(DISMISSED_ANN_KEY, id).apply()
+    }
+
+    fun clearLicense() {
+        val empty = LicenseStatus()
+        status.value = empty
+        prefs.edit().remove(STATUS_KEY).apply()
+        AppState.markLicenseActivated(false)
     }
 
     private fun compareVersions(a: String, b: String): Int {
@@ -219,6 +234,12 @@ object LicenseManager {
         } catch (_: Throwable) {}
     }
 
+    private fun parseOptionalDouble(json: JSONObject, key: String): Double? {
+        if (!json.has(key) || json.isNull(key)) return null
+        val d = json.optDouble(key, Double.NaN)
+        return if (d.isNaN()) null else d
+    }
+
     suspend fun activate(rawKey: String): Boolean = withContext(Dispatchers.IO) {
         val cleanKey = rawKey.trim().uppercase()
         if (cleanKey.length < 6) {
@@ -240,26 +261,28 @@ object LicenseManager {
             client.newCall(req).execute().use { resp ->
                 val raw = resp.body?.string() ?: ""
                 val json = try { JSONObject(raw) } catch (_: Throwable) {
-                    errorMessage.value = "Server error (HTTP ${resp.code})."
+                    errorMessage.value = "Server error (HTTP ${resp.code}). Check Worker URL."
                     return@withContext false
                 }
                 if (json.optBoolean("valid", false)) {
                     applyRemoteConfig(json)
+                    val exp = parseOptionalDouble(json, "expiresAt")
                     val next = LicenseStatus(
                         licenseKey = cleanKey,
                         isAdmin = json.optBoolean("admin", false),
                         isActivated = true,
                         isExpiredOrRevoked = false,
-                        isLifetime = json.optBoolean("lifetime", json.isNull("expiresAt")),
-                        expiresAt = if (json.isNull("expiresAt")) null else json.optDouble("expiresAt"),
-                        durationLabel = json.optString("durationLabel", ""),
+                        isLifetime = json.optBoolean("lifetime", exp == null),
+                        expiresAt = exp,
+                        durationLabel = json.optString("durationLabel", "").takeIf { it != "null" } ?: "",
                         lastVerifiedAt = System.currentTimeMillis() / 1000.0
                     )
                     saveStatus(next)
                     restoreEncryptedBackupIfPresent()
                     true
                 } else {
-                    errorMessage.value = json.optString("error", "Invalid, expired, or device-locked key.")
+                    val srvErr = if (json.has("error") && !json.isNull("error")) json.optString("error", "").trim() else ""
+                    errorMessage.value = srvErr.ifEmpty { "Invalid, expired, or device-locked key." }
                     false
                 }
             }
@@ -288,14 +311,19 @@ object LicenseManager {
                 if (resp.code != 200) return@withContext
                 val json = JSONObject(resp.body?.string() ?: return@withContext)
                 applyRemoteConfig(json)
-                val valid = json.optBoolean("valid", true)
+                val hasValid = json.has("valid") && !json.isNull("valid")
+                val valid = if (hasValid) json.optBoolean("valid", true) else !s.isExpiredOrRevoked
+                val exp = if (json.has("expiresAt")) parseOptionalDouble(json, "expiresAt") else s.expiresAt
+                val dur = if (json.has("durationLabel") && !json.isNull("durationLabel")) {
+                    json.optString("durationLabel", "").takeIf { it.isNotEmpty() } ?: s.durationLabel
+                } else s.durationLabel
                 val next = s.copy(
                     lastVerifiedAt = System.currentTimeMillis() / 1000.0,
-                    isExpiredOrRevoked = !valid,
+                    isExpiredOrRevoked = if (hasValid) !valid else s.isExpiredOrRevoked,
                     isAdmin = if (valid) json.optBoolean("admin", s.isAdmin) else s.isAdmin,
-                    isLifetime = if (valid) json.optBoolean("lifetime", json.isNull("expiresAt")) else s.isLifetime,
-                    expiresAt = if (valid && !json.isNull("expiresAt")) json.optDouble("expiresAt") else s.expiresAt,
-                    durationLabel = if (valid && json.optString("durationLabel").isNotEmpty()) json.optString("durationLabel") else s.durationLabel
+                    isLifetime = if (valid) json.optBoolean("lifetime", exp == null) else s.isLifetime,
+                    expiresAt = if (valid) exp else s.expiresAt,
+                    durationLabel = if (valid) dur else s.durationLabel
                 )
                 saveStatus(next)
             }
@@ -410,12 +438,15 @@ object LicenseManager {
                     CryptoBox.open(cipher, legacyBackupKeyV1(s.licenseKey))
                 }
                 val plainText = String(plain, Charsets.UTF_8)
-                lastRemoteBackupJson = try {
+                val parsedJsonObj = try {
                     CryptoBox.json.parseToJsonElement(plainText).jsonObject
                 } catch (_: Throwable) {
                     null
                 }
                 val backup = CryptoBox.json.decodeFromString<EncryptedProfileBackup>(plainText)
+                // Only update lastRemoteBackupJson AFTER decode succeeds
+                lastRemoteBackupJson = parsedJsonObj
+
                 val local = UserStore.shared.data.value
                 val isTrulyEmpty = local.liked.isEmpty() && local.downloaded.isEmpty() &&
                     !local.xSession.isConnected && !local.igSession.isConnected &&
@@ -436,7 +467,8 @@ object LicenseManager {
                     val mergedSub = (local.followedSubreddits + backup.userData.followedSubreddits).distinct()
                     val mergedX = (local.followedXUsers + backup.userData.followedXUsers).distinct()
                     val mergedIG = (local.followedIGUsers + backup.userData.followedIGUsers).distinct()
-                    val mergedOF = (local.followedOFCreators + backup.userData.followedOFCreators).distinctBy { it.id }
+                    val mergedOF = (local.followedOFCreators + backup.userData.followedOFCreators)
+                        .distinctBy { it.id.ifEmpty { it.handle.lowercase() } }
                     UserStore.shared.replaceWithBackup(
                         local.copy(
                             liked = mergedLikes,
@@ -470,15 +502,15 @@ object LicenseManager {
         }
     }
 
-    private suspend fun injectRestoredSocialCookies() = withContext(Dispatchers.Main) {
+    suspend fun injectRestoredSocialCookies() = withContext(Dispatchers.Main) {
         val cm = CookieManager.getInstance()
         cm.setAcceptCookie(true)
         val x = UserStore.shared.data.value.xSession
         if (x.isConnected) {
             for ((k, v) in listOf("auth_token" to x.authToken, "ct0" to x.ct0)) {
                 if (v.isNotEmpty()) {
-                    cm.setCookie("https://x.com", "$k=$v; Path=/; Secure")
-                    cm.setCookie("https://twitter.com", "$k=$v; Path=/; Secure")
+                    cm.setCookie("https://x.com", "$k=$v; Domain=.x.com; Path=/; Max-Age=31536000; Secure")
+                    cm.setCookie("https://twitter.com", "$k=$v; Domain=.twitter.com; Path=/; Max-Age=31536000; Secure")
                 }
             }
         }
@@ -486,7 +518,8 @@ object LicenseManager {
         if (ig.isConnected) {
             for ((k, v) in listOf("sessionid" to ig.sessionId, "csrftoken" to ig.csrfToken, "ds_user_id" to ig.userId)) {
                 if (v.isNotEmpty()) {
-                    cm.setCookie("https://www.instagram.com", "$k=$v; Path=/; Secure")
+                    cm.setCookie("https://www.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
+                    cm.setCookie("https://i.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
                 }
             }
         }
@@ -546,7 +579,7 @@ object LicenseManager {
                     .header("X-File-Name", filename)
                     .post(cipherData.toRequestBody("application/octet-stream".toMediaType()))
                     .build()
-                client.newCall(req).execute().use { resp ->
+                transferClient.newCall(req).execute().use { resp ->
                     if (resp.code != 200) return@withContext null
                     val json = JSONObject(resp.body?.string() ?: return@withContext null)
                     json.optString("url").takeIf { it.isNotEmpty() }
@@ -559,11 +592,14 @@ object LicenseManager {
 
 @Composable
 fun LicenseGateView(onActivated: () -> Unit) {
+    val ctx = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val status by LicenseManager.status.collectAsState()
     val isChecking by LicenseManager.isChecking.collectAsState()
     val errMsg by LicenseManager.errorMessage.collectAsState()
     val scope = rememberCoroutineScope()
     var keyInput by remember { mutableStateOf(status.licenseKey) }
+    var copiedToast by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -636,9 +672,9 @@ fun LicenseGateView(onActivated: () -> Unit) {
                 Button(
                     onClick = {
                         scope.launch {
-                            if (LicenseManager.activate(keyInput)) {
-                                onActivated()
-                            }
+                            val ok = LicenseManager.activate(keyInput)
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (ok) onActivated()
                         }
                     },
                     enabled = !isChecking && keyInput.trim().isNotEmpty(),
@@ -650,6 +686,43 @@ fun LicenseGateView(onActivated: () -> Unit) {
                         CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     } else {
                         Text("Activate License Key", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
+                }
+
+                if (status.licenseKey.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("License Key", status.licenseKey))
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                copiedToast = true
+                                scope.launch { delay(2000); copiedToast = false }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (copiedToast) "Copied!" else "Copy Key", color = Color.White, fontSize = 12.5.sp)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    LicenseManager.verifySilently()
+                                    if (LicenseManager.isValidAccess) onActivated()
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Check Status", color = Color.White, fontSize = 12.5.sp)
+                        }
                     }
                 }
             }

@@ -10,22 +10,25 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -68,11 +71,11 @@ object Theme {
 
 fun Modifier.liquidGlassCapsule(tinted: Boolean = false, active: Boolean = false): Modifier {
     val fill = when {
-        active -> Theme.accent.copy(alpha = 0.85f)
-        tinted -> Color(0xFF380F1F).copy(alpha = 0.68f)
-        else -> Color.Black.copy(alpha = 0.42f)
+        active -> Theme.accent.copy(alpha = 0.88f)
+        tinted -> Color(0xFF380F1F).copy(alpha = 0.62f)
+        else -> Color.Black.copy(alpha = 0.36f)
     }
-    val stroke = Color.White.copy(alpha = if (active) 0.42f else 0.22f)
+    val stroke = Color.White.copy(alpha = if (active) 0.45f else 0.22f)
     return this
         .clip(CircleShape)
         .background(fill, CircleShape)
@@ -84,7 +87,7 @@ fun Modifier.liquidGlassCircle(tinted: Boolean = false, active: Boolean = false)
 
 fun Modifier.liquidGlassCard(cornerRadius: Dp = 22.dp, tinted: Boolean = false): Modifier {
     val shape = RoundedCornerShape(cornerRadius)
-    val fill = if (tinted) Color(0xFF380F1F).copy(alpha = 0.62f) else Color.White.copy(alpha = 0.08f)
+    val fill = if (tinted) Color(0xFF380F1F).copy(alpha = 0.56f) else Color.White.copy(alpha = 0.08f)
     return this
         .clip(shape)
         .background(fill, shape)
@@ -111,65 +114,143 @@ fun Modifier.liquidGlassBackground(tinted: Boolean = false): Modifier {
 }
 
 @Composable
-fun BrandLogoX(size: Dp = 20.dp) {
-    Text(
-        text = "𝕏",
-        color = Color.White,
-        fontSize = (size.value * 0.85f).sp,
-        fontWeight = FontWeight.Black
-    )
+fun BrandLogoX(size: Dp = 26.dp, active: Boolean = false, connected: Boolean = false) {
+    Box(modifier = Modifier.size(size)) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(if (active) Color.White else Color.Black.copy(alpha = 0.58f))
+                .border(
+                    width = if (active) 1.5.dp else 0.8.dp,
+                    color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                    shape = CircleShape
+                )
+                .alpha(if (active) 1f else 0.90f),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "𝕏",
+                color = if (active) Color.Black else Color.White,
+                fontSize = (size.value * 0.54f).sp,
+                fontWeight = FontWeight.Black
+            )
+        }
+        if (connected) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .align(Alignment.TopEnd)
+                    .offset(x = 1.dp, y = (-1).dp)
+                    .clip(CircleShape)
+                    .background(Theme.accentBright)
+                    .border(1.dp, Color.Black, CircleShape)
+            )
+        }
+    }
 }
 
 @Composable
-fun BrandLogoRule34(size: Dp = 20.dp) {
+fun BrandLogoRule34(size: Dp = 26.dp, active: Boolean = false) {
     val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
             .clip(shape)
-            .background(Brush.verticalGradient(listOf(Color(0xFF9EE493), Color(0xFF5FA85B)))),
+            .background(Brush.linearGradient(listOf(Color(0xFFB0EBA6), Color(0xFF73C46B))))
+            .border(
+                width = if (active) 1.6.dp else 0.8.dp,
+                color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                shape = shape
+            )
+            .alpha(if (active) 1f else 0.90f),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = "34",
-            color = Color(0xFF143D14),
-            fontSize = (size.value * 0.46f).sp,
+            color = Color(0xFF0F380F),
+            fontSize = (size.value * 0.45f).sp,
             fontWeight = FontWeight.Black
         )
     }
 }
 
 @Composable
-fun BrandLogoInstagram(size: Dp = 20.dp) {
+fun BrandLogoInstagram(size: Dp = 26.dp, active: Boolean = false, connected: Boolean = false) {
     val shape = RoundedCornerShape((size.value * 0.28f).dp)
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(shape)
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFFF58529), Color(0xFFDD2A7B), Color(0xFF8134AF))
+    Box(modifier = Modifier.size(size)) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(shape)
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            Color(0xFFFCC247),
+                            Color(0xFFF54557),
+                            Color(0xFFC229A6),
+                            Color(0xFF613DE0)
+                        )
+                    )
                 )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = Icons.Default.CameraAlt,
-            contentDescription = "Instagram",
-            tint = Color.White,
-            modifier = Modifier.size(size * 0.62f)
-        )
+                .border(
+                    width = if (active) 1.6.dp else 0.8.dp,
+                    color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                    shape = shape
+                )
+                .alpha(if (active) 1f else 0.90f),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.size(size * 0.58f)) {
+                val stroke = Stroke(width = this.size.minDimension * 0.13f)
+                drawRoundRect(
+                    color = Color.White,
+                    topLeft = Offset(this.size.width * 0.08f, this.size.height * 0.08f),
+                    size = Size(this.size.width * 0.84f, this.size.height * 0.84f),
+                    cornerRadius = CornerRadius(this.size.minDimension * 0.26f),
+                    style = stroke
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = this.size.minDimension * 0.21f,
+                    center = Offset(this.size.width * 0.5f, this.size.height * 0.5f),
+                    style = stroke
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = this.size.minDimension * 0.07f,
+                    center = Offset(this.size.width * 0.74f, this.size.height * 0.26f)
+                )
+            }
+        }
+        if (connected) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .align(Alignment.TopEnd)
+                    .offset(x = 1.dp, y = (-1).dp)
+                    .clip(CircleShape)
+                    .background(Theme.accentBright)
+                    .border(1.dp, Color.Black, CircleShape)
+            )
+        }
     }
 }
 
 @Composable
-fun BrandLogoErome(size: Dp = 20.dp) {
+fun BrandLogoErome(size: Dp = 26.dp, active: Boolean = false) {
     val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
             .clip(shape)
-            .background(Brush.linearGradient(listOf(Color(0xFFD9387A), Color(0xFF7D1643)))),
+            .background(Brush.linearGradient(listOf(Color(0xFFF03D8F), Color(0xFFA3246B))))
+            .border(
+                width = if (active) 1.6.dp else 0.8.dp,
+                color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                shape = shape
+            )
+            .alpha(if (active) 1f else 0.90f),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -182,13 +263,19 @@ fun BrandLogoErome(size: Dp = 20.dp) {
 }
 
 @Composable
-fun BrandLogoLongVideos(size: Dp = 20.dp) {
+fun BrandLogoLongVideos(size: Dp = 26.dp, active: Boolean = false) {
     val shape = RoundedCornerShape((size.value * 0.28f).dp)
     Box(
         modifier = Modifier
             .size(size)
             .clip(shape)
-            .background(Brush.linearGradient(listOf(Color(0xFFD95B3B), Color(0xFF8A2B36)))),
+            .background(Brush.linearGradient(listOf(Color(0xFFFF8F24), Color(0xFFE63D70))))
+            .border(
+                width = if (active) 1.6.dp else 0.8.dp,
+                color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                shape = shape
+            )
+            .alpha(if (active) 1f else 0.90f),
         contentAlignment = Alignment.Center
     ) {
         Icon(
@@ -201,12 +288,18 @@ fun BrandLogoLongVideos(size: Dp = 20.dp) {
 }
 
 @Composable
-fun BrandLogoOnlyFans(size: Dp = 20.dp) {
+fun BrandLogoOnlyFans(size: Dp = 26.dp, active: Boolean = false) {
     Box(
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(Color(0xFF00AFF0), Color(0xFF0084C7)))),
+            .background(Brush.linearGradient(listOf(Color(0xFF00B8F5), Color(0xFF0085D6))))
+            .border(
+                width = if (active) 1.6.dp else 0.8.dp,
+                color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                shape = CircleShape
+            )
+            .alpha(if (active) 1f else 0.90f),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -223,14 +316,14 @@ fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "shimmer")
     val alpha = transition.animateFloat(
         initialValue = 0.08f,
-        targetValue = 0.22f,
+        targetValue = 0.20f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 900, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "shimmerAlpha"
     )
-    Box(modifier = modifier.background(Color.White.copy(alpha = alpha.value)))
+    Box(modifier = modifier.background(Color(0xFF2B101C).copy(alpha = 0.6f + alpha.value)))
 }
 
 @Serializable

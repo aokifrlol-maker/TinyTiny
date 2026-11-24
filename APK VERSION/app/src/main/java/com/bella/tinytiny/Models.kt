@@ -1,8 +1,20 @@
 package com.bella.tinytiny
 
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonNames
 import java.net.URI
+import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 object Config {
     const val userAgent =
@@ -11,6 +23,34 @@ object Config {
     const val onlyHavenBase = "https://cum.st/api/v1"
     const val origin = "https://gooned.app"
     const val referer = "https://gooned.app/"
+}
+
+/**
+ * Lossy list serializer matching iOS `Lossy<T>` — drops any single malformed item
+ * instead of failing the entire feed/search response.
+ */
+class LossyListSerializer<T>(private val elementSerializer: KSerializer<T>) : KSerializer<List<T>> {
+    private val listSerializer = ListSerializer(elementSerializer)
+    override val descriptor: SerialDescriptor = listSerializer.descriptor
+
+    override fun serialize(encoder: Encoder, value: List<T>) {
+        listSerializer.serialize(encoder, value)
+    }
+
+    override fun deserialize(decoder: Decoder): List<T> {
+        val jsonDecoder = decoder as? JsonDecoder ?: return listSerializer.deserialize(decoder)
+        val el = jsonDecoder.decodeJsonElement()
+        val arr = el as? JsonArray ?: return emptyList()
+        val out = ArrayList<T>(arr.size)
+        for (item in arr) {
+            try {
+                out.add(jsonDecoder.json.decodeFromJsonElement(elementSerializer, item))
+            } catch (_: Throwable) {
+                // Skip malformed element
+            }
+        }
+        return out
+    }
 }
 
 @Serializable
@@ -34,6 +74,9 @@ data class Gif(
     var permalink: String? = null,
     var createdUtc: String? = null
 ) {
+    override fun equals(other: Any?): Boolean = (other as? Gif)?.id == id
+    override fun hashCode(): Int = id.hashCode()
+
     val isXPost: Boolean
         get() = id.startsWith("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
 
@@ -44,7 +87,7 @@ data class Gif(
         get() = id.startsWith("r34") || (subreddit?.lowercase()?.contains("rule34") == true) || (sourceUrl?.contains("rule34.xxx") == true)
 
     val isOnlyFansPost: Boolean
-        get() = id.startsWith("of_") || (sourceUrl?.contains("cum.st") == true) || (permalink?.contains("cum.st") == true)
+        get() = id.startsWith("of_") || id.startsWith("ofdm_") || (sourceUrl?.contains("cum.st") == true) || (permalink?.contains("cum.st") == true)
 
     val isLongVideoPost: Boolean
         get() = id.startsWith("lv_")
@@ -64,12 +107,14 @@ data class Gif(
     val onlyFansCreatorId: String?
         get() {
             if (!isOnlyFansPost) return null
+            MediaMetaRegistry.creatorId(id)?.let { return it }
             val candidate = permalink ?: sourceUrl ?: return null
             val parts = try { URI(candidate).path?.split("/")?.filter { it.isNotEmpty() } ?: emptyList() } catch (_: Throwable) { emptyList() }
             val idx = parts.indexOf("onlyfans")
             if (idx >= 0 && idx + 1 < parts.size) {
                 val cid = parts[idx + 1]
-                if (cid.isNotEmpty() && cid != "post") return cid
+                if (cid.isNotEmpty() && cid != "post" && cid != "user") return cid
+                if (cid == "user" && idx + 2 < parts.size) return parts[idx + 2]
             }
             return null
         }
@@ -92,6 +137,11 @@ data class Gif(
         }
 
     val aspect: Double get() = knownAspect ?: 1.0
+
+    val webURL: String
+        get() = permalink?.takeIf { it.startsWith("http") }
+            ?: sourceUrl?.takeIf { it.startsWith("http") }
+            ?: "https://gooned.app"
 
     val canonicalDedupeKey: String
         get() {
@@ -138,11 +188,11 @@ data class Gif(
                 .lowercase()
                 .replace(Regex("https?://\\S+"), "")
                 .replace(Regex("@[A-Za-z0-9_]+"), "")
-                .split(Regex("[^a-z0-9]+"))
+                .split(Regex("[^\\p{L}\\p{N}]+"))
                 .filter { it.isNotEmpty() }
                 .joinToString(" ")
             if (cleanTitle.length < 14) return null
-            val durBucket = duration?.let { kotlin.math.round(it * 2.0).toInt() } ?: -1
+            val durBucket = duration?.let { (it * 2.0).roundToInt() } ?: -1
             return "sim_${durBucket}_${cleanTitle.take(80)}"
         }
 
@@ -173,44 +223,59 @@ data class Gif(
         return urls
     }
 
-    val imageURL: String?
+    val imageFallbackURLs: List<String>
         get() {
+            val out = mutableListOf<String>()
             OfflineManager.localMediaURL(id)?.let { local ->
                 val ext = local.substringAfterLast('.', "").lowercase()
-                if (ext in setOf("jpg", "jpeg", "png", "webp", "gif")) return local
+                if (ext in setOf("jpg", "jpeg", "png", "webp", "gif")) out.add(local)
             }
-            for (raw in listOf(mediaUrl, muxedUrlHd, muxedUrl, posterUrl, thumbnailUrl)) {
-                if (!raw.isNullOrEmpty() && isRenderableImageURLString(raw)) return raw
+            for (raw in listOf(mediaUrl, posterUrl, thumbnailUrl)) {
+                if (!raw.isNullOrEmpty() && isRenderableImageURLString(raw) && !out.contains(raw)) {
+                    out.add(raw)
+                }
             }
-            return null
+            return out
         }
 
-    val imageFallbackURLs: List<String>
-        get() = listOfNotNull(mediaUrl, posterUrl, thumbnailUrl).distinct().filter { isRenderableImageURLString(it) }
-
-    val posterURL: String?
-        get() = listOfNotNull(posterUrl, thumbnailUrl, if (mediaType == "image") mediaUrl else null)
-            .firstOrNull { isRenderableImageURLString(it) }
-
-    val thumbURL: String?
-        get() = listOfNotNull(thumbnailUrl, posterUrl, if (mediaType == "image") mediaUrl else null)
-            .firstOrNull { isRenderableImageURLString(it) }
+    val imageURL: String?
+        get() = imageFallbackURLs.firstOrNull()
 
     val posterFallbackURLs: List<String>
-        get() = listOfNotNull(posterUrl, thumbnailUrl, mediaUrl).distinct().filter { isRenderableImageURLString(it) }
+        get() {
+            val out = mutableListOf<String>()
+            OfflineManager.localThumbURL(id)?.let { out.add(it) }
+            for (raw in listOf(posterUrl, thumbnailUrl, mediaUrl)) {
+                if (!raw.isNullOrEmpty() && isRenderableImageURLString(raw) && !out.contains(raw)) {
+                    out.add(raw)
+                }
+            }
+            return out
+        }
+
+    val posterURL: String?
+        get() = posterFallbackURLs.firstOrNull()
+
+    // Exact iOS priority: localThumbURL -> posterUrl -> thumbnailUrl -> mediaUrl (prevents blurred Reddit 140px thumbnails)
+    val thumbURL: String?
+        get() = posterFallbackURLs.firstOrNull()
 
     val relativeTime: String
         get() {
             val raw = createdUtc ?: return ""
             return try {
-                val instant = java.time.Instant.parse(raw)
-                val sec = kotlin.math.max(0L, (System.currentTimeMillis() - instant.toEpochMilli()) / 1000L)
+                val epochMs = try {
+                    Instant.parse(raw).toEpochMilli()
+                } catch (_: Throwable) {
+                    OffsetDateTime.parse(raw).toInstant().toEpochMilli()
+                }
+                val sec = kotlin.math.max(0L, (System.currentTimeMillis() - epochMs) / 1000L)
                 when {
-                    sec < 60 -> "${sec}s"
-                    sec < 3600 -> "${sec / 60}m"
+                    sec < 3600 -> "${kotlin.math.max(1L, sec / 60)}m"
                     sec < 86400 -> "${sec / 3600}h"
                     sec < 2592000 -> "${sec / 86400}d"
-                    else -> "${sec / 2592000}mo"
+                    sec < 31_536_000 -> "${sec / 2592000}mo"
+                    else -> "${sec / 31_536_000}y"
                 }
             } catch (_: Throwable) {
                 ""
@@ -220,7 +285,8 @@ data class Gif(
     companion object {
         fun isPlayableVideoURLString(s: String): Boolean {
             val lower = s.lowercase()
-            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif")) {
+            val pathPart = lower.substringBefore('?')
+            if (pathPart.endsWith(".jpg") || pathPart.endsWith(".jpeg") || pathPart.endsWith(".png") || pathPart.endsWith(".webp") || pathPart.endsWith(".gif")) {
                 return false
             }
             if (lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/")) return false
@@ -239,12 +305,12 @@ data class Gif(
         }
 
         fun shortCount(n: Int?): String {
-            val v = n ?: return ""
+            val v = n ?: return "0"
             return when {
                 v >= 1_000_000 -> String.format("%.1fM", v / 1_000_000.0)
                 v >= 1_000 -> String.format("%.1fK", v / 1_000.0)
                 v > 0 -> "$v"
-                else -> ""
+                else -> "0"
             }
         }
 
@@ -269,7 +335,9 @@ data class Gif(
                     .replace("-mobile", "").replace("-silent", "").replace("-large", "")
                 if (base.isNotEmpty()) return "redgifs_$base"
             }
-            val noExt = cleanPath.substringBeforeLast('.').lowercase()
+            val lastSlash = cleanPath.lastIndexOf('/')
+            val lastDot = cleanPath.lastIndexOf('.')
+            val noExt = if (lastDot > lastSlash) cleanPath.substring(0, lastDot).lowercase() else cleanPath.lowercase()
             return "media_$lowerHost/$noExt"
         }
     }
@@ -277,23 +345,28 @@ data class Gif(
 
 @Serializable
 data class GoonedFeedResponse(
+    @Serializable(with = LossyListSerializer::class)
     val posts: List<Gif> = emptyList(),
     val after: String? = null
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class GoonedSearchItem(
     val name: String,
     val title: String? = null,
     val subscribers: Int? = null,
-    val icon: String? = null
+    @JsonNames("icon")
+    val iconUrl: String? = null
 ) {
-    val id: String get() = name
+    val id: String get() = name.lowercase()
 }
 
 @Serializable
 data class GoonedSearchResponse(
+    @Serializable(with = LossyListSerializer::class)
     val subreddits: List<GoonedSearchItem> = emptyList(),
+    @Serializable(with = LossyListSerializer::class)
     val users: List<GoonedSearchItem> = emptyList()
 )
 
@@ -321,40 +394,166 @@ object MediaMetaRegistry {
     private val extraVideoURLsById = ConcurrentHashMap<String, List<String>>()
     private val albumItemsById = ConcurrentHashMap<String, List<AlbumMediaItem>>()
     private val creatorGenderById = ConcurrentHashMap<String, String>()
+    private val creatorGenderByKey = ConcurrentHashMap<String, String>()
     private val creatorNameById = ConcurrentHashMap<String, String>()
+    private val creatorIdByPost = ConcurrentHashMap<String, String>()
+    private val creatorClusterTags = ConcurrentHashMap<String, List<String>>()
+    private val viewerFollowsByKey = ConcurrentHashMap<String, Boolean>()
+    private val fingerprintsById = ConcurrentHashMap<String, String>()
 
+    // Full 61-tag iOS stopTags parity
     private val stopTags = setOf(
         "onlyfans", "of", "rule34", "r34", "reddit", "x", "twitter", "ig", "instagram",
-        "nsfw", "porn", "xxx", "18", "adult", "sex", "video", "gif", "image", "post", "fyp", "foryou"
+        "nsfw", "porn", "xxx", "18", "18+", "18plus", "adult", "sex", "video", "videos",
+        "gif", "gifs", "image", "post", "fyp", "foryou", "foryoupage", "viral", "trending",
+        "new", "free", "ppv", "customs", "linkinbio", "dm", "dms", "announcements", "vip",
+        "promo", "subscribe", "sub", "like", "repost", "rt", "hd", "4k", "1080p", "720p",
+        "mp4", "explore", "reels", "reel", "shorts", "gooning", "gooned",
+        "eporner", "pornhub", "xhamster", "spankbang", "xvideos", "tiktok", "tiktok_nsfw",
+        "snapchat", "snapchat_nsfw"
     )
 
     fun isStopTag(tag: String): Boolean {
-        val clean = tag.trim().lowercase().removePrefix("#")
+        val clean = tag.trim().lowercase().replace("#", "")
         return clean.length < 2 || clean in stopTags
+    }
+
+    private fun cleanTagList(raw: List<String>): List<String> =
+        raw.map { it.trim().lowercase().replace("#", "") }
+            .filter { it.length >= 2 && it !in stopTags }
+            .distinct()
+
+    private fun evictIfNeeded() {
+        if (tagsById.size > 4000) {
+            val drop = tagsById.keys.take(1000)
+            for (k in drop) {
+                tagsById.remove(k)
+                extraVideoURLsById.remove(k)
+                albumItemsById.remove(k)
+                fingerprintsById.remove(k)
+                creatorGenderById.remove(k)
+                creatorNameById.remove(k)
+                creatorIdByPost.remove(k)
+            }
+        }
     }
 
     fun register(
         postId: String,
         tags: List<String> = emptyList(),
         creatorName: String? = null,
+        creatorId: String? = null,
         gender: String? = null,
         extraVideoURLs: List<String> = emptyList(),
-        albumItems: List<AlbumMediaItem> = emptyList()
+        albumItems: List<AlbumMediaItem> = emptyList(),
+        fingerprint: String? = null,
+        followedByViewer: Boolean? = null
     ) {
-        if (tags.isNotEmpty()) tagsById[postId] = tags
-        if (!creatorName.isNullOrEmpty()) creatorNameById[postId] = creatorName
-        if (!gender.isNullOrEmpty()) creatorGenderById[postId] = gender.lowercase()
-        if (extraVideoURLs.isNotEmpty()) extraVideoURLsById[postId] = extraVideoURLs
+        evictIfNeeded()
+        val cleaned = cleanTagList(tags)
+        if (cleaned.isNotEmpty()) {
+            val merged = ((tagsById[postId] ?: emptyList()) + cleaned).distinct().take(24)
+            tagsById[postId] = merged
+        }
+        val cleanAuthor = creatorName?.trim()?.lowercase()?.replace("@", "")?.takeIf { it.isNotEmpty() }
+        if (cleanAuthor != null) {
+            creatorNameById[postId] = creatorName.trim()
+            if (cleaned.isNotEmpty()) {
+                val prev = creatorClusterTags["n:$cleanAuthor"] ?: emptyList()
+                creatorClusterTags["n:$cleanAuthor"] = (prev + cleaned).distinct().take(24)
+            }
+            if (followedByViewer != null) viewerFollowsByKey["n:$cleanAuthor"] = followedByViewer
+        }
+        val cleanCid = creatorId?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanCid != null) {
+            creatorIdByPost[postId] = cleanCid
+            if (cleaned.isNotEmpty()) {
+                val prev = creatorClusterTags["id:$cleanCid"] ?: emptyList()
+                creatorClusterTags["id:$cleanCid"] = (prev + cleaned).distinct().take(24)
+            }
+        }
+        val cleanGender = gender?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        if (cleanGender != null) {
+            creatorGenderById[postId] = cleanGender
+            if (cleanCid != null) creatorGenderByKey["id:$cleanCid"] = cleanGender
+            if (cleanAuthor != null) creatorGenderByKey["n:$cleanAuthor"] = cleanGender
+        }
+        if (extraVideoURLs.isNotEmpty()) {
+            val prev = extraVideoURLsById[postId] ?: emptyList()
+            extraVideoURLsById[postId] = (prev + extraVideoURLs).distinct()
+        }
         if (albumItems.isNotEmpty()) albumItemsById[postId] = albumItems
+        if (!fingerprint.isNullOrEmpty()) fingerprintsById[postId] = fingerprint
+        if (followedByViewer != null) viewerFollowsByKey["p:$postId"] = followedByViewer
     }
 
-    fun tags(forId: String): List<String> = tagsById[forId] ?: emptyList()
+    fun registerAlbumItems(postId: String, items: List<AlbumMediaItem>) {
+        if (items.isNotEmpty()) albumItemsById[postId] = items
+    }
+
+    fun registerCreatorGender(
+        creatorId: String? = null,
+        creatorName: String? = null,
+        gender: String? = null,
+        tags: List<String> = emptyList()
+    ) {
+        val cleanGender = gender?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        val cleanedTags = cleanTagList(tags)
+        val cid = creatorId?.trim()?.takeIf { it.isNotEmpty() }
+        val cname = creatorName?.trim()?.lowercase()?.replace("@", "")?.takeIf { it.isNotEmpty() }
+        if (cid != null) {
+            if (cleanGender != null) creatorGenderByKey["id:$cid"] = cleanGender
+            if (cleanedTags.isNotEmpty()) {
+                val prev = creatorClusterTags["id:$cid"] ?: emptyList()
+                creatorClusterTags["id:$cid"] = (prev + cleanedTags).distinct().take(24)
+            }
+        }
+        if (cname != null) {
+            if (cleanGender != null) creatorGenderByKey["n:$cname"] = cleanGender
+            if (cleanedTags.isNotEmpty()) {
+                val prev = creatorClusterTags["n:$cname"] ?: emptyList()
+                creatorClusterTags["n:$cname"] = (prev + cleanedTags).distinct().take(24)
+            }
+        }
+    }
+
+    fun tags(forId: String, author: String? = null): List<String> {
+        val out = mutableListOf<String>()
+        tagsById[forId]?.let { out.addAll(it) }
+        creatorIdByPost[forId]?.let { cid -> creatorClusterTags["id:$cid"]?.let { out.addAll(it) } }
+        val cleanAuthor = (author ?: creatorNameById[forId])?.trim()?.lowercase()?.replace("@", "")
+        if (!cleanAuthor.isNullOrEmpty()) {
+            creatorClusterTags["n:$cleanAuthor"]?.let { out.addAll(it) }
+        }
+        return out.distinct()
+    }
+
     fun extraVideoURLs(forId: String): List<String> = extraVideoURLsById[forId] ?: emptyList()
     fun albumItems(forId: String): List<AlbumMediaItem> = albumItemsById[forId] ?: emptyList()
-    fun creatorGender(forId: String): String? = creatorGenderById[forId]
+    fun creatorId(forId: String): String? = creatorIdByPost[forId]
     fun creatorName(forId: String): String? = creatorNameById[forId]
 
+    fun creatorGender(forId: String, author: String? = null): String? {
+        creatorGenderById[forId]?.let { return it }
+        creatorIdByPost[forId]?.let { cid -> creatorGenderByKey["id:$cid"]?.let { return it } }
+        val cleanAuthor = (author ?: creatorNameById[forId])?.trim()?.lowercase()?.replace("@", "")
+        if (!cleanAuthor.isNullOrEmpty()) {
+            creatorGenderByKey["n:$cleanAuthor"]?.let { return it }
+        }
+        return null
+    }
+
+    fun isFollowedByViewer(postId: String, author: String? = null): Boolean? {
+        viewerFollowsByKey["p:$postId"]?.let { return it }
+        val cleanAuthor = (author ?: creatorNameById[postId])?.trim()?.lowercase()?.replace("@", "")
+        if (!cleanAuthor.isNullOrEmpty()) {
+            viewerFollowsByKey["n:$cleanAuthor"]?.let { return it }
+        }
+        return null
+    }
+
     fun canonicalMediaFingerprint(gif: Gif): String? {
+        fingerprintsById[gif.id]?.let { return it }
         val firstAlbum = albumItemsById[gif.id]?.firstOrNull()?.url ?: return null
         return try {
             val u = URI(firstAlbum)
@@ -368,22 +567,27 @@ object MediaMetaRegistry {
 object MediaHeaders {
     fun headers(urlString: String, includeReferer: Boolean = true): Map<String, String> {
         val h = mutableMapOf("User-Agent" to Config.userAgent)
-        val lower = urlString.lowercase()
-        if (includeReferer) {
-            when {
-                lower.contains("cum.st") -> h["Referer"] = "https://cum.st/"
-                lower.contains("erome.com") -> h["Referer"] = "https://www.erome.com/"
-                lower.contains("eporner.com") -> h["Referer"] = "https://www.eporner.com/"
-                lower.contains("xvideos") -> h["Referer"] = "https://www.xvideos.com/"
-                lower.contains("phncdn") || lower.contains("pornhub") -> h["Referer"] = "https://www.pornhub.com/"
-                lower.contains("xhcdn") || lower.contains("xhamster") -> h["Referer"] = "https://xhamster.com/"
-                lower.contains("sb-cd.com") || lower.contains("spankbang") -> h["Referer"] = "https://spankbang.com/"
-                lower.contains("rule34.xxx") -> h["Referer"] = "https://rule34.xxx/"
-                lower.contains("twimg.com") -> h["Referer"] = "https://x.com/"
-                lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") -> h["Referer"] = "https://www.instagram.com/"
-                lower.contains("redgifs.com") -> h["Referer"] = "https://www.redgifs.com/"
-            }
+        if (!includeReferer) return h
+        val host = try { URI(urlString).host?.lowercase() } catch (_: Throwable) { null } ?: urlString.lowercase()
+        val referer = when {
+            host.contains("cum.st") -> "https://cum.st/"
+            host.contains("erome.com") -> "https://www.erome.com/"
+            host.contains("yande.re") -> "https://yande.re/"
+            host.contains("hypnohub") -> "https://hypnohub.net/"
+            host.contains("realbooru") -> "https://realbooru.com/"
+            host.contains("gelbooru") -> "https://gelbooru.com/"
+            host.contains("rule34") -> "https://rule34.xxx/"
+            host.contains("twimg.com") || host.contains("x.com") || host.contains("twitter.com") -> "https://x.com/"
+            host.contains("cdninstagram.com") || host.contains("fbcdn.net") || host.contains("instagram.com") -> "https://www.instagram.com/"
+            host.contains("eporner") -> "https://www.eporner.com/"
+            host.contains("xvideos") -> "https://www.xvideos.com/"
+            host.contains("phncdn") || host.contains("pornhub") -> "https://www.pornhub.com/"
+            host.contains("xhcdn") || host.contains("xhamster") -> "https://xhamster.com/"
+            host.contains("sb-cd") || host.contains("spankbang") -> "https://spankbang.com/"
+            host.contains("redgifs.com") -> "https://www.redgifs.com/"
+            else -> Config.referer
         }
+        h["Referer"] = referer
         return h
     }
 }
