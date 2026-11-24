@@ -26,25 +26,47 @@ object OfflineManager {
     val lastError = MutableStateFlow<String?>(null)
     val diskUsageText = MutableStateFlow("0 MB")
 
-    private val vaultDir: File
-        get() = File(TinyTinyApplication.instance.filesDir, "OfflineVault").apply { mkdirs() }
+    private val vaultDir: File by lazy {
+        File(TinyTinyApplication.instance.filesDir, "OfflineVault").apply { mkdirs() }
+    }
+
+    private val stemToMediaPath = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val stemToThumbPath = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var cacheIndexed = false
+
+    private fun ensureIndex() {
+        if (cacheIndexed) return
+        synchronized(this) {
+            if (cacheIndexed) return
+            vaultDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.length() > 0) {
+                    val name = f.name
+                    if (name.endsWith("_thumb.jpg")) {
+                        stemToThumbPath[name.removeSuffix("_thumb.jpg")] = "file://${f.absolutePath}"
+                    } else {
+                        val stem = name.substringBeforeLast('.')
+                        stemToMediaPath[stem] = "file://${f.absolutePath}"
+                    }
+                }
+            }
+            cacheIndexed = true
+        }
+    }
 
     private fun safeFileStem(id: String): String =
         id.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifEmpty { "media" }
 
     fun localMediaURL(id: String): String? {
+        ensureIndex()
         val stem = safeFileStem(id)
-        val dir = vaultDir
-        for (ext in listOf("mp4", "mov", "m4v", "webm", "gif", "jpg", "jpeg", "png", "webp")) {
-            val f = File(dir, "$stem.$ext")
-            if (f.exists() && f.length() > 0) return "file://${f.absolutePath}"
-        }
+        stemToMediaPath[stem]?.let { return it }
         return null
     }
 
     fun localThumbURL(id: String): String? {
-        val f = File(vaultDir, "${safeFileStem(id)}_thumb.jpg")
-        return if (f.exists() && f.length() > 0) "file://${f.absolutePath}" else null
+        ensureIndex()
+        val stem = safeFileStem(id)
+        return stemToThumbPath[stem]
     }
 
     fun isDownloaded(gif: Gif): Boolean = localMediaURL(gif.id) != null
@@ -59,10 +81,15 @@ object OfflineManager {
     }
 
     private fun setProgress(id: String, value: Double?) {
-        downloadProgress.value = if (value == null) {
-            downloadProgress.value - id
+        if (value == null) {
+            downloadProgress.value = downloadProgress.value - id
         } else {
-            downloadProgress.value + (id to value.coerceIn(0.0, 1.0))
+            val clamped = value.coerceIn(0.0, 1.0)
+            val prev = downloadProgress.value[id]
+            // Throttle progress updates to >=3% steps to prevent recomposition storms
+            if (prev == null || kotlin.math.abs(clamped - prev) >= 0.03 || clamped >= 0.99) {
+                downloadProgress.value = downloadProgress.value + (id to clamped)
+            }
         }
     }
 
@@ -108,8 +135,14 @@ object OfflineManager {
                 }
             }
             if (savedFile != null) {
+                val stem = safeFileStem(gif.id)
+                stemToMediaPath[stem] = "file://${savedFile.absolutePath}"
                 setProgress(gif.id, 0.90)
                 saveOfflineThumbnail(gif, savedFile)
+                val thumbFile = File(vaultDir, "${stem}_thumb.jpg")
+                if (thumbFile.exists() && thumbFile.length() > 0) {
+                    stemToThumbPath[stem] = "file://${thumbFile.absolutePath}"
+                }
                 setProgress(gif.id, 1.0)
                 // Keep original remote URLs intact in UserStore so cloud backup stays valid on iOS!
                 withContext(Dispatchers.Main) {
@@ -248,19 +281,27 @@ object OfflineManager {
 
     fun removeDownload(gif: Gif) {
         val stem = safeFileStem(gif.id)
-        val dir = vaultDir
-        for (ext in listOf("mp4", "mov", "m4v", "webm", "gif", "jpg", "jpeg", "png", "webp")) {
-            File(dir, "$stem.$ext").delete()
-        }
-        File(dir, "${stem}_thumb.jpg").delete()
+        stemToMediaPath.remove(stem)
+        stemToThumbPath.remove(stem)
         UserStore.shared.removeDownloaded(gif.id)
-        refreshDiskUsage()
+        scope.launch {
+            val dir = vaultDir
+            for (ext in listOf("mp4", "mov", "m4v", "webm", "gif", "jpg", "jpeg", "png", "webp")) {
+                File(dir, "$stem.$ext").delete()
+            }
+            File(dir, "${stem}_thumb.jpg").delete()
+            refreshDiskUsage()
+        }
     }
 
     fun clearAllDownloads() {
-        vaultDir.listFiles()?.forEach { it.delete() }
+        stemToMediaPath.clear()
+        stemToThumbPath.clear()
         UserStore.shared.clearAllDownloaded()
-        refreshDiskUsage()
+        scope.launch {
+            vaultDir.listFiles()?.forEach { it.delete() }
+            refreshDiskUsage()
+        }
     }
 
     fun refreshDiskUsage() {

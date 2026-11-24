@@ -182,6 +182,7 @@ final class FeedModel: ObservableObject {
     private var afterCursor: String? = nil
     private var xMixAfterCursor: String? = nil
     private var igMixAfterCursor: String? = nil
+    private var ofMixAfterCursor: String? = nil
     private var ofMixOffset: Int = 0
     private var hasMore = true
     private var ids = Set<String>()
@@ -885,6 +886,7 @@ final class FeedModel: ObservableObject {
 
         let curX = self.xMixAfterCursor
         let curIG = self.igMixAfterCursor
+        let curOFCursor = self.ofMixAfterCursor
         let curOF = self.ofMixOffset
 
         let algo = store.data.algorithm
@@ -931,7 +933,7 @@ final class FeedModel: ObservableObject {
         }()
         async let ofTask: GoonedFeedResponse? = wantOF
             ? await OnlyFansAPI.shared.forYou(
-                after: curOF == 0 ? nil : "\(curOF * 24)",
+                after: curOFCursor,
                 seedCreatorIds: ofSeeds,
                 tasteTags: activeTasteTags
             )
@@ -947,7 +949,8 @@ final class FeedModel: ObservableObject {
 
         if let xa = xResp?.after { self.xMixAfterCursor = xa }
         if let ia = igResp?.after { self.igMixAfterCursor = ia }
-        if ofResp != nil { self.ofMixOffset += 1 }
+        if let ofa = ofResp?.after { self.ofMixAfterCursor = ofa }
+        self.ofMixOffset += 1
 
         func prep(_ posts: [Gif]?) -> [Gif] {
             guard let posts else { return [] }

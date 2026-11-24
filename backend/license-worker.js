@@ -10,16 +10,35 @@
 
 const DAY_SEC = 86400;
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-License-Key, X-Device-Id, X-File-Name, X-Direct-Secret, X-Mime-Type, X-Nonce-B64",
+};
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-License-Key, X-Device-Id, X-File-Name",
+      ...CORS_HEADERS,
     },
   });
+}
+
+function safeJsonParse(raw, fallback = null) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function formatOsLabel(raw) {
+  const s = String(raw || "?").trim();
+  if (!s || s === "?") return "iOS ?";
+  return s.toLowerCase().startsWith("android") ? s : `iOS ${s}`;
 }
 
 function nowSec() {
@@ -28,7 +47,8 @@ function nowSec() {
 
 function parseDuration(raw) {
   const token = String(raw || "").trim().toLowerCase();
-  if (!token || token === "lifetime" || token === "perm" || token === "forever") {
+  if (!token) return null;
+  if (token === "lifetime" || token === "perm" || token === "forever") {
     return { lifetime: true, seconds: null, label: "Lifetime" };
   }
   const match = token.match(/^(\d+)(m|h|d|w|mo|y)$/);
@@ -88,20 +108,44 @@ async function getLicense(env, rawKey) {
   const key = String(rawKey || "").trim().toUpperCase();
   if (!key) return null;
   const raw = await env.LICENSES.get(`lic:${key}`);
-  return raw ? JSON.parse(raw) : null;
+  return safeJsonParse(raw, null);
+}
+
+function buildLicenseMetadata(rec) {
+  const devs = rec.devices && typeof rec.devices === "object" ? Object.values(rec.devices) : [];
+  const firstDev = devs[0] || null;
+  return {
+    key: rec.key,
+    admin: Boolean(rec.admin),
+    revoked: Boolean(rec.revoked),
+    lifetime: Boolean(rec.lifetime),
+    activatedAt: rec.activatedAt || null,
+    expiresAt: rec.expiresAt || null,
+    durationLabel: String(rec.durationLabel || "").slice(0, 32),
+    maxDevices: rec.maxDevices || 1,
+    deviceIds: Array.isArray(rec.deviceIds) ? rec.deviceIds.slice(0, 10) : [],
+    createdAt: rec.createdAt || 0,
+    note: String(rec.note || "").slice(0, 80),
+    devices: firstDev ? { _0: { model: firstDev.model || "", ios: firstDev.ios || "", app: firstDev.app || "", lastSeenAt: firstDev.lastSeenAt || 0 } } : {},
+  };
 }
 
 async function saveLicense(env, rec) {
-  await env.LICENSES.put(`lic:${rec.key}`, JSON.stringify(rec));
+  await env.LICENSES.put(`lic:${rec.key}`, JSON.stringify(rec), {
+    metadata: buildLicenseMetadata(rec),
+  });
 }
 
-function validateRecordAccess(rec, deviceId) {
+function validateRecordAccess(rec, deviceId, opts = {}) {
   if (!rec) return { ok: false, error: "License key not found." };
   if (rec.revoked) return { ok: false, error: "This license key has been revoked." };
   if (!rec.lifetime && rec.activatedAt && rec.expiresAt && nowSec() >= rec.expiresAt) {
     return { ok: false, error: "License key has expired." };
   }
   const dev = String(deviceId || "").trim();
+  if (opts.requireDeviceId && !dev) {
+    return { ok: false, error: "Missing deviceId." };
+  }
   const devices = Array.isArray(rec.deviceIds) ? rec.deviceIds : [];
   if (dev && !devices.includes(dev)) {
     const cap = Math.max(1, rec.maxDevices || 1);
@@ -117,9 +161,10 @@ function validateRecordAccess(rec, deviceId) {
 
 async function sendTelegram(env, chatId, text, replyMarkup = null) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
+  const safeText = String(text || "").length > 3950 ? String(text).slice(0, 3940) + "\n…(truncated)" : String(text || "");
   const payload = {
     chat_id: chatId,
-    text,
+    text: safeText,
     parse_mode: "HTML",
     disable_web_page_preview: true,
   };
@@ -128,15 +173,37 @@ async function sendTelegram(env, chatId, text, replyMarkup = null) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }).catch(() => null);
+}
+
+async function sendTelegramDocumentUrl(env, chatId, docUrl, caption = "", replyMarkup = null) {
+  if (!env.TELEGRAM_BOT_TOKEN) return false;
+  const payload = {
+    chat_id: chatId,
+    document: docUrl,
+    caption: String(caption || "").slice(0, 1000),
+    parse_mode: "HTML",
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
+  const safeText = String(text || "").length > 3950 ? String(text).slice(0, 3940) + "\n…(truncated)" : String(text || "");
   const payload = {
     chat_id: chatId,
     message_id: messageId,
-    text,
+    text: safeText,
     parse_mode: "HTML",
     disable_web_page_preview: true,
   };
@@ -145,7 +212,7 @@ async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = n
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }).catch(() => null);
 }
 
 async function answerCallbackQuery(env, callbackQueryId, text = "") {
@@ -172,24 +239,30 @@ async function saveRemoteConfig(env, cfg) {
 }
 
 async function listAllLicenses(env) {
-  const keys = [];
+  const entries = [];
   let cursor = undefined;
   do {
     const res = await env.LICENSES.list({ prefix: "lic:", cursor, limit: 1000 });
-    for (const k of res.keys || []) keys.push(k.name);
+    for (const k of res.keys || []) entries.push(k);
     cursor = res.list_complete ? undefined : res.cursor;
   } while (cursor);
 
   const records = [];
-  for (let i = 0; i < keys.length; i += 20) {
-    const chunk = keys.slice(i, i + 20);
+  const missingMetaKeys = [];
+  for (const entry of entries) {
+    if (entry.metadata && entry.metadata.key) {
+      records.push(entry.metadata);
+    } else {
+      missingMetaKeys.push(entry.name);
+    }
+  }
+  // Fallback only for older keys saved before KV metadata optimization (capped to stay under subrequest limit)
+  for (let i = 0; i < Math.min(missingMetaKeys.length, 40); i += 20) {
+    const chunk = missingMetaKeys.slice(i, i + 20);
     const vals = await Promise.all(chunk.map((k) => env.LICENSES.get(k)));
     for (const raw of vals) {
-      if (raw) {
-        try {
-          records.push(JSON.parse(raw));
-        } catch {}
-      }
+      const rec = safeJsonParse(raw, null);
+      if (rec) records.push(rec);
     }
   }
   records.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -206,12 +279,13 @@ function recordDeviceTelemetry(rec, deviceId, deviceInfo) {
   const ios = String(deviceInfo.ios || prev.ios || "?").slice(0, 20);
   const app = String(deviceInfo.app || prev.app || "1.0").slice(0, 20);
   const now = nowSec();
+  // Debounce telemetry KV writes to 12h unless device/OS/app version changed (protects free-tier KV write quota)
   const changed =
     !prev.lastSeenAt ||
     prev.model !== model ||
     prev.ios !== ios ||
     prev.app !== app ||
-    now - prev.lastSeenAt >= 3600;
+    now - prev.lastSeenAt >= 12 * 3600;
   rec.devices[dev] = {
     model,
     modelId,
@@ -252,27 +326,36 @@ function formatKeyDetails(rec) {
 }
 
 function keyActionKeyboard(rec) {
+  const noteRow = rec.note
+    ? [
+        { text: "📝 Set Note", callback_data: `k:note:${rec.key}` },
+        { text: "🗑 Clear Note", callback_data: `k:clrnote:${rec.key}` },
+        { text: "🔄 Refresh", callback_data: `k:ref:${rec.key}` },
+      ]
+    : [
+        { text: "📝 Set Note", callback_data: `k:note:${rec.key}` },
+        { text: "🔄 Refresh", callback_data: `k:ref:${rec.key}` },
+      ];
   return {
     inline_keyboard: [
       [
         { text: "+7d", callback_data: `k:ext7:${rec.key}` },
         { text: "+30d", callback_data: `k:ext30:${rec.key}` },
         { text: "Lifetime", callback_data: `k:life:${rec.key}` },
+        { text: "⏱ Custom", callback_data: `k:extc:${rec.key}` },
       ],
       [
-        { text: "+1 Device", callback_data: `k:dev1:${rec.key}` },
-        { text: "+5 Devices", callback_data: `k:dev5:${rec.key}` },
+        { text: "-1 Dev", callback_data: `k:devm1:${rec.key}` },
+        { text: "+1 Dev", callback_data: `k:dev1:${rec.key}` },
+        { text: "+5 Dev", callback_data: `k:dev5:${rec.key}` },
       ],
       [
-        { text: "Unbind Devices", callback_data: `k:unbmenu:${rec.key}` },
+        { text: "📱 Unbind Devices", callback_data: `k:unbmenu:${rec.key}` },
         rec.revoked
-          ? { text: "Unrevoke", callback_data: `k:unrev:${rec.key}` }
-          : { text: "Revoke", callback_data: `k:rev:${rec.key}` },
+          ? { text: "✅ Unrevoke", callback_data: `k:unrev:${rec.key}` }
+          : { text: "🚫 Revoke", callback_data: `k:rev:${rec.key}` },
       ],
-      [
-        { text: "📝 Set Note", callback_data: `k:note:${rec.key}` },
-        { text: "🔄 Refresh", callback_data: `k:ref:${rec.key}` },
-      ],
+      noteRow,
       [
         { text: "🔑 All Keys", callback_data: "keys:all:1" },
         { text: "🏠 Menu", callback_data: "menu:home" },
@@ -290,7 +373,8 @@ function unbindDevicesKeyboard(rec) {
     const osRaw = String(info.ios || "");
     const tag = osRaw.toLowerCase().startsWith("android") ? "Android" : (osRaw ? `iOS ${osRaw}` : "");
     const btnText = `❌ Unbind ${label}${tag ? ` (${tag})` : ""}`.slice(0, 48);
-    return [{ text: btnText, callback_data: `k:unbd:${idx}:${rec.key}` }];
+    const idPrefix = String(id).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12) || String(idx);
+    return [{ text: btnText, callback_data: `k:unbd:${idPrefix}:${rec.key}` }];
   });
   if (ids.length > 0) {
     rows.push([{ text: `🗑 Unbind ALL (${ids.length})`, callback_data: `k:unball:${rec.key}` }]);
@@ -308,7 +392,7 @@ async function buildHomeMenu(env) {
   if (cfg.announcement) statusBits.push(`📢 Banner: <i>${escapeHtmlTg(cfg.announcement)}</i>`);
   const text = [
     `<b>TinyTiny Admin Panel</b>`,
-    `Tap any button below — no typing needed.`,
+    `Every command is a button — zero typing required.`,
     statusBits.length ? `\n${statusBits.join("\n")}` : null,
   ]
     .filter(Boolean)
@@ -325,38 +409,79 @@ async function buildHomeMenu(env) {
         { text: "👑 New Admin Key", callback_data: "menu:newadmin" },
       ],
       [
+        { text: "📦 Batch Keys", callback_data: "menu:batch" },
         { text: "🔍 Search Keys", callback_data: "menu:find" },
+      ],
+      [
         { text: "⚙️ Config & Gates", callback_data: "menu:config" },
-      ],
-      [
         { text: "⚠️ Error Log", callback_data: "menu:errors" },
-        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "menu:alerts" },
       ],
       [
+        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "menu:alerts" },
         { text: "📥 Sync Watchit", callback_data: "menu:watchit" },
-        { text: "❓ Commands", callback_data: "menu:help" },
+      ],
+      [
+        { text: "📲 Latest APK & IPA", callback_data: "menu:builds" },
+        { text: "📤 Direct IG Drop", callback_data: "menu:directig" },
+      ],
+      [
+        { text: "🆔 My ID", callback_data: "menu:myid" },
+        { text: "❓ All Commands", callback_data: "menu:help" },
       ],
     ],
   };
   return { text, keyboard };
 }
 
-function buildCreateKeyMenu(isAdmin) {
+function buildCreateKeyMenu(isAdmin, maxDev = 1) {
   const tag = isAdmin ? "adm" : "std";
   const label = isAdmin ? "👑 New ADMIN Key" : "➕ New Standard Key";
-  const text = `<b>${label}</b>\nChoose a duration (starts on first activation):`;
+  const text = `<b>${label}</b>\nDevice Cap: <b>${maxDev}</b> · Choose a duration (starts on first activation):`;
+  const devRow = [1, 3, 5, 10].map((d) => ({
+    text: d === maxDev ? `• ${d} Dev •` : `${d} Dev`,
+    callback_data: `menu:${isAdmin ? "newadmin" : "new"}:${d}`,
+  }));
   const keyboard = {
     inline_keyboard: [
+      devRow,
       [
-        { text: "12 Hours", callback_data: `gen:${tag}:12h` },
-        { text: "7 Days", callback_data: `gen:${tag}:7d` },
-        { text: "30 Days", callback_data: `gen:${tag}:30d` },
+        { text: "12 Hours", callback_data: `gen:${tag}:12h:${maxDev}` },
+        { text: "7 Days", callback_data: `gen:${tag}:7d:${maxDev}` },
+        { text: "30 Days", callback_data: `gen:${tag}:30d:${maxDev}` },
       ],
       [
-        { text: "1 Year", callback_data: `gen:${tag}:1y` },
-        { text: "Lifetime", callback_data: `gen:${tag}:lifetime` },
+        { text: "1 Year", callback_data: `gen:${tag}:1y:${maxDev}` },
+        { text: "Lifetime", callback_data: `gen:${tag}:lifetime:${maxDev}` },
+        { text: "⏱ Custom", callback_data: `gen:${tag}:custom:${maxDev}` },
       ],
-      ...(isAdmin ? [] : [[{ text: "📦 Generate 5× 30d Batch", callback_data: "gen:batch:30d" }]]),
+      [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
+    ],
+  };
+  return { text, keyboard };
+}
+
+function buildBatchMenu(count = 5, maxDev = 1) {
+  const text = `<b>📦 Batch Generate Keys</b>\nCount: <b>${count} keys</b> · Device Cap: <b>${maxDev}</b>\nPick duration to generate immediately:`;
+  const countRow = [5, 10, 25].map((c) => ({
+    text: c === count ? `• ${c}× •` : `${c}×`,
+    callback_data: `menu:batch:${c}:${maxDev}`,
+  }));
+  const devRow = [1, 3, 5].map((d) => ({
+    text: d === maxDev ? `• ${d} Dev •` : `${d} Dev`,
+    callback_data: `menu:batch:${count}:${d}`,
+  }));
+  const keyboard = {
+    inline_keyboard: [
+      countRow,
+      devRow,
+      [
+        { text: `${count}× 7d`, callback_data: `gen:batch:7d:${count}:${maxDev}` },
+        { text: `${count}× 30d`, callback_data: `gen:batch:30d:${count}:${maxDev}` },
+      ],
+      [
+        { text: `${count}× 1y`, callback_data: `gen:batch:1y:${count}:${maxDev}` },
+        { text: `${count}× Lifetime`, callback_data: `gen:batch:lifetime:${count}:${maxDev}` },
+      ],
       [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
     ],
   };
@@ -388,7 +513,7 @@ async function buildConfigMenu(env) {
         { text: "🔓 Clear Min Ver", callback_data: "cfg:minver_off" },
       ],
       [
-        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "menu:alerts" },
+        { text: alertsOn ? "🔔 Alerts: ON" : "🔕 Alerts: OFF", callback_data: "cfg:alerts" },
         { text: "🏠 Menu", callback_data: "menu:home" },
       ],
     ],
@@ -398,13 +523,47 @@ async function buildConfigMenu(env) {
 
 async function buildErrorsText(env) {
   const raw = await env.LICENSES.get("errors:recent");
-  const list = raw ? JSON.parse(raw) : [];
+  const list = safeJsonParse(raw, []);
   if (!list.length) return "<b>⚠️ Recent Error Reports</b>\nNo recent anonymous error reports.";
   const lines = list.slice(0, 15).map((e) => {
     const ago = Math.max(0, Math.floor((nowSec() - (e.at || 0)) / 60));
-    return `• <b>${escapeHtmlTg(e.source)}</b> — ${escapeHtmlTg(e.model || "iPhone")} (iOS ${escapeHtmlTg(e.ios || "?")}, v${escapeHtmlTg(e.app || "1.0")}) · ${ago}m ago\n  <i>${escapeHtmlTg(e.detail || "")}</i>`;
+    return `• <b>${escapeHtmlTg(e.source)}</b> — ${escapeHtmlTg(e.model || "Device")} (${escapeHtmlTg(formatOsLabel(e.ios))}, v${escapeHtmlTg(e.app || "1.0")}) · ${ago}m ago\n  <i>${escapeHtmlTg(e.detail || "")}</i>`;
   });
   return `<b>⚠️ Recent Anonymous Error Reports</b>\n${lines.join("\n")}`;
+}
+
+async function sendLatestBuildsToTelegram(env, chatId) {
+  const apkUrl = "https://raw.githubusercontent.com/aokifrlol-maker/TinyTiny/main/APK%20VERSION/TinyTiny.apk";
+  let ipaRunUrl = "https://github.com/aokifrlol-maker/TinyTiny/actions/workflows/build.yml";
+  let ipaStatus = "Check Actions";
+  let commitShort = "main";
+  try {
+    const r = await fetch("https://api.github.com/repos/aokifrlol-maker/TinyTiny/actions/workflows/build.yml/runs?per_page=1", {
+      headers: { "User-Agent": "TinyTiny-Worker" },
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const run = data?.workflow_runs?.[0];
+      if (run) {
+        ipaRunUrl = run.html_url || ipaRunUrl;
+        ipaStatus = run.conclusion === "success" ? "Ready (TinyTiny-ipa)" : (run.status || "building");
+        commitShort = String(run.head_sha || "main").slice(0, 7);
+      }
+    }
+  } catch {}
+
+  const kb = {
+    inline_keyboard: [
+      [{ text: `🍎 Download iOS IPA (${ipaStatus})`, url: ipaRunUrl }],
+      [{ text: "🤖 Direct APK Download Link", url: apkUrl }],
+      [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
+    ],
+  };
+  const caption = `<b>TinyTiny Latest Builds</b> (<code>${commitShort}</code>)\n🤖 Android APK attached above.\n🍎 Tap below to download <code>TinyTiny-ipa</code> from GitHub Actions.`;
+  const sentDoc = await sendTelegramDocumentUrl(env, chatId, apkUrl, caption, kb);
+  if (!sentDoc) {
+    await sendTelegram(env, chatId, caption, kb);
+  }
 }
 
 async function createAndSaveKey(env, { isAdmin = false, durSpec, maxDevices = 1, note = "" }) {
@@ -560,10 +719,13 @@ async function buildAllKeysPage(env, filter = "all", page = 1) {
     { text: filter === "all" ? "• All •" : "All", callback_data: "keys:all:1" },
     { text: filter === "active" ? "• Active •" : "Active", callback_data: "keys:active:1" },
     { text: filter === "unused" ? "• Unused •" : "Unused", callback_data: "keys:unused:1" },
+  ];
+  const filterRow2 = [
     { text: filter === "expired" ? "• Expired •" : "Expired", callback_data: "keys:expired:1" },
+    { text: filter === "revoked" ? "• Revoked •" : "Revoked", callback_data: "keys:revoked:1" },
     { text: filter === "admin" ? "• Admin •" : "Admin", callback_data: "keys:admin:1" },
   ];
-  const keyboard = { inline_keyboard: [...keyRows, filterRow, navRow] };
+  const keyboard = { inline_keyboard: [...keyRows, filterRow, filterRow2, navRow] };
   return { text, keyboard };
 }
 
@@ -580,6 +742,7 @@ async function handleTelegramUpdate(env, update) {
     const data = String(cq.data || "");
     const parts = data.split(":");
 
+    try {
     if (parts[0] === "keys" && chatId && msgId) {
       const filter = parts[1] || "all";
       const page = parseInt(parts[2] || "1", 10) || 1;
@@ -598,8 +761,17 @@ async function handleTelegramUpdate(env, update) {
         return new Response("ok");
       }
       if (sub === "new" || sub === "newadmin") {
-        const m = buildCreateKeyMenu(sub === "newadmin");
+        const maxDev = Math.min(50, Math.max(1, parseInt(parts[2] || "1", 10) || 1));
+        const m = buildCreateKeyMenu(sub === "newadmin", maxDev);
         await editTelegramMessage(env, chatId, msgId, m.text, m.keyboard);
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "batch") {
+        const cnt = Math.min(25, Math.max(1, parseInt(parts[2] || "5", 10) || 5));
+        const maxDev = Math.min(50, Math.max(1, parseInt(parts[3] || "1", 10) || 1));
+        const b = buildBatchMenu(cnt, maxDev);
+        await editTelegramMessage(env, chatId, msgId, b.text, b.keyboard);
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
       }
@@ -612,9 +784,21 @@ async function handleTelegramUpdate(env, update) {
       if (sub === "errors") {
         const txt = await buildErrorsText(env);
         await editTelegramMessage(env, chatId, msgId, txt, {
-          inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "menu:errors" }, { text: "🏠 Menu", callback_data: "menu:home" }]],
+          inline_keyboard: [
+            [{ text: "🔄 Refresh", callback_data: "menu:errors" }, { text: "🗑 Clear Errors", callback_data: "menu:clearerrors" }],
+            [{ text: "🏠 Menu", callback_data: "menu:home" }],
+          ],
         });
         await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "clearerrors") {
+        await env.LICENSES.put("errors:recent", "[]");
+        const txt = await buildErrorsText(env);
+        await editTelegramMessage(env, chatId, msgId, txt, {
+          inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "menu:errors" }, { text: "🏠 Menu", callback_data: "menu:home" }]],
+        });
+        await answerCallbackQuery(env, cq.id, "Error log cleared");
         return new Response("ok");
       }
       if (sub === "alerts") {
@@ -626,18 +810,42 @@ async function handleTelegramUpdate(env, update) {
         return new Response("ok");
       }
       if (sub === "find") {
-        await sendTelegram(env, chatId, "🔍 <b>Search Keys</b>\nReply to this message with a key, note, or iPhone model (e.g. <code>iPhone 15</code>):", {
+        await sendTelegram(env, chatId, "🔍 <b>Search Keys</b>\nReply to this message with a key, note, or phone model (e.g. <code>iPhone 15</code>):", {
           force_reply: true,
           input_field_placeholder: "iPhone 15, Friend, TT-...",
         });
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
       }
+      if (sub === "directig") {
+        await sendTelegram(env, chatId, "📤 <b>Direct IG Drop</b>\nReply to this message with an XVideos or direct MP4 URL:", {
+          force_reply: true,
+          input_field_placeholder: "https://...",
+        });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
+      if (sub === "builds") {
+        await answerCallbackQuery(env, cq.id, "Uploading latest APK & IPA...");
+        await sendLatestBuildsToTelegram(env, chatId);
+        return new Response("ok");
+      }
+      if (sub === "myid") {
+        await answerCallbackQuery(env, cq.id, `ID: ${senderId}`);
+        await editTelegramMessage(
+          env,
+          chatId,
+          msgId,
+          `🆔 <b>Your Telegram Admin ID</b>\n<code>${senderId}</code>`,
+          { inline_keyboard: [[{ text: "🏠 Back to Menu", callback_data: "menu:home" }]] }
+        );
+        return new Response("ok");
+      }
       if (sub === "watchit") {
         await answerCallbackQuery(env, cq.id, "Syncing Watchit...");
         const res = await syncWatchitFolder(env, getPublicBaseUrl(env), true);
         if (!res.ok) {
-          await sendTelegram(env, chatId, `Watchit sync error: ${res.error}`);
+          await sendTelegram(env, chatId, `Watchit sync error: ${escapeHtmlTg(res.error || "Unknown")}`);
         } else if (res.sent === 0) {
           await sendTelegram(env, chatId, `Seedr <code>/Watchit/</code> is ready (${res.total} video${res.total === 1 ? "" : "s"} tracked, no new uploads).`);
         }
@@ -645,18 +853,23 @@ async function handleTelegramUpdate(env, update) {
       }
       if (sub === "help") {
         const helpText = [
-          "<b>TinyTiny Slash Commands</b>",
-          "<code>/menu</code> — Open button panel",
-          "<code>/users</code> — Fleet &amp; iPhone/iOS breakdown",
-          "<code>/allkeys</code> — Browse all keys",
-          "<code>/info KEY</code> · <code>/find query</code>",
-          "<code>/gen 30d [maxDevices] [note]</code> · <code>/genadmin ...</code>",
-          "<code>/genbatch 5 30d [maxDevices] [note]</code>",
-          "<code>/extend KEY 30d</code> · <code>/unbind KEY</code> · <code>/revoke KEY</code> · <code>/unrevoke KEY</code>",
-          "<code>/note KEY text</code> · <code>/announce text</code> · <code>/maintenance text|off</code> · <code>/minversion 1.2|off</code>",
+          "<b>TinyTiny Commands (All available as Buttons!)</b>",
+          "<code>/menu</code> · <code>/users</code> · <code>/allkeys</code> · <code>/myid</code>",
+          "<code>/info KEY</code> · <code>/find query</code> · <code>/builds</code>",
+          "<code>/gen 30d [maxDev] [note]</code> · <code>/genadmin ...</code>",
+          "<code>/genbatch 5 30d [maxDev] [note]</code>",
+          "<code>/extend KEY 30d</code> · <code>/setdevices KEY 5</code>",
+          "<code>/unbind KEY</code> · <code>/revoke KEY</code> · <code>/unrevoke KEY</code>",
+          "<code>/note KEY text</code> · <code>/config</code> · <code>/errors</code> · <code>/alerts</code>",
+          "<code>/announce text</code> · <code>/clearannounce</code> · <code>/maintenance text|off</code> · <code>/minversion 1.2|off</code>",
+          "<code>/watchit</code> · <code>/directig URL</code>",
         ].join("\n");
         await editTelegramMessage(env, chatId, msgId, helpText, {
-          inline_keyboard: [[{ text: "🏠 Back to Menu", callback_data: "menu:home" }]],
+          inline_keyboard: [
+            [{ text: "📊 Fleet", callback_data: "stats:ref" }, { text: "🔑 All Keys", callback_data: "keys:all:1" }, { text: "➕ New Key", callback_data: "menu:new" }],
+            [{ text: "📦 Batch", callback_data: "menu:batch" }, { text: "⚙️ Config", callback_data: "menu:config" }, { text: "📲 Builds", callback_data: "menu:builds" }],
+            [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
+          ],
         });
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
@@ -666,29 +879,58 @@ async function handleTelegramUpdate(env, update) {
     if (parts[0] === "gen" && chatId && msgId) {
       const kind = parts[1];
       const dur = parts[2] || "30d";
+      if (dur === "custom") {
+        const maxDev = Math.min(50, Math.max(1, parseInt(parts[3] || "1", 10) || 1));
+        const roleLabel = kind === "adm" ? "ADMIN" : "STANDARD";
+        await sendTelegram(
+          env,
+          chatId,
+          `⏱ <b>Custom ${roleLabel} Key (${maxDev} dev)</b>\nReply with duration + optional note (e.g. <code>90d VIP Friend</code> or <code>48h Trial</code>):`,
+          { force_reply: true, input_field_placeholder: "90d VIP Friend" }
+        );
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
       const durSpec = parseDuration(dur);
       if (!durSpec) {
         await answerCallbackQuery(env, cq.id, "Invalid duration");
         return new Response("ok");
       }
       if (kind === "batch") {
-        const keys = [];
-        for (let i = 0; i < 5; i++) {
-          const r = await createAndSaveKey(env, { isAdmin: false, durSpec, maxDevices: 1, note: "" });
-          keys.push(r.key);
-        }
+        const count = Math.min(25, Math.max(1, parseInt(parts[3] || "5", 10) || 5));
+        const maxDev = Math.min(50, Math.max(1, parseInt(parts[4] || "1", 10) || 1));
+        const recs = Array.from({ length: count }, () => ({
+          key: generateLicenseKey(),
+          admin: false,
+          lifetime: durSpec.lifetime,
+          durationSeconds: durSpec.seconds,
+          durationLabel: durSpec.label,
+          maxDevices: maxDev,
+          note: "",
+          createdAt: nowSec(),
+          activatedAt: null,
+          expiresAt: null,
+          deviceIds: [],
+          revoked: false,
+        }));
+        await Promise.all(recs.map((r) => saveLicense(env, r)));
+        const idxRaw = await env.LICENSES.get("index:recent");
+        const idx = safeJsonParse(idxRaw, []);
+        const keys = recs.map((r) => r.key);
+        await env.LICENSES.put("index:recent", JSON.stringify([...keys, ...idx].slice(0, 60)));
         await editTelegramMessage(
           env,
           chatId,
           msgId,
-          `<b>📦 Generated 5 Keys (${durSpec.label})</b>\n` + keys.map((k) => `<code>${k}</code>`).join("\n"),
-          { inline_keyboard: [[{ text: "🔑 All Keys", callback_data: "keys:all:1" }, { text: "🏠 Menu", callback_data: "menu:home" }]] }
+          `<b>📦 Generated ${count} Keys (${durSpec.label} · ${maxDev} dev)</b>\n` + keys.map((k) => `<code>${k}</code>`).join("\n"),
+          { inline_keyboard: [[{ text: "📦 More Batch", callback_data: "menu:batch" }, { text: "🔑 All Keys", callback_data: "keys:all:1" }], [{ text: "🏠 Menu", callback_data: "menu:home" }]] }
         );
-        await answerCallbackQuery(env, cq.id, "Created 5 keys");
+        await answerCallbackQuery(env, cq.id, `Created ${count} keys`);
         return new Response("ok");
       }
       const isAdmin = kind === "adm";
-      const rec = await createAndSaveKey(env, { isAdmin, durSpec, maxDevices: 1, note: "" });
+      const maxDev = Math.min(50, Math.max(1, parseInt(parts[3] || "1", 10) || 1));
+      const rec = await createAndSaveKey(env, { isAdmin, durSpec, maxDevices: maxDev, note: "" });
       await editTelegramMessage(env, chatId, msgId, formatKeyDetails(rec), keyActionKeyboard(rec));
       await answerCallbackQuery(env, cq.id, `Created ${rec.key}`);
       return new Response("ok");
@@ -696,6 +938,14 @@ async function handleTelegramUpdate(env, update) {
 
     if (parts[0] === "cfg" && chatId && msgId) {
       const action = parts[1];
+      if (action === "alerts") {
+        const cur = (await env.LICENSES.get("alerts:enabled")) === "1";
+        await env.LICENSES.put("alerts:enabled", cur ? "0" : "1");
+        const c = await buildConfigMenu(env);
+        await editTelegramMessage(env, chatId, msgId, c.text, c.keyboard);
+        await answerCallbackQuery(env, cq.id, `Alerts ${cur ? "OFF" : "ON"}`);
+        return new Response("ok");
+      }
       const cfg = await getRemoteConfig(env);
       if (action === "clearann") {
         cfg.announcement = null;
@@ -733,7 +983,7 @@ async function handleTelegramUpdate(env, update) {
         return new Response("ok");
       }
       if (action === "minver") {
-        await sendTelegram(env, chatId, "📱 <b>Set Minimum App Version</b>\nReply to this message with the version (e.g. <code>1.2</code>):", { force_reply: true });
+        await sendTelegram(env, chatId, "📱 <b>Set Minimum App Version</b>\nReply to this message with the version (e.g. <code>1.3</code>):", { force_reply: true });
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
       }
@@ -751,7 +1001,7 @@ async function handleTelegramUpdate(env, update) {
     if (parts[0] === "k" && parts.length >= 3 && chatId && msgId) {
       const action = parts[1];
       if (action === "unbd" && parts.length >= 4) {
-        const idx = parseInt(parts[2], 10);
+        const targetPrefix = parts[2];
         const key = parts.slice(3).join(":");
         const rec = await getLicense(env, key);
         if (!rec) {
@@ -759,8 +1009,12 @@ async function handleTelegramUpdate(env, update) {
           return new Response("ok");
         }
         const ids = Array.isArray(rec.deviceIds) ? rec.deviceIds : [];
-        if (idx >= 0 && idx < ids.length) {
-          const removedId = ids[idx];
+        let removedId = ids.find((id) => String(id).replace(/[^a-zA-Z0-9_-]/g, "").startsWith(targetPrefix));
+        if (!removedId && /^\d+$/.test(targetPrefix)) {
+          const idx = parseInt(targetPrefix, 10);
+          if (idx >= 0 && idx < ids.length) removedId = ids[idx];
+        }
+        if (removedId) {
           const label = rec.devices?.[removedId]?.model || "Device";
           rec.deviceIds = ids.filter((id) => id !== removedId);
           if (rec.devices && rec.devices[removedId]) {
@@ -793,6 +1047,11 @@ async function handleTelegramUpdate(env, update) {
         await answerCallbackQuery(env, cq.id);
         return new Response("ok");
       }
+      if (action === "extc") {
+        await sendTelegram(env, chatId, `⏱ <b>Custom Extend for ${rec.key}</b>\nReply with duration to add (e.g. <code>90d</code>, <code>1y</code>, <code>lifetime</code>):`, { force_reply: true, input_field_placeholder: "90d" });
+        await answerCallbackQuery(env, cq.id);
+        return new Response("ok");
+      }
       if (action === "unbmenu") {
         const count = (rec.deviceIds || []).length;
         const hint = count === 0
@@ -806,30 +1065,36 @@ async function handleTelegramUpdate(env, update) {
       if (action === "open") {
         toast = "";
       } else if (action === "ext7" || action === "ext30") {
-        const days = action === "ext7" ? 7 : 30;
-        const sec = days * DAY_SEC;
-        if (rec.activatedAt) {
-          const base = Math.max(nowSec(), rec.expiresAt || nowSec());
-          rec.lifetime = false;
-          rec.expiresAt = base + sec;
+        if (rec.lifetime) {
+          toast = "Already Lifetime";
         } else {
-          rec.lifetime = false;
-          rec.durationSeconds = (rec.durationSeconds || 0) + sec;
+          const days = action === "ext7" ? 7 : 30;
+          const sec = days * DAY_SEC;
+          if (rec.activatedAt) {
+            const base = Math.max(nowSec(), rec.expiresAt || nowSec());
+            rec.expiresAt = base + sec;
+          } else {
+            rec.durationSeconds = (rec.durationSeconds || 0) + sec;
+          }
+          rec.durationLabel = `Extended (+${days}d)`;
+          await saveLicense(env, rec);
+          toast = `Extended +${days}d`;
         }
-        rec.durationLabel = `${rec.durationLabel} + ${days}d`;
-        await saveLicense(env, rec);
-        toast = `Extended +${days}d`;
       } else if (action === "life") {
         rec.lifetime = true;
         rec.expiresAt = null;
         rec.durationLabel = "Lifetime";
         await saveLicense(env, rec);
         toast = "Set to Lifetime";
-      } else if (action === "dev1" || action === "dev5") {
-        const add = action === "dev1" ? 1 : 5;
-        rec.maxDevices = Math.min(50, Math.max(1, (rec.maxDevices || 1) + add));
+      } else if (action === "devm1" || action === "dev1" || action === "dev5") {
+        const delta = action === "devm1" ? -1 : (action === "dev1" ? 1 : 5);
+        rec.maxDevices = Math.min(50, Math.max(1, (rec.maxDevices || 1) + delta));
         await saveLicense(env, rec);
         toast = `Max devices: ${rec.maxDevices}`;
+      } else if (action === "clrnote") {
+        rec.note = "";
+        await saveLicense(env, rec);
+        toast = "Note cleared";
       } else if (action === "unb" || action === "unball") {
         rec.deviceIds = [];
         rec.devices = {};
@@ -851,8 +1116,29 @@ async function handleTelegramUpdate(env, update) {
       return new Response("ok");
     }
 
+    if (parts[0] === "igdrop" && chatId) {
+      await answerCallbackQuery(env, cq.id, "Creating IG drop...");
+      const saved = await env.LICENSES.get(`admin:last_mp4:${senderId}`);
+      const mp4Info = safeJsonParse(saved, null);
+      if (!mp4Info?.mp4Url) {
+        await sendTelegram(env, chatId, "No recent MP4 found. Send an XVideos link first.");
+        return new Response("ok");
+      }
+      const dropId = randomId(10);
+      await env.LICENSES.put(`igdrop:${dropId}`, JSON.stringify({ mp4Url: mp4Info.mp4Url, title: mp4Info.title || "Video", createdAt: nowSec() }), { expirationTtl: DAY_SEC });
+      const openUrl = `${getPublicBaseUrl(env)}/ig/${dropId}`;
+      await sendTelegram(env, chatId, `<b>Send MP4 to Instagram DM / Group</b>\n<code>${escapeHtmlTg(mp4Info.title || "Video")}</code>\n\n${openUrl}`, {
+        inline_keyboard: [[{ text: "📤 Open in TinyTiny", url: openUrl }], [{ text: "🏠 Menu", callback_data: "menu:home" }]],
+      });
+      return new Response("ok");
+    }
+
     await answerCallbackQuery(env, cq.id);
     return new Response("ok");
+    } catch (err) {
+      await answerCallbackQuery(env, cq.id, "Error — try again");
+      return new Response("ok");
+    }
   }
 
   const msg = update?.message;
@@ -863,7 +1149,20 @@ async function handleTelegramUpdate(env, update) {
   const parts = text.split(/\s+/);
   const cmd = parts[0].split("@")[0].toLowerCase();
 
-  if (cmd === "/myid" || cmd === "/start") {
+  if (cmd === "/myid") {
+    const adminConfigured = Boolean(env.ADMIN_USER_ID);
+    const isAdmin = adminConfigured && String(env.ADMIN_USER_ID) === senderId;
+    await sendTelegram(
+      env,
+      chatId,
+      `🆔 Your Telegram User ID is: <code>${senderId}</code>\n` +
+        (isAdmin ? "Role: <b>ADMIN</b>" : adminConfigured ? "Unauthorized." : "Set via: <code>wrangler secret put ADMIN_USER_ID</code>"),
+      isAdmin ? { inline_keyboard: [[{ text: "🏠 Open Button Panel", callback_data: "menu:home" }]] } : null
+    );
+    return new Response("ok");
+  }
+
+  if (cmd === "/start") {
     const adminConfigured = Boolean(env.ADMIN_USER_ID);
     const isAdmin = adminConfigured && String(env.ADMIN_USER_ID) === senderId;
     if (!adminConfigured || !isAdmin) {
@@ -885,7 +1184,7 @@ async function handleTelegramUpdate(env, update) {
 
   // Handle Force-Reply prompts from inline buttons (no slash commands needed!)
   const replyPrompt = msg.reply_to_message?.text || "";
-  if (replyPrompt && !text.startsWith("/")) {
+  if (replyPrompt) {
     if (replyPrompt.includes("Search Keys")) {
       const res = await searchKeysResult(env, text);
       await sendTelegram(env, chatId, res.text, res.keyboard);
@@ -909,11 +1208,73 @@ async function handleTelegramUpdate(env, update) {
       return new Response("ok");
     }
     if (replyPrompt.includes("Set Minimum App Version")) {
+      if (!/^\d+(\.\d+){0,2}$/.test(text)) {
+        await sendTelegram(env, chatId, "Invalid version format. Use numbers like <code>1.3</code> or <code>1.3.1</code>.");
+        return new Response("ok");
+      }
       const cfg = await getRemoteConfig(env);
       cfg.minVersion = text;
       await saveRemoteConfig(env, cfg);
       const c = await buildConfigMenu(env);
       await sendTelegram(env, chatId, c.text, c.keyboard);
+      return new Response("ok");
+    }
+    if (replyPrompt.includes("Direct IG Drop")) {
+      let mp4Info = null;
+      if (text.toLowerCase().includes("xvideos.com")) {
+        mp4Info = await extractXVideosMP4(text);
+      } else if (/^https?:\/\//i.test(text)) {
+        mp4Info = { mp4Url: text, title: "Direct Video", pageUrl: text };
+      }
+      if (!mp4Info?.mp4Url) {
+        await sendTelegram(env, chatId, "Could not extract an MP4 from that link.");
+        return new Response("ok");
+      }
+      const dropId = randomId(10);
+      await env.LICENSES.put(`igdrop:${dropId}`, JSON.stringify({ mp4Url: mp4Info.mp4Url, title: mp4Info.title || "Video", createdAt: nowSec() }), { expirationTtl: DAY_SEC });
+      const openUrl = `${getPublicBaseUrl(env)}/ig/${dropId}`;
+      await sendTelegram(env, chatId, `<b>Send MP4 to Instagram DM / Group</b>\n<code>${escapeHtmlTg(mp4Info.title || "Video")}</code>\n\n${openUrl}`, {
+        inline_keyboard: [[{ text: "📤 Open in TinyTiny", url: openUrl }], [{ text: "🏠 Menu", callback_data: "menu:home" }]],
+      });
+      return new Response("ok");
+    }
+    const customGenMatch = replyPrompt.match(/Custom (ADMIN|STANDARD) Key \((\d+) dev\)/i);
+    if (customGenMatch) {
+      const isAdm = customGenMatch[1].toUpperCase() === "ADMIN";
+      const maxDev = Math.min(50, Math.max(1, parseInt(customGenMatch[2], 10) || 1));
+      const p = text.split(/\s+/);
+      const durSpec = parseDuration(p[0]);
+      if (!durSpec) {
+        await sendTelegram(env, chatId, "Invalid duration. Examples: <code>90d VIP</code>, <code>48h Trial</code>, <code>lifetime</code>");
+        return new Response("ok");
+      }
+      const note = p.slice(1).join(" ");
+      const rec = await createAndSaveKey(env, { isAdmin: isAdm, durSpec, maxDevices: maxDev, note });
+      await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
+      return new Response("ok");
+    }
+    const customExtMatch = replyPrompt.match(/Custom Extend for (TT-[A-Z0-9-]+)/i);
+    if (customExtMatch) {
+      const rec = await getLicense(env, customExtMatch[1]);
+      const durSpec = parseDuration(text.split(/\s+/)[0]);
+      if (!rec || !durSpec) {
+        await sendTelegram(env, chatId, "Invalid duration or key not found.");
+        return new Response("ok");
+      }
+      if (durSpec.lifetime) {
+        rec.lifetime = true;
+        rec.expiresAt = null;
+        rec.durationLabel = "Lifetime";
+      } else if (!rec.lifetime) {
+        if (rec.activatedAt) {
+          rec.expiresAt = Math.max(nowSec(), rec.expiresAt || nowSec()) + durSpec.seconds;
+        } else {
+          rec.durationSeconds = (rec.durationSeconds || 0) + durSpec.seconds;
+        }
+        rec.durationLabel = `Extended (+${durSpec.label})`;
+      }
+      await saveLicense(env, rec);
+      await sendTelegram(env, chatId, formatKeyDetails(rec), keyActionKeyboard(rec));
       return new Response("ok");
     }
     const noteMatch = replyPrompt.match(/Set Note for (TT-[A-Z0-9-]+)/i);
@@ -928,6 +1289,11 @@ async function handleTelegramUpdate(env, update) {
       }
       return new Response("ok");
     }
+  }
+
+  if (cmd === "/builds") {
+    await sendLatestBuildsToTelegram(env, chatId);
+    return new Response("ok");
   }
 
   if (cmd === "/start" || cmd === "/menu") {
@@ -1357,7 +1723,8 @@ async function handleTelegramUpdate(env, update) {
     await sendTelegram(
       env,
       chatId,
-      `<b>XVideos MP4 Ready</b>\n<code>${escapeHtmlTg(info.title)}</code>\n\nMP4 Link:\n${proxyMp4}\n\nRun <code>/directig</code> to pick an Instagram DM or Group Chat.`
+      `<b>XVideos MP4 Ready</b>\n<code>${escapeHtmlTg(info.title)}</code>\n\nMP4 Link:\n${proxyMp4}`,
+      { inline_keyboard: [[{ text: "📤 Send to Instagram DM / Group", callback_data: "igdrop:last" }], [{ text: "🏠 Menu", callback_data: "menu:home" }]] }
     );
     return new Response("ok");
   }
@@ -1797,9 +2164,9 @@ function renderDirectVideoHTML(id, meta) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
-      return json({ ok: true }, 204);
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
     const url = new URL(request.url);
@@ -1815,7 +2182,7 @@ export default {
     if (request.method === "POST" && path === "/v1/activate") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId);
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
       if (!check.ok) return json({ valid: false, error: check.error }, 403);
 
       const dev = String(body.deviceId || "").trim();
@@ -1838,11 +2205,12 @@ export default {
 
       if (isFirstActivation && env.ADMIN_USER_ID && (await env.LICENSES.get("alerts:enabled")) === "1") {
         const d = body.deviceInfo || {};
-        await sendTelegram(
+        const alertPromise = sendTelegram(
           env,
           env.ADMIN_USER_ID,
-          `🔑 <b>Key Activated</b>\n<code>${rec.key}</code>${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}\nDevice: ${escapeHtmlTg(d.model || "iPhone")} · iOS ${escapeHtmlTg(d.ios || "?")} · v${escapeHtmlTg(d.app || "1.0")}`
+          `🔑 <b>Key Activated</b>\n<code>${rec.key}</code>${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}\nDevice: ${escapeHtmlTg(d.model || "Device")} · ${escapeHtmlTg(formatOsLabel(d.ios))} · v${escapeHtmlTg(d.app || "1.0")}`
         ).catch(() => null);
+        if (ctx?.waitUntil) ctx.waitUntil(alertPromise);
       }
 
       const config = await getRemoteConfig(env);
@@ -1860,10 +2228,11 @@ export default {
     if (request.method === "POST" && path === "/v1/verify") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId);
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
       if (!check.ok) return json({ valid: false, error: check.error }, 200);
 
-      if (recordDeviceTelemetry(rec, body.deviceId, body.deviceInfo)) {
+      const dev = String(body.deviceId || "").trim();
+      if (dev && (rec.deviceIds || []).includes(dev) && recordDeviceTelemetry(rec, dev, body.deviceInfo)) {
         await saveLicense(env, rec);
       }
 
@@ -1896,11 +2265,11 @@ export default {
       await env.LICENSES.put(rlKey, "1", { expirationTtl: 300 });
 
       const raw = await env.LICENSES.get("errors:recent");
-      const list = raw ? JSON.parse(raw) : [];
+      const list = safeJsonParse(raw, []);
       list.unshift({
         source,
         detail,
-        model: String(d.model || "iPhone").slice(0, 48),
+        model: String(d.model || "Device").slice(0, 48),
         ios: String(d.ios || "?").slice(0, 20),
         app: String(d.app || "1.0").slice(0, 20),
         at: nowSec(),
@@ -1908,11 +2277,12 @@ export default {
       await env.LICENSES.put("errors:recent", JSON.stringify(list.slice(0, 25)));
 
       if (env.ADMIN_USER_ID && (await env.LICENSES.get("alerts:enabled")) === "1") {
-        await sendTelegram(
+        const alertPromise = sendTelegram(
           env,
           env.ADMIN_USER_ID,
-          `⚠️ <b>${escapeHtmlTg(source)} Error</b>\n${escapeHtmlTg(d.model || "iPhone")} (iOS ${escapeHtmlTg(d.ios || "?")}, v${escapeHtmlTg(d.app || "1.0")})\n<i>${escapeHtmlTg(detail)}</i>`
+          `⚠️ <b>${escapeHtmlTg(source)} Error</b>\n${escapeHtmlTg(d.model || "Device")} (${escapeHtmlTg(formatOsLabel(d.ios))}, v${escapeHtmlTg(d.app || "1.0")})\n<i>${escapeHtmlTg(detail)}</i>`
         ).catch(() => null);
+        if (ctx?.waitUntil) ctx.waitUntil(alertPromise);
       }
       return json({ ok: true });
     }
@@ -1921,16 +2291,17 @@ export default {
     if (request.method === "PUT" && path === "/v1/backup") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId);
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
       if (!check.ok) return json({ error: check.error }, 403);
       if (!body.blob || typeof body.blob !== "string") return json({ error: "Missing blob" }, 400);
+      if (body.blob.length > 12 * 1024 * 1024) return json({ error: "Backup exceeds 12MB cap" }, 413);
 
       const existingBlob = await env.LICENSES.get(`backup:${rec.key}`);
       if (existingBlob && existingBlob !== body.blob) {
         await env.LICENSES.put(`backup_prev:${rec.key}`, existingBlob);
       }
       const version = String(Date.now());
-      await env.LICENSES.put(`backup:${rec.key}`, body.blob);
+      await env.LICENSES.put(`backup:${rec.key}`, body.blob, { metadata: { version } });
       await env.LICENSES.put(`backup_ver:${rec.key}`, version);
       return json({ ok: true, version });
     }
@@ -1938,7 +2309,7 @@ export default {
     if (request.method === "POST" && path === "/v1/backup/version") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId);
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
       if (!check.ok) return json({ error: check.error }, 403);
 
       const version = await env.LICENSES.get(`backup_ver:${rec.key}`);
@@ -1948,13 +2319,13 @@ export default {
     if (request.method === "POST" && path === "/v1/backup/get") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId);
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
       if (!check.ok) return json({ error: check.error }, 403);
 
-      const blob = await env.LICENSES.get(`backup:${rec.key}`);
+      const { value: blob, metadata } = await env.LICENSES.getWithMetadata(`backup:${rec.key}`);
       if (!blob) return json({ error: "No backup yet" }, 404);
-      const version = await env.LICENSES.get(`backup_ver:${rec.key}`);
-      return json({ blob, version: version || null });
+      const version = metadata?.version || (await env.LICENSES.get(`backup_ver:${rec.key}`)) || null;
+      return json({ blob, version });
     }
 
     // 5. E2EE Peer-to-Peer Share Drops (7-day TTL, stores strictly ciphertext)
@@ -2021,7 +2392,7 @@ export default {
 
       const metaRaw = await env.LICENSES.get(`meta:blob:${id}`);
       if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
+        const meta = safeJsonParse(metaRaw, null);
         if (meta?.backend === "seedr" && meta?.path) {
           const upstream = await seedrFetchEncryptedBlob(env, meta.path);
           if (upstream) {
@@ -2029,9 +2400,11 @@ export default {
               headers: {
                 "Content-Type": "application/octet-stream",
                 "Cache-Control": "public, max-age=3600",
+                "Access-Control-Allow-Origin": "*",
               },
             });
           }
+          return json({ error: "Encrypted storage backend temporarily unavailable" }, 502);
         }
       }
 
@@ -2041,6 +2414,7 @@ export default {
         headers: {
           "Content-Type": "application/octet-stream",
           "Cache-Control": "public, max-age=3600",
+          "Access-Control-Allow-Origin": "*",
         },
       });
     }
@@ -2348,13 +2722,38 @@ export default {
       );
     }
 
-    return json({ ok: true, service: "tinytiny-license" });
+    if (request.method === "GET" && (path === "/" || path === "/health")) {
+      return json({ ok: true, service: "tinytiny-license" });
+    }
+    return json({ error: "Not found" }, 404);
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncWatchitFolder(env, getPublicBaseUrl(env), false));
+    ctx.waitUntil(
+      Promise.all([
+        syncWatchitFolder(env, getPublicBaseUrl(env), false),
+        autoDeliverLatestBuildsToTelegram(env),
+      ])
+    );
   },
 };
+
+async function autoDeliverLatestBuildsToTelegram(env) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.ADMIN_USER_ID) return;
+  try {
+    const r = await fetch("https://api.github.com/repos/aokifrlol-maker/TinyTiny/actions/workflows/build.yml/runs?per_page=1", {
+      headers: { "User-Agent": "TinyTiny-Worker" },
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    const run = data?.workflow_runs?.[0];
+    if (!run || run.status !== "completed" || run.conclusion !== "success" || !run.head_sha) return;
+    const lastSha = await env.LICENSES.get("builds:last_notified_sha");
+    if (lastSha === run.head_sha) return;
+    await env.LICENSES.put("builds:last_notified_sha", run.head_sha);
+    await sendLatestBuildsToTelegram(env, env.ADMIN_USER_ID);
+  } catch {}
+}
 
 function escapeHtmlTg(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

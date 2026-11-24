@@ -184,6 +184,7 @@ struct GoonedBrowseOverlay: View {
                 return
             }
             isSearching = true
+            defer { isSearching = false }
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
             async let redditTask = try? GoonedAPI.shared.search(q)
@@ -191,13 +192,13 @@ struct GoonedBrowseOverlay: View {
             async let ofTask = OnlyFansAPI.shared.searchCreators(q, limit: 25)
             async let eromeTask = LongVideoAPI.shared.searchEromePreview(query: q, limit: 8)
             let (redditRes, r34Res, ofRes, eromeRes) = await (redditTask, r34Task, ofTask, eromeTask)
+            guard !Task.isCancelled else { return }
             if let redditRes {
                 searchResults = GoonedSearchResponsePlaceholder(subreddits: redditRes.subreddits, users: redditRes.users)
             }
             r34Suggestions = r34Res
             ofCreators = ofRes
             eromePreview = eromeRes
-            isSearching = false
         }
         .sheet(isPresented: $showReceiveDrop) {
             ReceiveDropSheet { post in

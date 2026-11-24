@@ -487,6 +487,7 @@ final class PlayerModel: ObservableObject {
             allFailed = false
             isReady = false
             hasValidVideoSize = false
+            layerReadyForDisplay = false
             loadCandidate(at: 0)
             if wasPlaying { play() }
         }
@@ -542,6 +543,7 @@ final class PlayerModel: ObservableObject {
             currentURLIndex += 1
             isReady = false
             hasValidVideoSize = false
+            layerReadyForDisplay = false
             loadCandidate(at: currentURLIndex)
             if wantsPlaying { player.play() }
         } else {
@@ -574,8 +576,8 @@ final class PlayerModel: ObservableObject {
             let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
             item = AVPlayerItem(asset: asset)
         }
-        item.preferredForwardBufferDuration = isHLS ? 2.5 : 1.5
-        player.automaticallyWaitsToMinimizeStalling = isHLS
+        item.preferredForwardBufferDuration = isHLS ? 2.5 : 2.0
+        player.automaticallyWaitsToMinimizeStalling = true
 
         statusObservation?.invalidate()
         statusObservation = nil
@@ -1698,7 +1700,6 @@ struct GoonedReelCell: View {
         }
         .onChange(of: store.data.settings.muted) { _, m in
             player.setMuted(m)
-            UserStore.configureAudioSession(muted: m)
         }
     }
 
@@ -2379,7 +2380,7 @@ struct GoonedReelCell: View {
                     ProgressView()
                         .tint(Theme.accent.opacity(0.85))
                         .controlSize(.regular)
-                } else if player.allFailed && gif.posterURL == nil {
+                } else if player.allFailed {
                     VStack(spacing: 10) {
                         Image(systemName: "play.slash")
                             .font(.system(size: 28, weight: .light))

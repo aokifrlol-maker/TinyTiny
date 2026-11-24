@@ -691,12 +691,16 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 return origSend.apply(this, arguments);
             };
 
+            let foundSN = false;
             function scanPageMeta() {
                 try {
-                    const html = document.documentElement ? document.documentElement.innerHTML : '';
-                    const m = html.match(/"screen_name":"([A-Za-z0-9_]{1,20})"/);
-                    if (m && m[1] && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
-                        window.webkit.messageHandlers.xBridge.postMessage({ type: 'screenName', screenName: m[1] });
+                    if (!foundSN && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xBridge) {
+                        const html = document.documentElement ? document.documentElement.innerHTML : '';
+                        const m = html.match(/"screen_name":"([A-Za-z0-9_]{1,20})"/);
+                        if (m && m[1]) {
+                            foundSN = true;
+                            window.webkit.messageHandlers.xBridge.postMessage({ type: 'screenName', screenName: m[1] });
+                        }
                     }
                     const scripts = document.querySelectorAll('script[type="application/json"]');
                     for (const s of scripts) {
@@ -711,7 +715,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             }
             document.addEventListener('DOMContentLoaded', scanPageMeta);
             setTimeout(scanPageMeta, 350);
-            setInterval(scanPageMeta, 1500);
+            setTimeout(scanPageMeta, 1800);
         })();
         """
 

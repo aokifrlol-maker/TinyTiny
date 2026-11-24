@@ -196,9 +196,13 @@ struct RootView: View {
                 app.lock()
                 store.saveNow()
                 SmartTasteEngine.shared.saveNow()
+                let bgId = UIApplication.shared.beginBackgroundTask(withName: "TinyTinyCloudSync") {}
                 Task {
                     if license.isValidAccess {
                         _ = await license.syncBidirectionalBackup()
+                    }
+                    if bgId != .invalid {
+                        UIApplication.shared.endBackgroundTask(bgId)
                     }
                 }
             }

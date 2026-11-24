@@ -446,7 +446,10 @@ object InstagramWebEngine {
             withContext(Dispatchers.Main) {
                 wv.evaluateJavascript(HOOK_JS, null)
                 val cur = wv.url ?: ""
-                if (!cur.startsWith(targetUrl.substringBefore('?'))) {
+                val needsLoad = cur.isEmpty() || cur == "about:blank" ||
+                    (targetUrl.contains("variant=following") && !cur.contains("variant=following")) ||
+                    (!targetUrl.contains("variant=following") && !cur.startsWith(targetUrl.substringBefore('?')))
+                if (needsLoad) {
                     wv.loadUrl(targetUrl)
                 } else if (!apiTriggerJS.isNullOrEmpty()) {
                     wv.evaluateJavascript(apiTriggerJS, null)

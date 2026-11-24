@@ -315,6 +315,7 @@ class SmartTasteEngine private constructor() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var saveJob: Job? = null
+    private val saveFileLock = Any()
 
     val state = MutableStateFlow(TasteV2Data())
     private val sessionContextTags = ConcurrentHashMap<String, Double>()
@@ -426,14 +427,16 @@ class SmartTasteEngine private constructor() {
     }
 
     fun saveNow() {
-        val snapshot = state.value
         val f = tasteFile
         scope.launch {
-            CryptoBox.sealCodable(snapshot)?.let { bytes ->
-                val tmp = File(f.parentFile, f.name + ".tmp")
-                tmp.writeBytes(bytes)
-                if (f.exists()) f.delete()
-                tmp.renameTo(f)
+            synchronized(saveFileLock) {
+                val snapshot = state.value
+                CryptoBox.sealCodable(snapshot)?.let { bytes ->
+                    val tmp = File(f.parentFile, f.name + ".tmp")
+                    tmp.writeBytes(bytes)
+                    if (f.exists()) f.delete()
+                    tmp.renameTo(f)
+                }
             }
         }
     }

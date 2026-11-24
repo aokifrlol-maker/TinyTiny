@@ -1046,7 +1046,10 @@ fun GoonedLikesView(
                                     for (g in chosen) {
                                         if (!OfflineManager.isDownloaded(g)) OfflineManager.download(g)
                                         val path = OfflineManager.localMediaURL(g.id)?.removePrefix("file://") ?: continue
-                                        if (OfflineManager.saveToMediaStoreGallery(File(path))) saved++
+                                        val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                            OfflineManager.saveToMediaStoreGallery(File(path))
+                                        }
+                                        if (ok) saved++
                                     }
                                     showBulkToast("Saved $saved to Gallery")
                                 }

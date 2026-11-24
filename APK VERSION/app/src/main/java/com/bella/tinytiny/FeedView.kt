@@ -180,6 +180,7 @@ fun FeedView(
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         VerticalPager(
             state = pagerState,
+            key = { items.getOrNull(it)?.id ?: "end_of_feed" },
             beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxSize()
         ) { pageIdx ->
@@ -412,28 +413,14 @@ fun GoonedReelCell(
         }
     }
 
-    // Build ExoPlayer with DefaultDataSource (file:// support) + SimpleCache + dynamic per-request OkHttp headers/cookies + HLS MIME
+    // Build ExoPlayer with reused OkHttp clients + fast-start LoadControl + AudioFocus + SimpleCache + HLS MIME
     val exoPlayer = remember(gif.id, activeVideoUrl, isActive, useReferer, retryToken) {
         if (!isActive || activeVideoUrl == null || isShowingImage) null
         else {
             playbackFailed = false
             isFirstFrameRendered = false
             val isLocal = activeVideoUrl.startsWith("file://")
-            val dynamicClient = TinyTinyApplication.sharedHttpClient.newBuilder()
-                .addInterceptor { chain ->
-                    val req = chain.request()
-                    val uStr = req.url.toString()
-                    val rb = req.newBuilder()
-                    for ((k, v) in MediaHeaders.headers(uStr, includeReferer = useReferer)) {
-                        rb.header(k, v)
-                    }
-                    try {
-                        val cookies = CookieManager.getInstance().getCookie(uStr)
-                        if (!cookies.isNullOrEmpty()) rb.header("Cookie", cookies)
-                    } catch (_: Throwable) {}
-                    chain.proceed(rb.build())
-                }
-                .build()
+            val dynamicClient = if (useReferer) SharedExoClients.withReferer else SharedExoClients.noReferer
             val okFactory = OkHttpDataSource.Factory(dynamicClient)
             val baseFactory = DefaultDataSource.Factory(ctx, okFactory)
             val dataSourceFactory = if (isLocal || activeVideoUrl.contains(".m3u8", ignoreCase = true)) {
@@ -454,8 +441,19 @@ fun GoonedReelCell(
                 .apply { if (isHls) setMimeType(MimeTypes.APPLICATION_M3U8) }
                 .build()
 
+            val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                .setBufferDurationsMs(2_500, 15_000, 450, 1_000)
+                .build()
+            val audioAttrs = androidx.media3.common.AudioAttributes.Builder()
+                .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build()
+
             ExoPlayer.Builder(ctx)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+                .setLoadControl(loadControl)
+                .setAudioAttributes(audioAttrs, true)
+                .setHandleAudioBecomingNoisy(true)
                 .build().apply {
                     repeatMode = if (autoScrollState.value && playToEndState.value) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                     setMediaItem(mediaItem)
@@ -1363,41 +1361,70 @@ private fun PlayerScrubberBar(player: ExoPlayer, isActive: Boolean) {
  * TextureView-backed ExoPlayer surface inside AspectRatioFrameLayout.
  * Eliminates SurfaceView black-frame & detached-surface glitches inside Compose VerticalPager!
  */
+private object SharedExoClients {
+    val withReferer: okhttp3.OkHttpClient by lazy { buildClient(true) }
+    val noReferer: okhttp3.OkHttpClient by lazy { buildClient(false) }
+
+    private fun buildClient(includeReferer: Boolean): okhttp3.OkHttpClient =
+        TinyTinyApplication.sharedHttpClient.newBuilder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val uStr = req.url.toString()
+                val rb = req.newBuilder()
+                for ((k, v) in MediaHeaders.headers(uStr, includeReferer = includeReferer)) {
+                    rb.header(k, v)
+                }
+                try {
+                    val cookies = CookieManager.getInstance().getCookie(uStr)
+                    if (!cookies.isNullOrEmpty()) rb.header("Cookie", cookies)
+                } catch (_: Throwable) {}
+                chain.proceed(rb.build())
+            }
+            .build()
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 private fun ExoTextureSurface(player: ExoPlayer, fill: Boolean, visible: Boolean) {
-    AndroidView(
-        factory = { ctx ->
-            val container = AspectRatioFrameLayout(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                resizeMode = if (fill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-            }
-            val tv = TextureView(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            }
-            container.addView(tv)
-            player.setVideoTextureView(tv)
-            val listener = object : Player.Listener {
-                override fun onVideoSizeChanged(videoSize: VideoSize) {
-                    if (videoSize.width > 0 && videoSize.height > 0) {
-                        container.setAspectRatio((videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio) / videoSize.height.toFloat())
+    key(player) {
+        AndroidView(
+            factory = { ctx ->
+                val container = AspectRatioFrameLayout(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    resizeMode = if (fill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                }
+                val tv = TextureView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                }
+                container.addView(tv)
+                player.setVideoTextureView(tv)
+                val listener = object : Player.Listener {
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.width > 0 && videoSize.height > 0) {
+                            container.setAspectRatio((videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio) / videoSize.height.toFloat())
+                        }
                     }
                 }
-            }
-            player.addListener(listener)
-            container.tag = tv to listener
-            container
-        },
-        update = { container ->
-            container.resizeMode = if (fill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-            @Suppress("UNCHECKED_CAST")
-            val tv = (container.tag as? Pair<TextureView, Player.Listener>)?.first
-            if (tv != null) player.setVideoTextureView(tv)
-        },
-        modifier = Modifier
-            .fillMaxSize()
-            .alpha(if (visible) 1f else 0f)
-    )
+                player.addListener(listener)
+                container.tag = tv to listener
+                container
+            },
+            update = { container ->
+                container.resizeMode = if (fill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+            },
+            onRelease = { container ->
+                @Suppress("UNCHECKED_CAST")
+                val pair = container.tag as? Pair<TextureView, Player.Listener>
+                if (pair != null) {
+                    player.removeListener(pair.second)
+                    player.clearVideoTextureView(pair.first)
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(if (visible) 1f else 0f)
+        )
+    }
 }
 
 @Composable

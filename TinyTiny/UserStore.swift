@@ -134,6 +134,7 @@ final class UserStore: ObservableObject {
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
+    private static let saveQueue = DispatchQueue(label: "tinytiny.userstore.save", qos: .utility)
 
     private static var fileURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -193,11 +194,25 @@ final class UserStore: ObservableObject {
         var snapshot = data
         snapshot.seenIDs = _seenIDs
         let url = Self.fileURL
-        Task.detached(priority: .utility) {
+        Self.saveQueue.async {
             if let raw = CryptoBox.sealCodable(snapshot) {
                 try? raw.write(to: url, options: [.atomic, .completeFileProtection])
             }
         }
+    }
+
+    func markSeenBulk(_ ids: [String]) {
+        var addedAny = false
+        for id in ids where !id.isEmpty && seenSet.insert(id).inserted {
+            _seenIDs.append(id)
+            addedAny = true
+        }
+        if _seenIDs.count > 12_000 {
+            let overflow = _seenIDs.count - 10_000
+            for old in _seenIDs.prefix(overflow) { seenSet.remove(old) }
+            _seenIDs.removeFirst(overflow)
+        }
+        if addedAny { scheduleSave() }
     }
 
     struct WipeOptions {
@@ -355,6 +370,7 @@ final class UserStore: ObservableObject {
 
     func clearSeenHistory() {
         seenSet.removeAll()
+        _seenIDs.removeAll()
         data.seenIDs.removeAll()
         data.savedCursors.removeAll()
         saveNow()
@@ -438,13 +454,16 @@ final class UserStore: ObservableObject {
         let clean = sub.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         let key = "sub:\(clean.lowercased())"
+        let now = Date().timeIntervalSince1970
         if let i = data.followedSubreddits.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedSubreddits.remove(at: i)
-            data.removedFollows[key] = Date().timeIntervalSince1970
+            data.removedFollows[key] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedSubreddits.insert(clean, at: 0)
             data.removedFollows.removeValue(forKey: key)
+            localAddedTimestamps["follow:\(key)"] = now
         }
         LicenseManager.shared.scheduleCloudSync()
     }
@@ -457,13 +476,16 @@ final class UserStore: ObservableObject {
         let clean = user.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         let key = "u:\(clean.lowercased())"
+        let now = Date().timeIntervalSince1970
         if let i = data.followedUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedUsers.remove(at: i)
-            data.removedFollows[key] = Date().timeIntervalSince1970
+            data.removedFollows[key] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedUsers.insert(clean, at: 0)
             data.removedFollows.removeValue(forKey: key)
+            localAddedTimestamps["follow:\(key)"] = now
         }
         LicenseManager.shared.scheduleCloudSync()
     }
@@ -479,13 +501,16 @@ final class UserStore: ObservableObject {
             .replacingOccurrences(of: "@", with: "")
         guard !clean.isEmpty else { return }
         let key = "x:\(clean.lowercased())"
+        let now = Date().timeIntervalSince1970
         if let i = data.followedXUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedXUsers.remove(at: i)
-            data.removedFollows[key] = Date().timeIntervalSince1970
+            data.removedFollows[key] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedXUsers.insert(clean, at: 0)
             data.removedFollows.removeValue(forKey: key)
+            localAddedTimestamps["follow:\(key)"] = now
         }
         LicenseManager.shared.scheduleCloudSync()
     }
@@ -501,13 +526,16 @@ final class UserStore: ObservableObject {
             .replacingOccurrences(of: "@", with: "")
         guard !clean.isEmpty else { return }
         let key = "ig:\(clean.lowercased())"
+        let now = Date().timeIntervalSince1970
         if let i = data.followedIGUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedIGUsers.remove(at: i)
-            data.removedFollows[key] = Date().timeIntervalSince1970
+            data.removedFollows[key] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedIGUsers.insert(clean, at: 0)
             data.removedFollows.removeValue(forKey: key)
+            localAddedTimestamps["follow:\(key)"] = now
         }
         LicenseManager.shared.scheduleCloudSync()
     }
@@ -528,9 +556,11 @@ final class UserStore: ObservableObject {
         let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty else { return }
         let key = "of:\(cleanId.lowercased())"
+        let now = Date().timeIntervalSince1970
         if let idx = data.followedOFCreators.firstIndex(where: { $0.id == cleanId || $0.name.caseInsensitiveCompare(cleanName) == .orderedSame }) {
             data.followedOFCreators.remove(at: idx)
-            data.removedFollows[key] = Date().timeIntervalSince1970
+            data.removedFollows[key] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedOFCreators.insert(
@@ -538,6 +568,7 @@ final class UserStore: ObservableObject {
                 at: 0
             )
             data.removedFollows.removeValue(forKey: key)
+            localAddedTimestamps["follow:\(key)"] = now
         }
         LicenseManager.shared.scheduleCloudSync()
     }

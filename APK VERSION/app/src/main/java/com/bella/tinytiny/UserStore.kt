@@ -169,10 +169,10 @@ class UserStore private constructor() {
     }
 
     fun saveNow() {
-        val snapshot = exportSnapshotForBackup()
         val f = dataFile
         scope.launch {
             synchronized(saveFileLock) {
+                val snapshot = exportSnapshotForBackup()
                 CryptoBox.sealCodable(snapshot)?.let { bytes ->
                     val tmp = File(f.parentFile, f.name + ".tmp")
                     tmp.writeBytes(bytes)
@@ -320,13 +320,16 @@ class UserStore private constructor() {
         val next = cur.followedUsers.toMutableList()
         val nextRem = cur.removedFollows.toMutableMap()
         val key = "u:${clean.lowercase()}"
+        val now = System.currentTimeMillis() / 1000.0
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
         if (idx >= 0) {
             next.removeAt(idx)
-            nextRem[key] = System.currentTimeMillis() / 1000.0
+            nextRem[key] = now
+            localAddedTimestamps.remove("follow:$key")
         } else {
             next.add(0, clean)
             nextRem.remove(key)
+            localAddedTimestamps["follow:$key"] = now
         }
         data.value = cur.copy(followedUsers = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
@@ -345,13 +348,16 @@ class UserStore private constructor() {
         val next = cur.followedSubreddits.toMutableList()
         val nextRem = cur.removedFollows.toMutableMap()
         val key = "sub:${clean.lowercase()}"
+        val now = System.currentTimeMillis() / 1000.0
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
         if (idx >= 0) {
             next.removeAt(idx)
-            nextRem[key] = System.currentTimeMillis() / 1000.0
+            nextRem[key] = now
+            localAddedTimestamps.remove("follow:$key")
         } else {
             next.add(0, clean)
             nextRem.remove(key)
+            localAddedTimestamps["follow:$key"] = now
         }
         data.value = cur.copy(followedSubreddits = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()

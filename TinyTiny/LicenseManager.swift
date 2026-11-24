@@ -486,16 +486,26 @@ final class LicenseManager: ObservableObject {
             return false
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let b64 = json["blob"] as? String,
-              let cipher = Data(base64Encoded: b64),
-              let plain = (try? CryptoBox.open(cipher, using: backupKey(for: status.licenseKey)))
-                ?? (try? CryptoBox.open(cipher, using: legacyBackupKey(for: status.licenseKey))),
-              let backup = try? JSONDecoder().decode(EncryptedProfileBackup.self, from: plain) else {
+              let b64 = json["blob"] as? String else {
             lastSyncError = "Backup decode failed"
             return false
         }
         if let ver = json["version"] as? String, !ver.isEmpty {
             lastRemoteBackupVersion = ver
+        }
+        let kV2 = backupKey(for: status.licenseKey)
+        let kV1 = legacyBackupKey(for: status.licenseKey)
+        let backup: EncryptedProfileBackup? = await Task.detached(priority: .userInitiated) {
+            guard let cipher = Data(base64Encoded: b64),
+                  let plain = (try? CryptoBox.open(cipher, using: kV2))
+                    ?? (try? CryptoBox.open(cipher, using: kV1)) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(EncryptedProfileBackup.self, from: plain)
+        }.value
+        guard let backup else {
+            lastSyncError = "Backup decode failed"
+            return false
         }
 
         // Merge non-destructively so existing local likes/follows/sessions aren't overwritten if newer
@@ -570,16 +580,22 @@ final class LicenseManager: ObservableObject {
 
             var mergedRemovedFollows = UserStore.shared.data.removedFollows
             for (k, ts) in backup.userData.removedFollows {
+                if let addedAt = localAdded["follow:\(k)"], addedAt > ts { continue }
                 if ts > (mergedRemovedFollows[k] ?? 0) { mergedRemovedFollows[k] = ts }
             }
             UserStore.shared.data.removedFollows = mergedRemovedFollows
             let rf = backup.userData.removedFollows
             if !rf.isEmpty {
-                UserStore.shared.data.followedUsers.removeAll { rf["u:\($0.lowercased())"] != nil }
-                UserStore.shared.data.followedSubreddits.removeAll { rf["sub:\($0.lowercased())"] != nil }
-                UserStore.shared.data.followedXUsers.removeAll { rf["x:\($0.lowercased())"] != nil }
-                UserStore.shared.data.followedIGUsers.removeAll { rf["ig:\($0.lowercased())"] != nil }
-                UserStore.shared.data.followedOFCreators.removeAll { rf["of:\($0.id.lowercased())"] != nil }
+                func shouldDropFollow(_ fk: String) -> Bool {
+                    guard let remTs = rf[fk] else { return false }
+                    if let addedAt = localAdded["follow:\(fk)"], addedAt > remTs { return false }
+                    return true
+                }
+                UserStore.shared.data.followedUsers.removeAll { shouldDropFollow("u:\($0.lowercased())") }
+                UserStore.shared.data.followedSubreddits.removeAll { shouldDropFollow("sub:\($0.lowercased())") }
+                UserStore.shared.data.followedXUsers.removeAll { shouldDropFollow("x:\($0.lowercased())") }
+                UserStore.shared.data.followedIGUsers.removeAll { shouldDropFollow("ig:\($0.lowercased())") }
+                UserStore.shared.data.followedOFCreators.removeAll { shouldDropFollow("of:\($0.id.lowercased())") }
             }
 
             for u in backup.userData.followedUsers where mergedRemovedFollows["u:\(u.lowercased())"] == nil && !UserStore.shared.isFollowingUser(u) {
@@ -615,9 +631,7 @@ final class LicenseManager: ObservableObject {
             if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
                 UserStore.shared.data.igSession = backup.userData.igSession
             }
-            for seenId in backup.userData.seenIDs {
-                UserStore.shared.markSeen(seenId)
-            }
+            UserStore.shared.markSeenBulk(backup.userData.seenIDs)
         }
         SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
         CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey)

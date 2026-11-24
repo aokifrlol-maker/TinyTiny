@@ -403,17 +403,19 @@ object LicenseManager {
             .digest(("tinytiny.backup.v1." + licenseKey.uppercase()).toByteArray(Charsets.UTF_8))
     }
 
-    private fun mergeJsonObjects(base: JsonObject, overlay: JsonObject): JsonObject {
-        val merged = base.toMutableMap()
-        for ((k, v) in overlay) {
-            val prev = merged[k]
-            merged[k] = if (prev is JsonObject && v is JsonObject) {
-                mergeJsonObjects(prev, v)
-            } else {
-                v
-            }
-        }
-        return JsonObject(merged)
+    private fun preserveIosOnlyTasteFields(remote: JsonObject?, localObj: JsonObject): JsonObject {
+        if (remote == null) return localObj
+        val remoteTaste = remote["tasteV2"] as? JsonObject ?: return localObj
+        val localTaste = localObj["tasteV2"] as? JsonObject ?: return localObj
+        val posPrints = remoteTaste["positiveVisualPrints"]
+        val negPrints = remoteTaste["negativeVisualPrints"]
+        if (posPrints == null && negPrints == null) return localObj
+        val mergedTaste = localTaste.toMutableMap()
+        if (posPrints != null) mergedTaste["positiveVisualPrints"] = posPrints
+        if (negPrints != null) mergedTaste["negativeVisualPrints"] = negPrints
+        val mergedRoot = localObj.toMutableMap()
+        mergedRoot["tasteV2"] = JsonObject(mergedTaste)
+        return JsonObject(mergedRoot)
     }
 
     suspend fun syncEncryptedBackupNow() = withContext(Dispatchers.IO) {
@@ -428,7 +430,8 @@ object LicenseManager {
                 updatedAt = System.currentTimeMillis() / 1000.0
             )
             val localObj = CryptoBox.json.encodeToJsonElement(EncryptedProfileBackup.serializer(), snapshot).jsonObject
-            val finalObj = lastRemoteBackupJson?.let { mergeJsonObjects(it, localObj) } ?: localObj
+            // Only preserve iOS-only Vision print arrays from lastRemoteBackupJson (do NOT deep-merge maps/tombstones!)
+            val finalObj = preserveIosOnlyTasteFields(lastRemoteBackupJson, localObj)
             val rawJson = CryptoBox.json.encodeToString(JsonObject.serializer(), finalObj).toByteArray(Charsets.UTF_8)
             val sealed = CryptoBox.seal(rawJson, backupKeyV2(s.licenseKey))
             val bodyJson = JSONObject().apply {
@@ -557,19 +560,26 @@ object LicenseManager {
 
                     val mergedRemovedFollows = local.removedFollows.toMutableMap()
                     for ((k, ts) in backup.userData.removedFollows) {
+                        val addedAt = localAdded["follow:$k"]
+                        if (addedAt != null && addedAt > ts) continue
                         if (ts > (mergedRemovedFollows[k] ?: 0.0)) mergedRemovedFollows[k] = ts
                     }
                     val rf = backup.userData.removedFollows
+                    fun keepLocalFollow(fk: String): Boolean {
+                        val remTs = rf[fk] ?: return true
+                        val addedAt = localAdded["follow:$fk"]
+                        return addedAt != null && addedAt > remTs
+                    }
                     val mergedU = (backup.userData.followedUsers.filter { "u:${it.lowercase()}" !in mergedRemovedFollows } +
-                        local.followedUsers.filter { "u:${it.lowercase()}" !in rf }).distinct()
+                        local.followedUsers.filter { keepLocalFollow("u:${it.lowercase()}") }).distinct()
                     val mergedSub = (backup.userData.followedSubreddits.filter { "sub:${it.lowercase()}" !in mergedRemovedFollows } +
-                        local.followedSubreddits.filter { "sub:${it.lowercase()}" !in rf }).distinct()
+                        local.followedSubreddits.filter { keepLocalFollow("sub:${it.lowercase()}") }).distinct()
                     val mergedX = (backup.userData.followedXUsers.filter { "x:${it.lowercase()}" !in mergedRemovedFollows } +
-                        local.followedXUsers.filter { "x:${it.lowercase()}" !in rf }).distinct()
+                        local.followedXUsers.filter { keepLocalFollow("x:${it.lowercase()}") }).distinct()
                     val mergedIG = (backup.userData.followedIGUsers.filter { "ig:${it.lowercase()}" !in mergedRemovedFollows } +
-                        local.followedIGUsers.filter { "ig:${it.lowercase()}" !in rf }).distinct()
+                        local.followedIGUsers.filter { keepLocalFollow("ig:${it.lowercase()}") }).distinct()
                     val mergedOF = (backup.userData.followedOFCreators.filter { "of:${it.id.ifEmpty { it.handle }.lowercase()}" !in mergedRemovedFollows } +
-                        local.followedOFCreators.filter { "of:${it.id.ifEmpty { it.handle }.lowercase()}" !in rf })
+                        local.followedOFCreators.filter { keepLocalFollow("of:${it.id.ifEmpty { it.handle }.lowercase()}") })
                         .distinctBy { it.id.ifEmpty { it.handle.lowercase() } }
 
                     // Merge trained algorithm tags & weights across devices
