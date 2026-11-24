@@ -88,10 +88,13 @@ struct UserData: Codable {
     var igSession = InstagramAccountSession()
     var r34Credentials = Rule34Credentials()
     var algorithm = AlgorithmProfile()
+    var removedLikedIDs: [String: Double] = [:]
+    var removedFollows: [String: Double] = [:]
 
     enum CodingKeys: String, CodingKey {
         case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers, followedOFCreators
         case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, r34Credentials, algorithm
+        case removedLikedIDs, removedFollows
     }
 
     init() {}
@@ -114,6 +117,8 @@ struct UserData: Codable {
         igSession = (try? c.decode(InstagramAccountSession.self, forKey: .igSession)) ?? InstagramAccountSession()
         r34Credentials = (try? c.decode(Rule34Credentials.self, forKey: .r34Credentials)) ?? Rule34Credentials()
         algorithm = (try? c.decode(AlgorithmProfile.self, forKey: .algorithm)) ?? AlgorithmProfile()
+        removedLikedIDs = (try? c.decode([String: Double].self, forKey: .removedLikedIDs)) ?? [:]
+        removedFollows = (try? c.decode([String: Double].self, forKey: .removedFollows)) ?? [:]
     }
 }
 
@@ -358,12 +363,23 @@ final class UserStore: ObservableObject {
         data.liked.contains { $0.id == g.id }
     }
 
+    private func trimTombstones(_ map: inout [String: Double], maxCount: Int = 400) {
+        if map.count > maxCount {
+            let keep = map.sorted { $0.value > $1.value }.prefix(maxCount)
+            map = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+    }
+
     func toggleLike(_ g: Gif) {
+        let now = Date().timeIntervalSince1970
         if let i = data.liked.firstIndex(where: { $0.id == g.id }) {
             data.liked.remove(at: i)
+            data.removedLikedIDs[g.id] = now
+            trimTombstones(&data.removedLikedIDs)
             recordAlgorithmSignal(for: g, weight: -2.5)
         } else {
             data.liked.insert(g, at: 0)
+            data.removedLikedIDs.removeValue(forKey: g.id)
             recordAlgorithmSignal(for: g, weight: 5.0)
         }
         LicenseManager.shared.scheduleCloudSync()
@@ -397,11 +413,16 @@ final class UserStore: ObservableObject {
     func toggleFollowSubreddit(_ sub: String) {
         let clean = sub.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        let key = "sub:\(clean.lowercased())"
         if let i = data.followedSubreddits.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedSubreddits.remove(at: i)
+            data.removedFollows[key] = Date().timeIntervalSince1970
+            trimTombstones(&data.removedFollows)
         } else {
             data.followedSubreddits.insert(clean, at: 0)
+            data.removedFollows.removeValue(forKey: key)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func isFollowingUser(_ user: String) -> Bool {
@@ -411,11 +432,16 @@ final class UserStore: ObservableObject {
     func toggleFollowUser(_ user: String) {
         let clean = user.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        let key = "u:\(clean.lowercased())"
         if let i = data.followedUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedUsers.remove(at: i)
+            data.removedFollows[key] = Date().timeIntervalSince1970
+            trimTombstones(&data.removedFollows)
         } else {
             data.followedUsers.insert(clean, at: 0)
+            data.removedFollows.removeValue(forKey: key)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func isFollowingXUser(_ handle: String) -> Bool {
@@ -428,11 +454,16 @@ final class UserStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
         guard !clean.isEmpty else { return }
+        let key = "x:\(clean.lowercased())"
         if let i = data.followedXUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedXUsers.remove(at: i)
+            data.removedFollows[key] = Date().timeIntervalSince1970
+            trimTombstones(&data.removedFollows)
         } else {
             data.followedXUsers.insert(clean, at: 0)
+            data.removedFollows.removeValue(forKey: key)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func isFollowingIGUser(_ handle: String) -> Bool {
@@ -445,11 +476,16 @@ final class UserStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
         guard !clean.isEmpty else { return }
+        let key = "ig:\(clean.lowercased())"
         if let i = data.followedIGUsers.firstIndex(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
             data.followedIGUsers.remove(at: i)
+            data.removedFollows[key] = Date().timeIntervalSince1970
+            trimTombstones(&data.removedFollows)
         } else {
             data.followedIGUsers.insert(clean, at: 0)
+            data.removedFollows.removeValue(forKey: key)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func isFollowingOFCreator(id: String?, handle: String?) -> Bool {
@@ -467,14 +503,19 @@ final class UserStore: ObservableObject {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "@", with: "")
         let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty else { return }
+        let key = "of:\(cleanId.lowercased())"
         if let idx = data.followedOFCreators.firstIndex(where: { $0.id == cleanId || $0.name.caseInsensitiveCompare(cleanName) == .orderedSame }) {
             data.followedOFCreators.remove(at: idx)
+            data.removedFollows[key] = Date().timeIntervalSince1970
+            trimTombstones(&data.removedFollows)
         } else {
             data.followedOFCreators.insert(
                 FollowedOFCreator(id: cleanId, name: cleanName.isEmpty ? cleanId : cleanName, displayName: displayName),
                 at: 0
             )
+            data.removedFollows.removeValue(forKey: key)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     /// Toggles follow locally AND syncs Follow/Unfollow on the user's connected X or Instagram account.

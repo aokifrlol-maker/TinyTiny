@@ -124,10 +124,10 @@ actor VisualTasteAnalyzer {
         guard let res = extractFeaturePrint(from: image) else { return nil }
         if isPositive {
             positiveObs.insert(res.obs, at: 0)
-            if positiveObs.count > 24 { positiveObs.removeLast(positiveObs.count - 24) }
+            if positiveObs.count > 36 { positiveObs.removeLast(positiveObs.count - 36) }
         } else {
             negativeObs.insert(res.obs, at: 0)
-            if negativeObs.count > 16 { negativeObs.removeLast(negativeObs.count - 16) }
+            if negativeObs.count > 32 { negativeObs.removeLast(negativeObs.count - 32) }
         }
         return res.data
     }
@@ -156,7 +156,13 @@ actor VisualTasteAnalyzer {
                 if sim > bestNegSim { bestNegSim = sim }
             }
         }
-        let score = (bestPosSim * 12.5) - (bestNegSim * 11.0)
+        // Strong hashtag-proof visual penalty when candidate closely matches a disliked clip's visual look
+        let score: Double
+        if bestNegSim >= 0.62 && bestNegSim > bestPosSim + 0.08 {
+            score = -42.0
+        } else {
+            score = (bestPosSim * 13.0) - (bestNegSim * 19.5)
+        }
         postScoreCache[postId] = score
         if postScoreCache.count > 1500, let k = postScoreCache.keys.first {
             postScoreCache.removeValue(forKey: k)
@@ -395,13 +401,13 @@ final class SmartTasteEngine: ObservableObject {
             if let archived = await VisualTasteAnalyzer.shared.registerPrototype(from: img, isPositive: isPositive) {
                 if isPositive {
                     state.positiveVisualPrints.insert(archived, at: 0)
-                    if state.positiveVisualPrints.count > 24 {
-                        state.positiveVisualPrints.removeLast(state.positiveVisualPrints.count - 24)
+                    if state.positiveVisualPrints.count > 36 {
+                        state.positiveVisualPrints.removeLast(state.positiveVisualPrints.count - 36)
                     }
                 } else {
                     state.negativeVisualPrints.insert(archived, at: 0)
-                    if state.negativeVisualPrints.count > 16 {
-                        state.negativeVisualPrints.removeLast(state.negativeVisualPrints.count - 16)
+                    if state.negativeVisualPrints.count > 32 {
+                        state.negativeVisualPrints.removeLast(state.negativeVisualPrints.count - 32)
                     }
                 }
             }
@@ -411,7 +417,7 @@ final class SmartTasteEngine: ObservableObject {
     /// Pre-evaluates visual feature-print similarity for a batch of candidate posts in background.
     func precomputeVisualSimilarity(for posts: [Gif]) {
         guard !state.positiveVisualPrints.isEmpty || !state.negativeVisualPrints.isEmpty else { return }
-        let candidates: [(String, URL)] = posts.prefix(6).compactMap { post in
+        let candidates: [(String, URL)] = posts.prefix(12).compactMap { post in
             guard visualScoreMirror[post.id] == nil,
                   let thumbURL = post.thumbURL ?? post.posterURL else { return nil }
             return (post.id, thumbURL)
@@ -472,7 +478,10 @@ final class SmartTasteEngine: ObservableObject {
         if algo.boostedTags.contains(where: { $0.caseInsensitiveCompare(lower) == .orderedSame }) {
             return true
         }
-        if (algo.tagWeights[lower] ?? 0) >= 2.2 {
+        if (algo.tagWeights[lower] ?? 0) >= 0.8 {
+            return true
+        }
+        if (sessionContextTags[lower] ?? 0) >= 2.0 {
             return true
         }
         return false
@@ -480,6 +489,10 @@ final class SmartTasteEngine: ObservableObject {
 
     func isSuppressedInDiscovery(_ post: Gif, categories: [GoonedCategory]) -> Bool {
         if isDisliked(post) { return true }
+        // Hard-drop visually disliked clips even if they spam your favorite #tags!
+        if let vScore = visualScoreMirror[post.id], vScore <= -35.0 {
+            return true
+        }
         if let author = post.author?.lowercased(), !author.isEmpty,
            !["x_user", "instagram", "rule34", "eporner", "pornhub", "xhamster", "spankbang", "xvideos"].contains(author),
            suppressedCreatorSet.contains(author) {
@@ -585,14 +598,17 @@ final class SmartTasteEngine: ObservableObject {
                 continue
             }
 
+            let isImmediateArchetype = Self.immediateArchetypeTags.contains(tag)
             let curPen = state.tagPenalties[tag] ?? 0
-            state.tagPenalties[tag] = max(-45.0, curPen - 16.0)
+            // Non-archetype regular hashtags get a gentle nudge so mis-tagged X posts don't ruin good #tags;
+            // creator suppression + visual negative fingerprint handle the heavy lifting!
+            state.tagPenalties[tag] = max(-45.0, curPen - (isImmediateArchetype ? 18.0 : 4.5))
 
             let nextCount = (state.tagDislikeCounts[tag] ?? 0) + 1
             state.tagDislikeCounts[tag] = nextCount
 
-            let isImmediateArchetype = Self.immediateArchetypeTags.contains(tag)
-            if (isImmediateArchetype || nextCount >= 2) && suppressedTagSet.insert(tag).inserted {
+            let suppressThreshold = isImmediateArchetype ? 1 : 3
+            if nextCount >= suppressThreshold && suppressedTagSet.insert(tag).inserted {
                 state.suppressedTags.append(tag)
                 if newlySuppressed == nil { newlySuppressed = tag }
             } else if isImmediateArchetype && newlySuppressed == nil {

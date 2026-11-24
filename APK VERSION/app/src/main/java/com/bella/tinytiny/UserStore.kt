@@ -101,7 +101,9 @@ data class UserData(
     var xSession: XAccountSession = XAccountSession(),
     var igSession: InstagramAccountSession = InstagramAccountSession(),
     var r34Credentials: Rule34Credentials = Rule34Credentials(),
-    var algorithm: AlgorithmProfile = AlgorithmProfile()
+    var algorithm: AlgorithmProfile = AlgorithmProfile(),
+    var removedLikedIDs: Map<String, Double> = emptyMap(),
+    var removedFollows: Map<String, Double> = emptyMap()
 )
 
 class UserStore private constructor() {
@@ -232,17 +234,26 @@ class UserStore private constructor() {
         if (!isLiked(gif)) toggleLike(gif)
     }
 
+    private fun trimTombstones(map: Map<String, Double>, maxCount: Int = 400): Map<String, Double> {
+        if (map.size <= maxCount) return map
+        return map.entries.sortedByDescending { it.value }.take(maxCount).associate { it.key to it.value }
+    }
+
     fun toggleLike(gif: Gif) {
         val cur = data.value
         val next = cur.liked.toMutableList()
+        val nextRemoved = cur.removedLikedIDs.toMutableMap()
+        val now = System.currentTimeMillis() / 1000.0
         val idx = next.indexOfFirst { it.id == gif.id }
         if (idx >= 0) {
             next.removeAt(idx)
-            data.value = cur.copy(liked = next)
+            nextRemoved[gif.id] = now
+            data.value = cur.copy(liked = next, removedLikedIDs = trimTombstones(nextRemoved))
             recordAlgorithmSignal(gif, -2.5)
         } else {
             next.add(0, gif)
-            data.value = cur.copy(liked = next)
+            nextRemoved.remove(gif.id)
+            data.value = cur.copy(liked = next, removedLikedIDs = nextRemoved)
             markSeen(gif)
             recordAlgorithmSignal(gif, 5.0)
         }
@@ -284,9 +295,17 @@ class UserStore private constructor() {
         if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedUsers.toMutableList()
+        val nextRem = cur.removedFollows.toMutableMap()
+        val key = "u:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(0, clean)
-        data.value = cur.copy(followedUsers = next)
+        if (idx >= 0) {
+            next.removeAt(idx)
+            nextRem[key] = System.currentTimeMillis() / 1000.0
+        } else {
+            next.add(0, clean)
+            nextRem.remove(key)
+        }
+        data.value = cur.copy(followedUsers = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
@@ -301,9 +320,17 @@ class UserStore private constructor() {
         if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedSubreddits.toMutableList()
+        val nextRem = cur.removedFollows.toMutableMap()
+        val key = "sub:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(0, clean)
-        data.value = cur.copy(followedSubreddits = next)
+        if (idx >= 0) {
+            next.removeAt(idx)
+            nextRem[key] = System.currentTimeMillis() / 1000.0
+        } else {
+            next.add(0, clean)
+            nextRem.remove(key)
+        }
+        data.value = cur.copy(followedSubreddits = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
@@ -318,9 +345,19 @@ class UserStore private constructor() {
         if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedXUsers.toMutableList()
+        val nextRem = cur.removedFollows.toMutableMap()
+        val key = "x:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        val nowFollowing = if (idx >= 0) { next.removeAt(idx); false } else { next.add(0, clean); true }
-        data.value = cur.copy(followedXUsers = next)
+        val nowFollowing = if (idx >= 0) {
+            next.removeAt(idx)
+            nextRem[key] = System.currentTimeMillis() / 1000.0
+            false
+        } else {
+            next.add(0, clean)
+            nextRem.remove(key)
+            true
+        }
+        data.value = cur.copy(followedXUsers = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
         if (cur.xSession.isConnected) {
@@ -338,9 +375,19 @@ class UserStore private constructor() {
         if (clean.isEmpty()) return
         val cur = data.value
         val next = cur.followedIGUsers.toMutableList()
+        val nextRem = cur.removedFollows.toMutableMap()
+        val key = "ig:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
-        val nowFollowing = if (idx >= 0) { next.removeAt(idx); false } else { next.add(0, clean); true }
-        data.value = cur.copy(followedIGUsers = next)
+        val nowFollowing = if (idx >= 0) {
+            next.removeAt(idx)
+            nextRem[key] = System.currentTimeMillis() / 1000.0
+            false
+        } else {
+            next.add(0, clean)
+            nextRem.remove(key)
+            true
+        }
+        data.value = cur.copy(followedIGUsers = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
         if (cur.igSession.isConnected) {
@@ -360,9 +407,17 @@ class UserStore private constructor() {
         if (id.isEmpty() && cleanName.isEmpty()) return
         val cur = data.value
         val next = cur.followedOFCreators.toMutableList()
+        val nextRem = cur.removedFollows.toMutableMap()
+        val key = "of:${id.ifEmpty { cleanName }.lowercase()}"
         val idx = next.indexOfFirst { (id.isNotEmpty() && it.id == id) || it.handle.equals(cleanName, ignoreCase = true) }
-        if (idx >= 0) next.removeAt(idx) else next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
-        data.value = cur.copy(followedOFCreators = next)
+        if (idx >= 0) {
+            next.removeAt(idx)
+            nextRem[key] = System.currentTimeMillis() / 1000.0
+        } else {
+            next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
+            nextRem.remove(key)
+        }
+        data.value = cur.copy(followedOFCreators = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }

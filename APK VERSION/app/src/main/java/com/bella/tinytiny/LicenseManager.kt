@@ -112,16 +112,60 @@ object LicenseManager {
     val remoteConfig = MutableStateFlow<RemoteAppConfig?>(null)
     val dismissedAnnouncementId = MutableStateFlow("")
     @Volatile private var lastRemoteBackupJson: JsonObject? = null
+    @Volatile private var lastRemoteBackupVersion: String? = null
     @Volatile private var lastSyncError: String? = null
     private val syncMutex = Mutex()
     private var cloudSyncJob: kotlinx.coroutines.Job? = null
+    private var liveSyncJob: kotlinx.coroutines.Job? = null
 
     fun scheduleCloudSync() {
         cloudSyncJob?.cancel()
         cloudSyncJob = scope.launch {
-            delay(3_500L)
+            delay(2_800L)
             syncBidirectionalBackup()
         }
+    }
+
+    fun startLiveAutoSync() {
+        if (!isValidAccess || status.value.licenseKey.isEmpty()) return
+        liveSyncJob?.cancel()
+        liveSyncJob = scope.launch {
+            while (true) {
+                checkAndPullIfRemoteChanged()
+                delay(18_000L)
+            }
+        }
+    }
+
+    fun stopLiveAutoSync() {
+        liveSyncJob?.cancel()
+        liveSyncJob = null
+    }
+
+    suspend fun checkAndPullIfRemoteChanged() = withContext(Dispatchers.IO) {
+        val s = status.value
+        if (!isValidAccess || s.licenseKey.isEmpty() || syncMutex.isLocked) return@withContext
+        try {
+            val bodyJson = JSONObject().apply {
+                put("key", s.licenseKey)
+                put("deviceId", deviceId)
+            }.toString()
+            val req = Request.Builder()
+                .url("$normalizedBaseURL/v1/backup/version")
+                .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                .build()
+            val remoteVer = client.newCall(req).execute().use { resp ->
+                if (resp.code != 200) return@withContext
+                JSONObject(resp.body?.string() ?: return@withContext).optString("version", "").takeIf { it.isNotEmpty() && it != "null" }
+            } ?: return@withContext
+            if (remoteVer != lastRemoteBackupVersion) {
+                syncMutex.withLock {
+                    if (restoreEncryptedBackupIfPresent()) {
+                        lastRemoteBackupVersion = remoteVer
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
     val deviceId: String
@@ -397,11 +441,14 @@ object LicenseManager {
                 .put(bodyJson.toRequestBody("application/json".toMediaType()))
                 .build()
             client.newCall(req).execute().use { resp ->
+                val rawResp = resp.body?.string() ?: ""
                 if (!resp.isSuccessful) {
-                    val errDetail = try { JSONObject(resp.body?.string() ?: "").optString("error", "") } catch (_: Throwable) { "" }
+                    val errDetail = try { JSONObject(rawResp).optString("error", "") } catch (_: Throwable) { "" }
                     lastSyncError = "Upload failed (HTTP ${resp.code}${if (errDetail.isNotEmpty()) ": $errDetail" else ""})"
                 } else {
                     lastRemoteBackupJson = finalObj
+                    val ver = try { JSONObject(rawResp).optString("version", "") } catch (_: Throwable) { "" }
+                    if (ver.isNotEmpty() && ver != "null") lastRemoteBackupVersion = ver
                 }
             }
         } catch (e: Throwable) {
@@ -431,10 +478,12 @@ object LicenseManager {
                     lastSyncError = "Server returned HTTP ${resp.code}"
                     return@withContext false
                 }
-                val b64 = JSONObject(resp.body?.string() ?: run {
+                val respJson = JSONObject(resp.body?.string() ?: run {
                     lastSyncError = "Empty server response"
                     return@withContext false
-                }).optString("blob")
+                })
+                val b64 = respJson.optString("blob")
+                val remoteVer = respJson.optString("version", "").takeIf { it.isNotEmpty() && it != "null" }
                 if (b64.isEmpty()) return@withContext true
                 val cipher = Base64.decode(b64, Base64.DEFAULT)
                 val plain = try {
@@ -451,6 +500,7 @@ object LicenseManager {
                 val backup = CryptoBox.json.decodeFromString<EncryptedProfileBackup>(plainText)
                 // Only update lastRemoteBackupJson AFTER decode succeeds
                 lastRemoteBackupJson = parsedJsonObj
+                if (remoteVer != null) lastRemoteBackupVersion = remoteVer
 
                 val local = UserStore.shared.data.value
                 val isTrulyEmpty = local.liked.isEmpty() && local.downloaded.isEmpty() &&
@@ -471,21 +521,50 @@ object LicenseManager {
                         )
                     )
                 } else {
-                    // Put newly synced remote likes/downloads at the TOP (index 0) so they appear immediately!
-                    val localLikeIds = local.liked.mapTo(HashSet()) { it.id }
-                    val newRemoteLikes = backup.userData.liked.filter { it.id !in localLikeIds }
-                    val mergedLikes = (newRemoteLikes + local.liked).distinctBy { it.id }
+                    // Merge unlike/unfollow tombstones so unliking or unfollowing on iPhone propagates live!
+                    val mergedRemovedLikes = local.removedLikedIDs.toMutableMap()
+                    for ((k, ts) in backup.userData.removedLikedIDs) {
+                        if (ts > (mergedRemovedLikes[k] ?: 0.0)) mergedRemovedLikes[k] = ts
+                    }
+                    val remoteRemLikes = backup.userData.removedLikedIDs
+                    val keptLocalLikes = local.liked.filter { it.id !in remoteRemLikes }
+                    val localLikeIds = keptLocalLikes.mapTo(HashSet()) { it.id }
+                    val newRemoteLikes = backup.userData.liked.filter { it.id !in mergedRemovedLikes && it.id !in localLikeIds }
+                    val mergedLikes = (newRemoteLikes + keptLocalLikes).distinctBy { it.id }
 
                     val localDlIds = local.downloaded.mapTo(HashSet()) { it.id }
                     val newRemoteDl = backup.userData.downloaded.filter { it.id !in localDlIds }
                     val mergedDl = (newRemoteDl + local.downloaded).distinctBy { it.id }
 
-                    val mergedU = (backup.userData.followedUsers + local.followedUsers).distinct()
-                    val mergedSub = (backup.userData.followedSubreddits + local.followedSubreddits).distinct()
-                    val mergedX = (backup.userData.followedXUsers + local.followedXUsers).distinct()
-                    val mergedIG = (backup.userData.followedIGUsers + local.followedIGUsers).distinct()
-                    val mergedOF = (backup.userData.followedOFCreators + local.followedOFCreators)
+                    val mergedRemovedFollows = local.removedFollows.toMutableMap()
+                    for ((k, ts) in backup.userData.removedFollows) {
+                        if (ts > (mergedRemovedFollows[k] ?: 0.0)) mergedRemovedFollows[k] = ts
+                    }
+                    val rf = backup.userData.removedFollows
+                    val mergedU = (backup.userData.followedUsers.filter { "u:${it.lowercase()}" !in mergedRemovedFollows } +
+                        local.followedUsers.filter { "u:${it.lowercase()}" !in rf }).distinct()
+                    val mergedSub = (backup.userData.followedSubreddits.filter { "sub:${it.lowercase()}" !in mergedRemovedFollows } +
+                        local.followedSubreddits.filter { "sub:${it.lowercase()}" !in rf }).distinct()
+                    val mergedX = (backup.userData.followedXUsers.filter { "x:${it.lowercase()}" !in mergedRemovedFollows } +
+                        local.followedXUsers.filter { "x:${it.lowercase()}" !in rf }).distinct()
+                    val mergedIG = (backup.userData.followedIGUsers.filter { "ig:${it.lowercase()}" !in mergedRemovedFollows } +
+                        local.followedIGUsers.filter { "ig:${it.lowercase()}" !in rf }).distinct()
+                    val mergedOF = (backup.userData.followedOFCreators.filter { "of:${it.id.ifEmpty { it.handle }.lowercase()}" !in mergedRemovedFollows } +
+                        local.followedOFCreators.filter { "of:${it.id.ifEmpty { it.handle }.lowercase()}" !in rf })
                         .distinctBy { it.id.ifEmpty { it.handle.lowercase() } }
+
+                    // Merge trained algorithm tags & weights across devices
+                    val mergedTagW = local.algorithm.tagWeights.toMutableMap()
+                    for ((tk, tv) in backup.userData.algorithm.tagWeights) {
+                        val cur = mergedTagW[tk] ?: 0.0
+                        if (kotlin.math.abs(tv) > kotlin.math.abs(cur)) mergedTagW[tk] = tv
+                    }
+                    val mergedAlgo = local.algorithm.copy(
+                        boostedTags = (local.algorithm.boostedTags + backup.userData.algorithm.boostedTags).distinct(),
+                        blockedTags = (local.algorithm.blockedTags + backup.userData.algorithm.blockedTags).distinct(),
+                        tagWeights = mergedTagW
+                    )
+
                     UserStore.shared.replaceWithBackup(
                         local.copy(
                             liked = mergedLikes,
@@ -495,6 +574,9 @@ object LicenseManager {
                             followedXUsers = mergedX,
                             followedIGUsers = mergedIG,
                             followedOFCreators = mergedOF,
+                            algorithm = mergedAlgo,
+                            removedLikedIDs = mergedRemovedLikes,
+                            removedFollows = mergedRemovedFollows,
                             xSession = if (!local.xSession.isConnected && backup.userData.xSession.isConnected) backup.userData.xSession else local.xSession,
                             igSession = if (!local.igSession.isConnected && backup.userData.igSession.isConnected) backup.userData.igSession else local.igSession,
                             r34Credentials = if (!local.r34Credentials.isConnected && backup.userData.r34Credentials.isConnected) backup.userData.r34Credentials else local.r34Credentials,

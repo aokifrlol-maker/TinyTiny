@@ -451,7 +451,10 @@ class FeedModel(
                     }
                 }
 
-                val ranked = if (src.isDiscoverySource) UserStore.shared.rankWithAlgorithm(batch) else batch
+                val ranked = if (src.isDiscoverySource) {
+                    SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
+                    UserStore.shared.rankWithAlgorithm(batch)
+                } else batch
                 if (ranked.isNotEmpty()) {
                     emptyPageStreak = 0
                     items.value = items.value + ranked

@@ -91,6 +91,7 @@ class MainActivity : FragmentActivity() {
             if (LicenseManager.status.value.isActivated) {
                 LicenseManager.verifySilently()
                 AppState.markLicenseActivated(LicenseManager.isValidAccess)
+                LicenseManager.startLiveAutoSync()
             }
         }
     }
@@ -98,6 +99,7 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         RootDeepLinkState.isAppForeground.value = false
+        LicenseManager.stopLiveAutoSync()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         AppState.lock()
         UserStore.shared.saveNow()
@@ -909,6 +911,7 @@ fun GoonedMainShell() {
                 DockButton(Icons.Default.Favorite, Icons.Outlined.FavoriteBorder, activeTab == GoonedDockTab.LIKES) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     activeTab = GoonedDockTab.LIKES
+                    scope.launch { LicenseManager.checkAndPullIfRemoteChanged() }
                 }
                 DockButton(Icons.Default.Explore, Icons.Outlined.Explore, activeTab == GoonedDockTab.BROWSE) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -917,6 +920,7 @@ fun GoonedMainShell() {
                 DockButton(Icons.Default.Person, Icons.Outlined.Person, activeTab == GoonedDockTab.PROFILE) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     activeTab = GoonedDockTab.PROFILE
+                    scope.launch { LicenseManager.checkAndPullIfRemoteChanged() }
                 }
             }
         }

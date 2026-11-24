@@ -1929,8 +1929,20 @@ export default {
       if (existingBlob && existingBlob !== body.blob) {
         await env.LICENSES.put(`backup_prev:${rec.key}`, existingBlob);
       }
+      const version = String(Date.now());
       await env.LICENSES.put(`backup:${rec.key}`, body.blob);
-      return json({ ok: true });
+      await env.LICENSES.put(`backup_ver:${rec.key}`, version);
+      return json({ ok: true, version });
+    }
+
+    if (request.method === "POST" && path === "/v1/backup/version") {
+      const body = await request.json().catch(() => ({}));
+      const rec = await getLicense(env, body.key);
+      const check = validateRecordAccess(rec, body.deviceId);
+      if (!check.ok) return json({ error: check.error }, 403);
+
+      const version = await env.LICENSES.get(`backup_ver:${rec.key}`);
+      return json({ version: version || null });
     }
 
     if (request.method === "POST" && path === "/v1/backup/get") {
@@ -1941,7 +1953,8 @@ export default {
 
       const blob = await env.LICENSES.get(`backup:${rec.key}`);
       if (!blob) return json({ error: "No backup yet" }, 404);
-      return json({ blob });
+      const version = await env.LICENSES.get(`backup_ver:${rec.key}`);
+      return json({ blob, version: version || null });
     }
 
     // 5. E2EE Peer-to-Peer Share Drops (7-day TTL, stores strictly ciphertext)

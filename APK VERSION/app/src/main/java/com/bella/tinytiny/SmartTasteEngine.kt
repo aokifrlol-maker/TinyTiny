@@ -1,6 +1,9 @@
 package com.bella.tinytiny
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -11,8 +14,10 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonNames
+import okhttp3.Request
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.sqrt
 
 // Exact iOS rawValues: reddit, x, onlyfans, instagram, rule34, long
 enum class SourcePlatform(val rawValue: String, val label: String) {
@@ -66,9 +71,108 @@ data class TasteV2Data(
     val suppressedCreators: List<String> = emptyList(),
     val tagDislikeCounts: Map<String, Int> = emptyMap(),
     val tagPenalties: Map<String, Double> = emptyMap(),
-    val hiddenOFGenders: List<String> = emptyList()
+    val hiddenOFGenders: List<String> = emptyList(),
+    val androidPosVisualVectors: List<List<Float>> = emptyList(),
+    val androidNegVisualVectors: List<List<Float>> = emptyList()
 ) {
     val forYouSources: ForYouSourceSettings get() = sourceSettings
+}
+
+/**
+ * 100% On-Device Visual Fingerprint Engine for Android (encrypted at rest via CryptoBox).
+ * Extracts a compact 48-float L2-normalized visual descriptor (16-bin HSV/skin/color histogram +
+ * 4x4 spatial luminance & warmth grid) from thumbnails so visually similar disliked clips
+ * (e.g. solo male / jerk-off videos spamming regular #tags) are downranked/filtered regardless of hashtags.
+ */
+object AndroidVisualTasteAnalyzer {
+    fun extractVectorFromUrl(url: String): List<Float>? {
+        return try {
+            val rb = Request.Builder().url(url)
+            for ((k, v) in MediaHeaders.headers(url, includeReferer = true)) rb.header(k, v)
+            TinyTinyApplication.sharedHttpClient.newCall(rb.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val bytes = resp.body?.bytes() ?: return null
+                val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+                val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+                val scaled = Bitmap.createScaledBitmap(raw, 16, 16, true)
+                if (scaled !== raw) raw.recycle()
+                val vec = computeDescriptor(scaled)
+                scaled.recycle()
+                vec
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun computeDescriptor(bmp: Bitmap): List<Float> {
+        val vec = FloatArray(48)
+        val hsv = FloatArray(3)
+        val w = bmp.width
+        val h = bmp.height
+        val total = (w * h).coerceAtLeast(1).toFloat()
+        val cellLum = FloatArray(16)
+        val cellWarm = FloatArray(16)
+        val cellCnt = FloatArray(16)
+
+        for (y in 0 until h) {
+            val gy = (y * 4) / h
+            for (x in 0 until w) {
+                val gx = (x * 4) / w
+                val px = bmp.getPixel(x, y)
+                val r = Color.red(px) / 255f
+                val g = Color.green(px) / 255f
+                val b = Color.blue(px) / 255f
+                Color.RGBToHSV(Color.red(px), Color.green(px), Color.blue(px), hsv)
+                val hBin = ((hsv[0] / 360f) * 12f).toInt().coerceIn(0, 11)
+                vec[hBin] += 1f / total
+                // Skin-tone / warmth / saturation / brightness buckets (bins 12..15)
+                val isSkin = hsv[0] in 5f..42f && hsv[1] in 0.16f..0.72f && hsv[2] > 0.25f
+                if (isSkin) vec[12] += 1f / total
+                vec[13] += hsv[1] / total
+                vec[14] += hsv[2] / total
+                if (r > g && g > b) vec[15] += 1f / total
+
+                val cell = (gy * 4 + gx).coerceIn(0, 15)
+                cellLum[cell] += (0.299f * r + 0.587f * g + 0.114f * b)
+                cellWarm[cell] += (r - b)
+                cellCnt[cell] += 1f
+            }
+        }
+        for (i in 0 until 16) {
+            val c = cellCnt[i].coerceAtLeast(1f)
+            vec[16 + i] = cellLum[i] / c
+            vec[32 + i] = (cellWarm[i] / c) * 0.5f + 0.5f
+        }
+        var normSq = 0f
+        for (v in vec) normSq += v * v
+        val norm = sqrt(normSq).coerceAtLeast(1e-6f)
+        for (i in vec.indices) vec[i] /= norm
+        return vec.toList()
+    }
+
+    fun cosineSim(a: List<Float>, b: List<Float>): Double {
+        if (a.size != b.size || a.isEmpty()) return 0.0
+        var dot = 0.0
+        for (i in a.indices) dot += a[i].toDouble() * b[i].toDouble()
+        return dot.coerceIn(0.0, 1.0)
+    }
+
+    fun evaluate(candidate: List<Float>, positives: List<List<Float>>, negatives: List<List<Float>>): Double {
+        if (positives.isEmpty() && negatives.isEmpty()) return 0.0
+        var bestPos = 0.0
+        for (p in positives) {
+            val s = cosineSim(candidate, p)
+            if (s > bestPos) bestPos = s
+        }
+        var bestNeg = 0.0
+        for (n in negatives) {
+            val s = cosineSim(candidate, n)
+            if (s > bestNeg) bestNeg = s
+        }
+        if (bestNeg >= 0.93 && bestNeg > bestPos + 0.03) return -42.0
+        return (bestPos * 12.5) - (bestNeg * 19.0)
+    }
 }
 
 class SmartTasteEngine private constructor() {
@@ -214,6 +318,50 @@ class SmartTasteEngine private constructor() {
 
     val state = MutableStateFlow(TasteV2Data())
     private val sessionContextTags = ConcurrentHashMap<String, Double>()
+    private val visualScoreMirror = ConcurrentHashMap<String, Double>()
+    private val visualInFlight = ConcurrentHashMap.newKeySet<String>()
+
+    fun captureVisualPrototype(post: Gif, isPositive: Boolean) {
+        val url = post.thumbURL ?: post.posterURL ?: return
+        scope.launch {
+            val vec = AndroidVisualTasteAnalyzer.extractVectorFromUrl(url) ?: return@launch
+            val s = state.value
+            if (isPositive) {
+                val next = (listOf(vec) + s.androidPosVisualVectors).take(36)
+                state.value = s.copy(androidPosVisualVectors = next)
+            } else {
+                val next = (listOf(vec) + s.androidNegVisualVectors).take(32)
+                state.value = s.copy(androidNegVisualVectors = next)
+            }
+            scheduleSave()
+        }
+    }
+
+    fun precomputeVisualSimilarity(posts: List<Gif>) {
+        val s = state.value
+        if (s.androidPosVisualVectors.isEmpty() && s.androidNegVisualVectors.isEmpty()) return
+        val pos = s.androidPosVisualVectors
+        val neg = s.androidNegVisualVectors
+        val candidates = posts.take(12).mapNotNull { post ->
+            if (visualScoreMirror.containsKey(post.id) || !visualInFlight.add(post.id)) return@mapNotNull null
+            val u = post.thumbURL ?: post.posterURL ?: return@mapNotNull null
+            post.id to u
+        }
+        if (candidates.isEmpty()) return
+        scope.launch {
+            for ((pid, url) in candidates) {
+                try {
+                    val vec = AndroidVisualTasteAnalyzer.extractVectorFromUrl(url)
+                    if (vec != null) {
+                        visualScoreMirror[pid] = AndroidVisualTasteAnalyzer.evaluate(vec, pos, neg)
+                        if (visualScoreMirror.size > 1500) visualScoreMirror.clear()
+                    }
+                } finally {
+                    visualInFlight.remove(pid)
+                }
+            }
+        }
+    }
 
     private val dislikedIDSet = ConcurrentHashMap.newKeySet<String>()
     private val dislikedMediaSet = ConcurrentHashMap.newKeySet<String>()
@@ -381,6 +529,7 @@ class SmartTasteEngine private constructor() {
             creatorWatchStats = nextWatch,
             creatorLatentClusters = nextClusters
         )
+        if (intensity >= 2.2) captureVisualPrototype(post, isPositive = true)
         scheduleSave()
     }
 
@@ -424,6 +573,7 @@ class SmartTasteEngine private constructor() {
 
     fun isSuppressedInDiscovery(post: Gif, categories: List<GoonedCategory>): Boolean {
         if (isDisliked(post)) return true
+        if ((visualScoreMirror[post.id] ?: 0.0) <= -35.0) return true
         val author = post.author?.trim()?.lowercase()?.replace("@", "")
         if (!author.isNullOrEmpty() && author !in genericAuthors && suppressedCreatorSet.contains(author)) return true
 
@@ -441,7 +591,8 @@ class SmartTasteEngine private constructor() {
     private fun isUserLikedOrPinnedTag(tag: String): Boolean {
         val algo = UserStore.shared.data.value.algorithm
         if (algo.boostedTags.any { it.equals(tag, ignoreCase = true) }) return true
-        if ((algo.tagWeights[tag] ?: 0.0) >= 2.2) return true
+        if ((algo.tagWeights[tag] ?: 0.0) >= 0.8) return true
+        if ((sessionContextTags[tag] ?: 0.0) >= 2.0) return true
         return false
     }
 
@@ -485,15 +636,16 @@ class SmartTasteEngine private constructor() {
             if (isUserLikedOrPinnedTag(k)) continue
             val isImmediate = k in immediateArchetypeTags
             val isProtected = k in protectedBroadTags
-            nextPenalties[k] = (nextPenalties[k] ?: 0.0) - (if (isImmediate) 16.0 else 4.0)
+            nextPenalties[k] = maxOf(-45.0, (nextPenalties[k] ?: 0.0) - (if (isImmediate) 18.0 else 4.5))
             val count = (nextCounts[k] ?: 0) + 1
             nextCounts[k] = count
-            val threshold = if (isImmediate) 1 else 2
+            val threshold = if (isImmediate) 1 else 3
             if (!isProtected && count >= threshold && suppressedTagSet.add(k)) {
                 nextSuppressedTags.add(k)
                 if (autoSuppressed == null) autoSuppressed = k
             }
         }
+        captureVisualPrototype(post, isPositive = false)
 
         val newlyHiddenGenders = mutableListOf<String>()
         val nextHiddenGenders = s.hiddenOFGenders.toMutableList()
@@ -590,6 +742,7 @@ class SmartTasteEngine private constructor() {
         }
         val sw = s.sourceWeights[platform(post).rawValue] ?: 1.0
         score += (sw - 1.0) * 3.5
+        score += (visualScoreMirror[post.id] ?: 0.0)
         return score
     }
 

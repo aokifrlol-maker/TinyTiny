@@ -95,14 +95,60 @@ final class LicenseManager: ObservableObject {
     private var lastSyncError: String? = nil
     private var isSyncingBackup: Bool = false
     private var cloudSyncTask: Task<Void, Never>? = nil
+    private var liveSyncTask: Task<Void, Never>? = nil
+    private var lastRemoteBackupVersion: String? = nil
 
     func scheduleCloudSync() {
         guard isValidAccess, !status.licenseKey.isEmpty else { return }
         cloudSyncTask?.cancel()
         cloudSyncTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_800_000_000)
             guard !Task.isCancelled, let self else { return }
             _ = await self.syncBidirectionalBackup()
+        }
+    }
+
+    func startLiveAutoSync() {
+        guard isValidAccess, !status.licenseKey.isEmpty else { return }
+        liveSyncTask?.cancel()
+        liveSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.checkAndPullIfRemoteChanged()
+                try? await Task.sleep(nanoseconds: 18_000_000_000)
+            }
+        }
+    }
+
+    func stopLiveAutoSync() {
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
+    }
+
+    func checkAndPullIfRemoteChanged() async {
+        guard isValidAccess, !status.licenseKey.isEmpty, !isSyncingBackup,
+              let url = URL(string: "\(normalizedBaseURL)/v1/backup/version") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "key": status.licenseKey,
+            "deviceId": deviceId
+        ])
+        guard let (data, resp) = try? await session.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let remoteVer = json["version"] as? String,
+              !remoteVer.isEmpty else {
+            return
+        }
+        if remoteVer != lastRemoteBackupVersion {
+            isSyncingBackup = true
+            defer { isSyncingBackup = false }
+            if await restoreEncryptedBackupIfPresent() {
+                lastRemoteBackupVersion = remoteVer
+            }
         }
     }
 
@@ -372,10 +418,10 @@ final class LicenseManager: ObservableObject {
             updatedAt: Date().timeIntervalSince1970
         )
         let sessionRef = session
-        let uploadErr: String? = await Task.detached(priority: .utility) {
+        let uploadResult: (err: String?, version: String?) = await Task.detached(priority: .utility) {
             guard let rawJson = try? JSONEncoder().encode(snapshot),
                   let sealed = try? CryptoBox.seal(rawJson, using: key) else {
-                return "Failed to encrypt backup"
+                return ("Failed to encrypt backup", nil)
             }
 
             var req = URLRequest(url: url)
@@ -388,19 +434,23 @@ final class LicenseManager: ObservableObject {
             ])
             do {
                 let (respData, resp) = try await sessionRef.data(for: req)
+                let parsed = try? JSONSerialization.jsonObject(with: respData) as? [String: Any]
                 if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    let srvErr = (try? JSONSerialization.jsonObject(with: respData) as? [String: Any])?["error"] as? String
+                    let srvErr = parsed?["error"] as? String
                     if let srvErr, !srvErr.isEmpty {
-                        return "HTTP \(http.statusCode): \(srvErr)"
+                        return ("HTTP \(http.statusCode): \(srvErr)", nil)
                     }
-                    return "HTTP \(http.statusCode)"
+                    return ("HTTP \(http.statusCode)", nil)
                 }
-                return nil
+                return (nil, parsed?["version"] as? String)
             } catch {
-                return error.localizedDescription
+                return (error.localizedDescription, nil)
             }
         }.value
-        lastSyncError = uploadErr
+        lastSyncError = uploadResult.err
+        if let v = uploadResult.version, !v.isEmpty {
+            lastRemoteBackupVersion = v
+        }
     }
 
     @discardableResult
@@ -444,6 +494,9 @@ final class LicenseManager: ObservableObject {
             lastSyncError = "Backup decode failed"
             return false
         }
+        if let ver = json["version"] as? String, !ver.isEmpty {
+            lastRemoteBackupVersion = ver
+        }
 
         // Merge non-destructively so existing local likes/follows/sessions aren't overwritten if newer
         let local = UserStore.shared.data
@@ -465,9 +518,20 @@ final class LicenseManager: ObservableObject {
             deduped.downloaded = deduped.downloaded.filter { seenDl.insert($0.id).inserted }
             UserStore.shared.data = deduped
         } else {
+            // Merge unlike/unfollow tombstones so unliking or unfollowing on another device propagates live!
+            var mergedRemovedLikes = UserStore.shared.data.removedLikedIDs
+            for (k, ts) in backup.userData.removedLikedIDs {
+                if ts > (mergedRemovedLikes[k] ?? 0) { mergedRemovedLikes[k] = ts }
+            }
+            UserStore.shared.data.removedLikedIDs = mergedRemovedLikes
+            let remoteRemovedLikes = backup.userData.removedLikedIDs
+            if !remoteRemovedLikes.isEmpty {
+                UserStore.shared.data.liked.removeAll { remoteRemovedLikes[$0.id] != nil }
+            }
+
             var existingIds = Set(UserStore.shared.data.liked.map(\.id))
             var newRemoteLikes: [Gif] = []
-            for item in backup.userData.liked where existingIds.insert(item.id).inserted {
+            for item in backup.userData.liked where mergedRemovedLikes[item.id] == nil && existingIds.insert(item.id).inserted {
                 newRemoteLikes.append(item)
             }
             if !newRemoteLikes.isEmpty {
@@ -481,20 +545,47 @@ final class LicenseManager: ObservableObject {
             if !newRemoteDl.isEmpty {
                 UserStore.shared.data.downloaded.insert(contentsOf: newRemoteDl, at: 0)
             }
-            for u in backup.userData.followedUsers where !UserStore.shared.isFollowingUser(u) {
-                UserStore.shared.toggleFollowUser(u)
+
+            var mergedRemovedFollows = UserStore.shared.data.removedFollows
+            for (k, ts) in backup.userData.removedFollows {
+                if ts > (mergedRemovedFollows[k] ?? 0) { mergedRemovedFollows[k] = ts }
             }
-            for s in backup.userData.followedSubreddits where !UserStore.shared.isFollowingSubreddit(s) {
-                UserStore.shared.toggleFollowSubreddit(s)
+            UserStore.shared.data.removedFollows = mergedRemovedFollows
+            let rf = backup.userData.removedFollows
+            if !rf.isEmpty {
+                UserStore.shared.data.followedUsers.removeAll { rf["u:\($0.lowercased())"] != nil }
+                UserStore.shared.data.followedSubreddits.removeAll { rf["sub:\($0.lowercased())"] != nil }
+                UserStore.shared.data.followedXUsers.removeAll { rf["x:\($0.lowercased())"] != nil }
+                UserStore.shared.data.followedIGUsers.removeAll { rf["ig:\($0.lowercased())"] != nil }
+                UserStore.shared.data.followedOFCreators.removeAll { rf["of:\($0.id.lowercased())"] != nil }
             }
-            for x in backup.userData.followedXUsers where !UserStore.shared.isFollowingXUser(x) {
-                UserStore.shared.toggleFollowXUser(x)
+
+            for u in backup.userData.followedUsers where mergedRemovedFollows["u:\(u.lowercased())"] == nil && !UserStore.shared.isFollowingUser(u) {
+                UserStore.shared.data.followedUsers.insert(u, at: 0)
             }
-            for ig in backup.userData.followedIGUsers where !UserStore.shared.isFollowingIGUser(ig) {
-                UserStore.shared.toggleFollowIGUser(ig)
+            for s in backup.userData.followedSubreddits where mergedRemovedFollows["sub:\(s.lowercased())"] == nil && !UserStore.shared.isFollowingSubreddit(s) {
+                UserStore.shared.data.followedSubreddits.insert(s, at: 0)
             }
-            for of in backup.userData.followedOFCreators where !UserStore.shared.isFollowingOFCreator(id: of.id, handle: of.name) {
-                UserStore.shared.toggleFollowOFCreator(id: of.id, name: of.name, displayName: of.displayName)
+            for x in backup.userData.followedXUsers where mergedRemovedFollows["x:\(x.lowercased())"] == nil && !UserStore.shared.isFollowingXUser(x) {
+                UserStore.shared.data.followedXUsers.insert(x, at: 0)
+            }
+            for ig in backup.userData.followedIGUsers where mergedRemovedFollows["ig:\(ig.lowercased())"] == nil && !UserStore.shared.isFollowingIGUser(ig) {
+                UserStore.shared.data.followedIGUsers.insert(ig, at: 0)
+            }
+            for of in backup.userData.followedOFCreators where mergedRemovedFollows["of:\(of.id.lowercased())"] == nil && !UserStore.shared.isFollowingOFCreator(id: of.id, handle: of.name) {
+                UserStore.shared.data.followedOFCreators.insert(of, at: 0)
+            }
+
+            // Merge trained algorithm tags & weights across devices
+            for bt in backup.userData.algorithm.boostedTags where !UserStore.shared.data.algorithm.boostedTags.contains(bt) {
+                UserStore.shared.data.algorithm.boostedTags.append(bt)
+            }
+            for bl in backup.userData.algorithm.blockedTags where !UserStore.shared.data.algorithm.blockedTags.contains(bl) {
+                UserStore.shared.data.algorithm.blockedTags.append(bl)
+            }
+            for (tk, tv) in backup.userData.algorithm.tagWeights {
+                let cur = UserStore.shared.data.algorithm.tagWeights[tk] ?? 0
+                if abs(tv) > abs(cur) { UserStore.shared.data.algorithm.tagWeights[tk] = tv }
             }
             if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
                 UserStore.shared.data.xSession = backup.userData.xSession

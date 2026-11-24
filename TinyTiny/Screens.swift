@@ -1121,6 +1121,7 @@ struct GoonedLikesView: View {
     var body: some View {
         ZStack {
             Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
+                .task { await LicenseManager.shared.checkAndPullIfRemoteChanged() }
 
             VStack(spacing: 0) {
                 // Top Bar: Liked vs Offline Vault Switcher + Gear on Right
@@ -1795,6 +1796,7 @@ struct GoonedFollowsView: View {
     var body: some View {
         ZStack {
             Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
+                .task { await LicenseManager.shared.checkAndPullIfRemoteChanged() }
 
             VStack(spacing: 14) {
                 HStack {
@@ -2859,6 +2861,7 @@ struct AlgorithmEditorSheet: View {
     var body: some View {
         ZStack {
             Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
+                .task { await LicenseManager.shared.checkAndPullIfRemoteChanged() }
 
             VStack(spacing: 0) {
                 HStack {
@@ -3492,6 +3495,7 @@ struct CreatorProfileGridView: View {
     var body: some View {
         ZStack {
             Color.clear.liquidGlassBackground(tinted: store.data.settings.tintedGlass)
+                .task { await LicenseManager.shared.checkAndPullIfRemoteChanged() }
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {

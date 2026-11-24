@@ -189,7 +189,10 @@ struct RootView: View {
                 .presentationDragIndicator(.visible)
         }
         .onChange(of: phase) { _, p in
-            if p == .background {
+            if p == .active {
+                license.startLiveAutoSync()
+            } else if p == .background {
+                license.stopLiveAutoSync()
                 app.lock()
                 store.saveNow()
                 SmartTasteEngine.shared.saveNow()
