@@ -205,7 +205,7 @@ final class FeedModel: ObservableObject {
             let key = "\(source.swipeKey.kind):\(source.swipeKey.name.lowercased()):\(FeedSort.hot.rawValue)"
             let keepSeen: Bool = {
                 switch source {
-                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit:
+                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
                     return true
                 default:
                     return false
@@ -485,9 +485,19 @@ final class FeedModel: ObservableObject {
             var totalAddedThisCall = 0
             var attempts = 0
             var fallbackSeen: [Gif] = []
-            let isProfileOrSearch: Bool = {
+            // Only creator profiles & personal bookmarks/likes/saved should show already-watched videos.
+            // Searches (xSearch, ofSearch, longSearch, multiSearch, rule34, subreddit) MUST skip watched videos!
+            let isProfileOrSaved: Bool = {
                 switch source {
-                case .xUser, .xSearch, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .ofSearch, .user, .subreddit, .longSearch:
+                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            let isSearchOrSubreddit: Bool = {
+                switch source {
+                case .xSearch, .ofSearch, .longSearch, .multiSearch, .subreddit:
                     return true
                 case .rule34(let tag):
                     return !tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -495,7 +505,7 @@ final class FeedModel: ObservableObject {
                     return false
                 }
             }()
-            let maxAttempts = isProfileOrSearch ? 2 : ((source.isXFeed || source.isIGFeed) ? 3 : (source == .following ? 2 : 3))
+            let maxAttempts = isProfileOrSaved ? 2 : (isSearchOrSubreddit ? 5 : ((source.isXFeed || source.isIGFeed) ? 3 : (source == .following ? 2 : 4)))
 
             while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
@@ -551,7 +561,7 @@ final class FeedModel: ObservableObject {
                     guard ids.insert(post.id).inserted else { continue }
                     guard mediaKeys.insert(post.canonicalDedupeKey).inserted else { continue }
                     if let sim = post.contentSimilarityKey, !seenSimKeys.insert(sim).inserted { continue }
-                    if !isProfileOrSearch && store.isSeen(post) {
+                    if !isProfileOrSaved && store.isSeen(post) {
                         fallbackSeen.append(post)
                     } else {
                         batchUnseen.append(post)
@@ -586,6 +596,15 @@ final class FeedModel: ObservableObject {
                         } else if case .longVideos = source {
                             let nextP = (Int(afterCursor ?? "1") ?? 1) + 1
                             afterCursor = "\(nextP)"
+                        } else if case .longSearch = source {
+                            let nextP = (Int(afterCursor ?? "1") ?? 1) + 1
+                            afterCursor = "\(nextP)"
+                        } else if case .multiSearch = source {
+                            let nextP = (Int(afterCursor ?? "1") ?? 1) + 1
+                            afterCursor = "\(nextP)"
+                        } else if case .ofSearch = source {
+                            let nextOff = (Int(afterCursor ?? "0") ?? 0) + 20
+                            afterCursor = "\(nextOff)"
                         } else if source == .xForYou && store.data.xSession.isConnected && emptyPageStreak >= 2 {
                             let blocked = Set(store.data.algorithm.blockedTags + SmartTasteEngine.shared.state.suppressedTags)
                             let fallbackTag = store.data.algorithm.tagWeights
@@ -639,7 +658,7 @@ final class FeedModel: ObservableObject {
             }
 
             // Never fall back to seen items on discovery / For You / main feeds (prevents repeating videos)
-            if items.isEmpty && !fallbackSeen.isEmpty && (isProfileOrSearch || source == .following) && !source.isIGFeed && !source.isXFeed {
+            if items.isEmpty && !fallbackSeen.isEmpty && (isProfileOrSaved || isSearchOrSubreddit || source == .following) && !source.isIGFeed && !source.isXFeed {
                 items.append(contentsOf: fallbackSeen.shuffled())
             }
 
@@ -1027,7 +1046,8 @@ final class FeedModel: ObservableObject {
                 await withTaskGroup(of: [Gif].self) { group in
                     for sub in topSubs {
                         group.addTask {
-                            (try? await api.subreddit(sub, sort: sortVal, after: nil, limit: 10))?.posts ?? []
+                            let subCursor = pageNum > 1 ? "\((pageNum - 1) * 10)" : nil
+                            return (try? await api.subreddit(sub, sort: sortVal, after: subCursor, limit: 10))?.posts ?? []
                         }
                     }
                     for await batch in group { collected.append(contentsOf: batch) }
