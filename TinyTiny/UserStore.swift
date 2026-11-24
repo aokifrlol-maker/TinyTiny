@@ -366,6 +366,7 @@ final class UserStore: ObservableObject {
             data.liked.insert(g, at: 0)
             recordAlgorithmSignal(for: g, weight: 5.0)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func like(_ g: Gif) {
@@ -379,10 +380,12 @@ final class UserStore: ObservableObject {
             data.downloaded.insert(g, at: 0)
             recordAlgorithmSignal(for: g, weight: 6.5)
         }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func removeDownloadedRecord(_ g: Gif) {
         data.downloaded.removeAll { $0.id == g.id }
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     // MARK: - Follows (Subreddits, Reddit Creators, X Creators & Instagram Creators)

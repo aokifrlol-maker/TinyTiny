@@ -92,6 +92,19 @@ final class LicenseManager: ObservableObject {
     @Published var dismissedAnnouncementId: String = UserDefaults.standard.string(forKey: "tinytiny.dismissed.announcement") ?? ""
 
     private var lastErrorReportAt: [String: Date] = [:]
+    private var lastSyncError: String? = nil
+    private var isSyncingBackup: Bool = false
+    private var cloudSyncTask: Task<Void, Never>? = nil
+
+    func scheduleCloudSync() {
+        guard isValidAccess, !status.licenseKey.isEmpty else { return }
+        cloudSyncTask?.cancel()
+        cloudSyncTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            _ = await self.syncBidirectionalBackup()
+        }
+    }
 
     var activeAnnouncement: (id: String, text: String)? {
         guard let text = remoteConfig?.announcement?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -348,6 +361,7 @@ final class LicenseManager: ObservableObject {
         guard isValidAccess, !status.licenseKey.isEmpty,
               let url = URL(string: "\(normalizedBaseURL)/v1/backup") else { return }
 
+        lastSyncError = nil
         let licKey = status.licenseKey
         let devId = deviceId
         let key = backupKey(for: licKey)
@@ -358,9 +372,11 @@ final class LicenseManager: ObservableObject {
             updatedAt: Date().timeIntervalSince1970
         )
         let sessionRef = session
-        await Task.detached(priority: .utility) {
+        let uploadErr: String? = await Task.detached(priority: .utility) {
             guard let rawJson = try? JSONEncoder().encode(snapshot),
-                  let sealed = try? CryptoBox.seal(rawJson, using: key) else { return }
+                  let sealed = try? CryptoBox.seal(rawJson, using: key) else {
+                return "Failed to encrypt backup"
+            }
 
             var req = URLRequest(url: url)
             req.httpMethod = "PUT"
@@ -370,14 +386,31 @@ final class LicenseManager: ObservableObject {
                 "deviceId": devId,
                 "blob": sealed.base64EncodedString()
             ])
-            _ = try? await sessionRef.data(for: req)
+            do {
+                let (respData, resp) = try await sessionRef.data(for: req)
+                if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    let srvErr = (try? JSONSerialization.jsonObject(with: respData) as? [String: Any])?["error"] as? String
+                    if let srvErr, !srvErr.isEmpty {
+                        return "HTTP \(http.statusCode): \(srvErr)"
+                    }
+                    return "HTTP \(http.statusCode)"
+                }
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
         }.value
+        lastSyncError = uploadErr
     }
 
     @discardableResult
     func restoreEncryptedBackupIfPresent() async -> Bool {
         guard !status.licenseKey.isEmpty,
-              let url = URL(string: "\(normalizedBaseURL)/v1/backup/get") else { return false }
+              let url = URL(string: "\(normalizedBaseURL)/v1/backup/get") else {
+            lastSyncError = "No active license key"
+            return false
+        }
+        lastSyncError = nil
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -390,19 +423,25 @@ final class LicenseManager: ObservableObject {
 
         guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse else {
+            lastSyncError = "Network error"
             return false
         }
         if http.statusCode == 404 {
             // No cloud backup exists yet for this key — safe to upload local state
             return true
         }
-        guard http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard http.statusCode == 200 else {
+            let srvErr = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            lastSyncError = srvErr ?? "Server returned HTTP \(http.statusCode)"
+            return false
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let b64 = json["blob"] as? String,
               let cipher = Data(base64Encoded: b64),
               let plain = (try? CryptoBox.open(cipher, using: backupKey(for: status.licenseKey)))
                 ?? (try? CryptoBox.open(cipher, using: legacyBackupKey(for: status.licenseKey))),
               let backup = try? JSONDecoder().decode(EncryptedProfileBackup.self, from: plain) else {
+            lastSyncError = "Backup decode failed"
             return false
         }
 
@@ -413,8 +452,18 @@ final class LicenseManager: ObservableObject {
             && local.followedUsers.isEmpty && local.followedXUsers.isEmpty
             && local.followedIGUsers.isEmpty && local.followedSubreddits.isEmpty
             && local.followedOFCreators.isEmpty
-        if isTrulyEmpty && !backup.userData.liked.isEmpty {
-            UserStore.shared.data = backup.userData
+        let remoteHasData = !backup.userData.liked.isEmpty || !backup.userData.downloaded.isEmpty
+            || backup.userData.xSession.isConnected || backup.userData.igSession.isConnected
+            || !backup.userData.followedUsers.isEmpty || !backup.userData.followedXUsers.isEmpty
+            || !backup.userData.followedIGUsers.isEmpty || !backup.userData.followedSubreddits.isEmpty
+            || !backup.userData.followedOFCreators.isEmpty
+        if isTrulyEmpty && remoteHasData {
+            var deduped = backup.userData
+            var seenLikes = Set<String>()
+            deduped.liked = deduped.liked.filter { seenLikes.insert($0.id).inserted }
+            var seenDl = Set<String>()
+            deduped.downloaded = deduped.downloaded.filter { seenDl.insert($0.id).inserted }
+            UserStore.shared.data = deduped
         } else {
             var existingIds = Set(UserStore.shared.data.liked.map(\.id))
             var newRemoteLikes: [Gif] = []
@@ -510,9 +559,16 @@ final class LicenseManager: ObservableObject {
     }
 
     func syncBidirectionalBackup() async -> String {
+        if isSyncingBackup {
+            return "Sync already in progress..."
+        }
+        isSyncingBackup = true
+        defer { isSyncingBackup = false }
+
         let restoredOK = await restoreEncryptedBackupIfPresent()
         guard restoredOK else {
-            return "Sync paused: couldn't restore cloud backup (kept cloud data safe)."
+            let reason = lastSyncError.map { " (\($0))" } ?? ""
+            return "Sync paused: couldn't restore cloud backup\(reason)."
         }
         let d = UserStore.shared.data
         let hasAnyData = !d.liked.isEmpty
@@ -526,6 +582,9 @@ final class LicenseManager: ObservableObject {
             || !d.followedOFCreators.isEmpty
         if hasAnyData {
             await syncEncryptedBackupNow()
+            if let upErr = lastSyncError, !upErr.isEmpty {
+                return "Restored \(d.liked.count) likes, but upload failed: \(upErr)"
+            }
         }
         var parts = ["\(d.liked.count) likes", "\(d.downloaded.count) saved"]
         if d.xSession.isConnected { parts.append("X login") }

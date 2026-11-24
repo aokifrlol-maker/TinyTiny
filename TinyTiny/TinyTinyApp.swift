@@ -193,7 +193,11 @@ struct RootView: View {
                 app.lock()
                 store.saveNow()
                 SmartTasteEngine.shared.saveNow()
-                Task { await license.syncEncryptedBackupNow() }
+                Task {
+                    if license.isValidAccess {
+                        _ = await license.syncBidirectionalBackup()
+                    }
+                }
             }
         }
     }

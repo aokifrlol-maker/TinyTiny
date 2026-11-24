@@ -1098,7 +1098,9 @@ struct GoonedLikesView: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
     private var sourceItems: [Gif] {
-        mode == "offline" ? store.data.downloaded : store.data.liked
+        let raw = mode == "offline" ? store.data.downloaded : store.data.liked
+        var seen = Set<String>()
+        return raw.filter { seen.insert($0.id).inserted }
     }
 
     private var filteredItems: [Gif] {
@@ -1182,6 +1184,24 @@ struct GoonedLikesView: View {
                         }
                         .buttonStyle(ScalePressButtonStyle())
                     }
+
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        Task {
+                            bulkToast = "Syncing cloud backup..."
+                            let msg = await LicenseManager.shared.syncBidirectionalBackup()
+                            bulkToast = msg
+                            try? await Task.sleep(nanoseconds: 2_600_000_000)
+                            if bulkToast == msg { bulkToast = nil }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 42, height: 42)
+                            .liquidGlassCircle()
+                    }
+                    .buttonStyle(ScalePressButtonStyle())
 
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
@@ -1362,6 +1382,20 @@ struct GoonedLikesView: View {
                         .padding(.bottom, isSelecting ? 150 : 92)
                     }
                 }
+            }
+
+            if !isSelecting, let bulkToast {
+                VStack {
+                    Text(bulkToast)
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .liquidGlassCapsule(active: true)
+                        .padding(.top, 60)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
             }
 
             if isSelecting {
