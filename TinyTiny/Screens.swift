@@ -3648,9 +3648,7 @@ struct CreatorProfileGridView: View {
             }
         }
         .task {
-            if model.items.isEmpty {
-                await model.loadMore()
-            }
+            await model.refresh(keepSavedCursor: false)
         }
     }
 }

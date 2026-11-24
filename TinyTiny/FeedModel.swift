@@ -236,6 +236,17 @@ final class FeedModel: ObservableObject {
         return true
     }
 
+    /// Creator profiles and personal bookmarks/likes/saved should ALWAYS start from page 1
+    /// and ALWAYS show all posts (even ones you already watched while scrolling feeds).
+    private var isProfileOrSavedSource: Bool {
+        switch source {
+        case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
+            return true
+        default:
+            return false
+        }
+    }
+
     private static var cacheDirectory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("FeedCache", isDirectory: true)
@@ -324,9 +335,9 @@ final class FeedModel: ObservableObject {
             isSwitching = true
             isLoading = false
             errorText = nil
-            afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+            afterCursor = isProfileOrSavedSource ? nil : UserStore.shared.savedCursor(for: cursorKey)
             activeLoadTask = Task {
-                await refresh(keepSavedCursor: true)
+                await refresh(keepSavedCursor: !isProfileOrSavedSource)
             }
         }
     }
@@ -337,9 +348,9 @@ final class FeedModel: ObservableObject {
         sort = newSort
         isSwitching = true
         isLoading = false
-        afterCursor = UserStore.shared.savedCursor(for: cursorKey)
+        afterCursor = isProfileOrSavedSource ? nil : UserStore.shared.savedCursor(for: cursorKey)
         activeLoadTask = Task {
-            await refresh(keepSavedCursor: true)
+            await refresh(keepSavedCursor: !isProfileOrSavedSource)
         }
     }
 
@@ -390,7 +401,9 @@ final class FeedModel: ObservableObject {
         lastAppearedIndex = 0
         followingRoundRobin = 0
         followingCursors = [:]
-        if rotateCursor {
+        if isProfileOrSavedSource {
+            afterCursor = nil
+        } else if rotateCursor {
             if case .forYou = source {
                 afterCursor = GoonedAPI.randomForYouCursor(offset: Int.random(in: 0...6) * 25)
             } else if afterCursor == nil {
@@ -514,7 +527,9 @@ final class FeedModel: ObservableObject {
                 let resp = try await fetchPage(api: api, store: store, cursor: afterCursor)
 
                 afterCursor = resp.after
-                store.setSavedCursor(resp.after, for: cursorKey)
+                if !isProfileOrSavedSource {
+                    store.setSavedCursor(resp.after, for: cursorKey)
+                }
 
                 let isDiscoverySource: Bool = {
                     switch source {
@@ -527,7 +542,7 @@ final class FeedModel: ObservableObject {
 
                 let playablePosts = resp.posts.filter { post in
                     guard post.hasPlayableMedia else { return false }
-                    if SmartTasteEngine.shared.isDisliked(post) { return false }
+                    if !isProfileOrSaved && SmartTasteEngine.shared.isDisliked(post) { return false }
                     if isDiscoverySource && store.isBlockedByAlgorithm(post) { return false }
                     return AdultContentClassifier.isEligible(post, source: source, categories: store.categories, store: store)
                 }
@@ -581,7 +596,7 @@ final class FeedModel: ObservableObject {
                     items.append(contentsOf: batchUnseen)
                     totalAddedThisCall += batchUnseen.count
                     isSwitching = false
-                    Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
+                    Self.saveDiskCache(isProfileOrSaved ? Array(items.prefix(30)) : Array(items.suffix(18)), for: cursorKey)
                 } else {
                     emptyPageStreak += 1
                     if !isInfiniteSource && emptyPageStreak >= 3 {
@@ -626,7 +641,7 @@ final class FeedModel: ObservableObject {
                                 items.append(contentsOf: extra)
                                 totalAddedThisCall += extra.count
                                 isSwitching = false
-                                Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
+                                Self.saveDiskCache(isProfileOrSaved ? Array(items.prefix(30)) : Array(items.suffix(18)), for: cursorKey)
                             }
                         } else if source == .igReels && store.data.igSession.isConnected && emptyPageStreak >= 2 {
                             let igFallback = await InstagramAPI.reels(after: nil)
@@ -643,7 +658,7 @@ final class FeedModel: ObservableObject {
                                 items.append(contentsOf: extra)
                                 totalAddedThisCall += extra.count
                                 isSwitching = false
-                                Self.saveDiskCache(Array(items.suffix(18)), for: cursorKey)
+                                Self.saveDiskCache(isProfileOrSaved ? Array(items.prefix(30)) : Array(items.suffix(18)), for: cursorKey)
                             }
                         } else if resp.after == nil || resp.after?.isEmpty == true {
                             afterCursor = nil
