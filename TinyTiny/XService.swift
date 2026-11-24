@@ -452,9 +452,10 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         return inserted
     }
 
-    /// Search, creator and saved-list routes show every post (even ones already watched in For You).
+    /// Creator profiles and personal bookmarks/likes show every post (even ones already watched in For You).
+    /// Searches (`x_search_`) filter out already-watched videos so you don't repeat videos.
     private static func routeAllowsSeen(_ route: String) -> Bool {
-        route.hasPrefix("x_user_") || route.hasPrefix("x_search_") || route == "x_bookmarks" || route.hasPrefix("x_likes_")
+        route.hasPrefix("x_user_") || route == "x_bookmarks" || route.hasPrefix("x_likes_")
     }
 
     private func resolveWaiter(token: UUID) {
@@ -870,7 +871,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             let sn = needScreenName ? XTweetParser.parseScreenName(from: data) : nil
             let tweets = XTweetParser.parseTweets(from: data, routeKey: routeAtCapture)
             let filteredPre = tweets.filter { post in
-                if !blockedSnapshot.isEmpty {
+                if !allowSeen && !blockedSnapshot.isEmpty {
                     let tLower = (post.title ?? "").lowercased()
                     if blockedSnapshot.contains(where: { !$0.isEmpty && tLower.contains($0.lowercased()) }) {
                         return false
@@ -892,8 +893,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 }
                 let store = UserStore.shared
                 let fresh = filteredPre.filter { post in
-                    guard allowSeen || !store.isSeen(post),
-                          !store.isBlockedByAlgorithm(post) else { return false }
+                    guard allowSeen || (!store.isSeen(post) && !store.isBlockedByAlgorithm(post)) else { return false }
                     return self.insertSeen(post.canonicalDedupeKey, route: routeAtCapture)
                 }
                 if !fresh.isEmpty {
@@ -980,6 +980,14 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     private static let scrollAdvanceJS = """
     (function() {
         try {
+            // Auto-dismiss X NSFW profile warning ("Yes, view profile") or "Show more" gates
+            const btns = document.querySelectorAll('[data-testid="empty_state_button_text"], [role="button"], button');
+            for (let i = 0; i < btns.length; i++) {
+                const txt = (btns[i].innerText || '').trim().toLowerCase();
+                if (txt === 'yes, view profile' || txt === 'view profile' || txt === 'show' || txt === 'show more') {
+                    btns[i].click();
+                }
+            }
             window.scrollBy(0, 2600);
             if (document.scrollingElement) {
                 document.scrollingElement.scrollTop = Math.min(
@@ -1120,8 +1128,11 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             _ = try? await wv.evaluateJavaScript(Self.scrollAdvanceJS)
         }
 
-        let nudgeDelayNs: UInt64 = didLoadNewURL ? 450_000_000 : (usedSoftNav ? 300_000_000 : 220_000_000)
-        let maxRemainingNs: UInt64 = didLoadNewURL ? 1_700_000_000 : (usedSoftNav ? 1_100_000_000 : 900_000_000)
+        let isProfileRoute = routeKey.hasPrefix("x_user_")
+        let nudgeDelayNs: UInt64 = didLoadNewURL ? 550_000_000 : (usedSoftNav ? 420_000_000 : 280_000_000)
+        let maxRemainingNs: UInt64 = isProfileRoute
+            ? (didLoadNewURL ? 2_600_000_000 : (usedSoftNav ? 2_100_000_000 : 1_600_000_000))
+            : (didLoadNewURL ? 1_700_000_000 : (usedSoftNav ? 1_100_000_000 : 900_000_000))
 
         let posts = await withCheckedContinuation { (cont: CheckedContinuation<[Gif], Never>) in
             let token = UUID()
@@ -1136,7 +1147,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                     }
                     // If X already delivered a timeline payload for this route that simply had 0 video tweets,
                     // wait briefly for the scroll nudge and then return cleanly instead of hanging.
-                    if self.routePayloadCounts[routeKey, default: 0] > beforePayloadCount {
+                    if !isProfileRoute && self.routePayloadCounts[routeKey, default: 0] > beforePayloadCount {
                         try? await Task.sleep(nanoseconds: 450_000_000)
                         self.resolveWaiter(token: token)
                         return
@@ -1149,6 +1160,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
 
         scheduleBackgroundPump(for: routeKey, wv: wv)
         pageCounter += 1
+        if isProfileRoute && posts.isEmpty && dryPayloadCount >= 2 {
+            return GoonedFeedResponse(posts: [], after: nil)
+        }
         return GoonedFeedResponse(posts: posts, after: "xpage_\(pageCounter)")
     }
 

@@ -233,6 +233,7 @@ final class FeedModel: ObservableObject {
 
     private var isInfiniteSource: Bool {
         if case .list = source { return false }
+        if isProfileOrSavedSource { return false }
         return true
     }
 
@@ -518,7 +519,7 @@ final class FeedModel: ObservableObject {
                     return false
                 }
             }()
-            let maxAttempts = isProfileOrSaved ? 2 : (isSearchOrSubreddit ? 5 : ((source.isXFeed || source.isIGFeed) ? 3 : (source == .following ? 2 : 4)))
+            let maxAttempts = isProfileOrSaved ? 3 : (isSearchOrSubreddit ? 5 : ((source.isXFeed || source.isIGFeed) ? 3 : (source == .following ? 2 : 4)))
 
             while totalAddedThisCall < 8 && attempts < maxAttempts && hasMore {
                 if Task.isCancelled { return }
@@ -666,7 +667,7 @@ final class FeedModel: ObservableObject {
                     }
                 }
 
-                if (source.isXFeed || source.isIGFeed) && !batchUnseen.isEmpty { break }
+                if (source.isXFeed || source.isIGFeed) && !batchUnseen.isEmpty && (!isProfileOrSaved || totalAddedThisCall >= 6) { break }
                 if resp.after == nil || resp.after?.isEmpty == true {
                     if !isInfiniteSource { break }
                 }
