@@ -71,6 +71,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         syncFlagSecure()
         handleIntent(intent)
         setContent { RootView() }
@@ -84,6 +85,7 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         RootDeepLinkState.isAppForeground.value = true
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         syncFlagSecure()
         bgScope.launch {
             if (LicenseManager.status.value.isActivated) {
@@ -96,6 +98,7 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         RootDeepLinkState.isAppForeground.value = false
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         AppState.lock()
         UserStore.shared.saveNow()
         SmartTasteEngine.shared.saveNow()

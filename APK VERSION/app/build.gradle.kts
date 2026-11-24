@@ -13,8 +13,8 @@ android {
         applicationId = "com.bella.tinytiny"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.2.2"
 
         vectorDrawables {
             useSupportLibrary = true
