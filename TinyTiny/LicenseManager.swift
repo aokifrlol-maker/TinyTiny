@@ -631,6 +631,9 @@ final class LicenseManager: ObservableObject {
             if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
                 UserStore.shared.data.igSession = backup.userData.igSession
             }
+            if !UserStore.shared.data.redditSession.isConnected && backup.userData.redditSession.isConnected {
+                UserStore.shared.data.redditSession = backup.userData.redditSession
+            }
             UserStore.shared.markSeenBulk(backup.userData.seenIDs)
         }
         SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
@@ -673,6 +676,26 @@ final class LicenseManager: ObservableObject {
             for (name, val) in igPairs where !val.isEmpty {
                 if let cookie = HTTPCookie(properties: [
                     .domain: ".instagram.com",
+                    .path: "/",
+                    .name: name,
+                    .value: val,
+                    .secure: "TRUE",
+                    .expires: Date().addingTimeInterval(365 * 86400)
+                ]) {
+                    await store.setCookie(cookie)
+                }
+            }
+        }
+        let rd = UserStore.shared.data.redditSession
+        if rd.isConnected {
+            let rdPairs: [(String, String)] = [
+                ("reddit_session", rd.redditSessionCookie),
+                ("token_v2", rd.tokenV2),
+                ("over18", "1")
+            ]
+            for (name, val) in rdPairs where !val.isEmpty {
+                if let cookie = HTTPCookie(properties: [
+                    .domain: ".reddit.com",
                     .path: "/",
                     .name: name,
                     .value: val,

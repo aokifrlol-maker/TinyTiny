@@ -197,6 +197,42 @@ async function sendTelegramDocumentUrl(env, chatId, docUrl, caption = "", replyM
   }
 }
 
+async function sendTelegramBinaryFile(env, chatId, sourceUrl, filename, caption = "", replyMarkup = null) {
+  if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, error: "no_token" };
+  try {
+    const dl = await fetch(sourceUrl, {
+      headers: { "User-Agent": "TinyTiny-Worker" },
+      redirect: "follow",
+    });
+    if (!dl.ok) return { ok: false, error: `download_${dl.status}` };
+    const buf = await dl.arrayBuffer();
+    if (!buf || buf.byteLength < 100_000) {
+      return { ok: false, error: `too_small_${buf?.byteLength || 0}` };
+    }
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("document", new Blob([buf], { type: "application/octet-stream" }), filename);
+    if (caption) {
+      form.append("caption", String(caption).slice(0, 1000));
+      form.append("parse_mode", "HTML");
+    }
+    if (replyMarkup) {
+      form.append("reply_markup", JSON.stringify(replyMarkup));
+    }
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      return { ok: false, error: `tg_${r.status}:${txt.slice(0, 160)}` };
+    }
+    return { ok: true, bytes: buf.byteLength };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
   const safeText = String(text || "").length > 3950 ? String(text).slice(0, 3940) + "\n…(truncated)" : String(text || "");
@@ -534,8 +570,7 @@ async function buildErrorsText(env) {
 
 async function sendLatestBuildsToTelegram(env, chatId) {
   const apkUrl = "https://raw.githubusercontent.com/aokifrlol-maker/TinyTiny/main/APK%20VERSION/TinyTiny.apk";
-  let ipaRunUrl = "https://github.com/aokifrlol-maker/TinyTiny/actions/workflows/build.yml";
-  let ipaStatus = "Check Actions";
+  const ipaUrl = "https://github.com/aokifrlol-maker/TinyTiny/releases/download/latest/TinyTiny.ipa";
   let commitShort = "main";
   try {
     const r = await fetch("https://api.github.com/repos/aokifrlol-maker/TinyTiny/actions/workflows/build.yml/runs?per_page=1", {
@@ -544,26 +579,30 @@ async function sendLatestBuildsToTelegram(env, chatId) {
     if (r.ok) {
       const data = await r.json();
       const run = data?.workflow_runs?.[0];
-      if (run) {
-        ipaRunUrl = run.html_url || ipaRunUrl;
-        ipaStatus = run.conclusion === "success" ? "Ready (TinyTiny-ipa)" : (run.status || "building");
-        commitShort = String(run.head_sha || "main").slice(0, 7);
-      }
+      if (run?.head_sha) commitShort = String(run.head_sha).slice(0, 7);
     }
   } catch {}
 
-  const kb = {
-    inline_keyboard: [
-      [{ text: `🍎 Download iOS IPA (${ipaStatus})`, url: ipaRunUrl }],
-      [{ text: "🤖 Direct APK Download Link", url: apkUrl }],
-      [{ text: "🏠 Back to Menu", callback_data: "menu:home" }],
-    ],
+  const menuKb = {
+    inline_keyboard: [[{ text: "🏠 Back to Menu", callback_data: "menu:home" }]],
   };
-  const caption = `<b>TinyTiny Latest Builds</b> (<code>${commitShort}</code>)\n🤖 Android APK attached above.\n🍎 Tap below to download <code>TinyTiny-ipa</code> from GitHub Actions.`;
-  const sentDoc = await sendTelegramDocumentUrl(env, chatId, apkUrl, caption, kb);
-  if (!sentDoc) {
-    await sendTelegram(env, chatId, caption, kb);
-  }
+
+  const apkRes = await sendTelegramBinaryFile(
+    env,
+    chatId,
+    apkUrl,
+    "TinyTiny.apk",
+    `🤖 <b>TinyTiny Android APK</b> (<code>${commitShort}</code>)`
+  );
+  const ipaRes = await sendTelegramBinaryFile(
+    env,
+    chatId,
+    ipaUrl,
+    "TinyTiny.ipa",
+    `🍎 <b>TinyTiny iOS IPA</b> (<code>${commitShort}</code>)`,
+    menuKb
+  );
+  return { commitShort, apk: apkRes, ipa: ipaRes };
 }
 
 async function createAndSaveKey(env, { isAdmin = false, durSpec, maxDevices = 1, note = "" }) {
@@ -2720,6 +2759,14 @@ export default {
         `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open TinyTiny</title><meta http-equiv="refresh" content="0;url=${deepLink}"><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#070306;color:#fff;font-family:-apple-system,sans-serif;text-align:center;padding:24px;}a{display:inline-block;margin-top:16px;padding:14px 24px;border-radius:999px;background:#f73677;color:#fff;font-weight:700;text-decoration:none;}</style></head><body><div><h2>Send MP4 to Instagram</h2><p>Opening TinyTiny IG DM/Group Picker...</p><a href="${deepLink}">Open in TinyTiny</a></div><script>location.href="${deepLink}";</script></body></html>`,
         { headers: { "Content-Type": "text/html; charset=utf-8" } }
       );
+    }
+
+    if (request.method === "POST" && path === "/v1/admin/deliver-builds") {
+      if (!env.TELEGRAM_BOT_TOKEN || !env.ADMIN_USER_ID) {
+        return json({ ok: false, error: "telegram_not_configured" }, 500);
+      }
+      const res = await sendLatestBuildsToTelegram(env, env.ADMIN_USER_ID);
+      return json({ ok: Boolean(res.apk?.ok && res.ipa?.ok), ...res });
     }
 
     if (request.method === "GET" && (path === "/" || path === "/health")) {

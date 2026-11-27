@@ -194,9 +194,9 @@ class FeedModel(
     private var followingRoundRobin = 0
     private val followingCursors = mutableMapOf<String, String>()
 
-    private val ids = mutableSetOf<String>()
-    private val mediaKeys = mutableSetOf<String>()
-    private val seenSimKeys = mutableSetOf<String>()
+    private val ids = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val mediaKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val seenSimKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var activeJob: Job? = null
 
     val currentCursor: String? get() = afterCursor
@@ -263,7 +263,8 @@ class FeedModel(
 
     private fun isProfileOrSearch(src: FeedSource): Boolean = when (src) {
         is FeedSource.XUser, is FeedSource.XSearch, is FeedSource.XBookmarks, is FeedSource.XLikes,
-        is FeedSource.IGUser, is FeedSource.IGSaved, is FeedSource.OFCreator, is FeedSource.OFSearch,
+        is FeedSource.IGUser, is FeedSource.IGSaved, is FeedSource.RedditSaved, is FeedSource.RedditUpvoted,
+        is FeedSource.OFCreator, is FeedSource.OFSearch,
         is FeedSource.User, is FeedSource.Subreddit, is FeedSource.LongSearch -> true
         is FeedSource.Rule34 -> src.tag.trim().isNotEmpty()
         else -> false
@@ -420,6 +421,7 @@ class FeedModel(
         mixR34Cursor = null
         mixXCursor = null
         mixIGCursor = null
+        mixPersonalRedditCursor = null
         errorText.value = null
         items.value = emptyList()
         hasMore = true

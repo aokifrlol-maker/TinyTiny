@@ -227,7 +227,7 @@ final class FeedModel: ObservableObject {
             let key = "\(source.swipeKey.kind):\(source.swipeKey.name.lowercased()):\(FeedSort.hot.rawValue)"
             let keepSeen: Bool = {
                 switch source {
-                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
+                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .redditSaved, .redditUpvoted, .ofCreator, .user:
                     return true
                 default:
                     return false
@@ -263,7 +263,7 @@ final class FeedModel: ObservableObject {
     /// and ALWAYS show all posts (even ones you already watched while scrolling feeds).
     private var isProfileOrSavedSource: Bool {
         switch source {
-        case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
+        case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .redditSaved, .redditUpvoted, .ofCreator, .user:
             return true
         default:
             return false
@@ -525,7 +525,7 @@ final class FeedModel: ObservableObject {
             // Searches (xSearch, ofSearch, longSearch, multiSearch, rule34, subreddit) MUST skip watched videos!
             let isProfileOrSaved: Bool = {
                 switch source {
-                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .ofCreator, .user:
+                case .xUser, .xBookmarks, .xLikes, .igUser, .igSaved, .redditSaved, .redditUpvoted, .ofCreator, .user:
                     return true
                 default:
                     return false

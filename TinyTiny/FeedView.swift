@@ -96,6 +96,8 @@ enum MediaHeaders {
             h["Referer"] = "https://www.erome.com/"
         } else if host.contains("cum.st") {
             h["Referer"] = "https://cum.st/"
+        } else if host.contains("redd.it") || host.contains("reddit.com") || host.contains("redditmedia.com") || host.contains("redditstatic.com") {
+            h["Referer"] = "https://www.reddit.com/"
         } else {
             h["Referer"] = Config.referer
         }
@@ -410,6 +412,7 @@ final class PlayerModel: ObservableObject {
     private var lastPreviewAssetURL: URL?
     private var lastPreviewRequestAt: Date = .distantPast
     private var lastSeekRequestAt: Date = .distantPast
+    private var teardownGeneration: Int = 0
 
     private var looper: AVPlayerLooper?
     private var endObserver: NSObjectProtocol?
@@ -427,6 +430,7 @@ final class PlayerModel: ObservableObject {
 
     func prepare(urls: [URL]) {
         guard !prepared, !urls.isEmpty else { return }
+        teardownGeneration += 1
         prepared = true
         allFailed = false
         isReady = false
@@ -754,8 +758,11 @@ final class PlayerModel: ObservableObject {
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         looper?.disableLooping()
         looper = nil
+        teardownGeneration += 1
+        let gen = teardownGeneration
         let p = player
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            if let self, self.teardownGeneration != gen { return }
             p.removeAllItems()
         }
         prepared = false

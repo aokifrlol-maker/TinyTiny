@@ -209,7 +209,7 @@ data class Gif(
                 urls.add(local)
             }
         }
-        val candidates: List<String?> = if (isXPost && !hlsUrl.isNullOrEmpty()) {
+        val candidates: List<String?> = if ((isXPost || hlsUrl?.contains("v.redd.it") == true) && !hlsUrl.isNullOrEmpty()) {
             if (hd) listOf(hlsUrl, muxedUrlHd, muxedUrl, mediaUrl) else listOf(hlsUrl, muxedUrl, muxedUrlHd, mediaUrl)
         } else {
             if (hd) listOf(muxedUrlHd, muxedUrl, mediaUrl, hlsUrl) else listOf(muxedUrl, muxedUrlHd, mediaUrl, hlsUrl)
@@ -585,6 +585,7 @@ object MediaHeaders {
             host.contains("xhcdn") || host.contains("xhamster") -> "https://xhamster.com/"
             host.contains("sb-cd") || host.contains("spankbang") -> "https://spankbang.com/"
             host.contains("redgifs.com") -> "https://www.redgifs.com/"
+            host.contains("redd.it") || host.contains("reddit.com") || host.contains("redditmedia.com") || host.contains("redditstatic.com") -> "https://www.reddit.com/"
             else -> Config.referer
         }
         h["Referer"] = referer

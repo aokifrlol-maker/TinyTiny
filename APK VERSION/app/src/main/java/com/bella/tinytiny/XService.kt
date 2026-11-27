@@ -1095,14 +1095,26 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                             loadUrl("https://x.com/i/flow/login")
                         }
                     },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    onRelease = { wv ->
+                        try {
+                            wv.stopLoading()
+                            wv.destroy()
+                        } catch (_: Throwable) {}
+                    }
                 )
 
                 popupWebView?.let { pop ->
                     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
                         AndroidView(factory = { pop }, modifier = Modifier.fillMaxSize())
                         IconButton(
-                            onClick = { popupWebView = null },
+                            onClick = {
+                                try {
+                                    pop.stopLoading()
+                                    pop.destroy()
+                                } catch (_: Throwable) {}
+                                popupWebView = null
+                            },
                             modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
                         ) {
                             Icon(Icons.Default.Close, contentDescription = "Close Popup", tint = Color.White)

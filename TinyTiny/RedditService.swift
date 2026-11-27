@@ -30,7 +30,7 @@ struct RedditAccountSession: Codable, Equatable {
 final class RedditPersonalAPI {
     static let shared = RedditPersonalAPI()
 
-    private let session: URLSession = {
+    fileprivate let session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 18
         cfg.timeoutIntervalForResource = 30
@@ -38,7 +38,9 @@ final class RedditPersonalAPI {
         return URLSession(configuration: cfg)
     }()
 
-    private static let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    private static let mobileUA = Config.userAgent
+    private static let isoLock = NSLock()
+    private nonisolated(unsafe) static let isoFormatter = ISO8601DateFormatter()
 
     func homeFeed(after: String?) async throws -> GoonedFeedResponse {
         try await fetchListing(path: "/.json", after: after)
@@ -104,7 +106,6 @@ final class RedditPersonalAPI {
             let gid = "rd_\(postId)"
             guard seen.insert(gid).inserted else { continue }
 
-            // Unwrap crosspost parent for media if present
             let mediaNode: [String: Any]
             if let cross = (raw["crosspost_parent_list"] as? [[String: Any]])?.first {
                 mediaNode = cross
@@ -119,19 +120,25 @@ final class RedditPersonalAPI {
             let permalinkPath = raw["permalink"] as? String ?? ""
             let permalink = permalinkPath.isEmpty ? "https://www.reddit.com/comments/\(postId)" : "https://www.reddit.com\(permalinkPath)"
             let createdEpoch = raw["created_utc"] as? Double
-            let createdISO = createdEpoch.map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) }
+            let createdISO: String? = createdEpoch.map { epoch in
+                Self.isoLock.lock()
+                let s = Self.isoFormatter.string(from: Date(timeIntervalSince1970: epoch))
+                Self.isoLock.unlock()
+                return s
+            }
 
             let thumb = extractThumb(from: mediaNode) ?? extractThumb(from: raw)
             let media = extractMedia(from: mediaNode) ?? extractMedia(from: raw)
             guard let media else { continue }
 
-            if !media.extraVideos.isEmpty {
-                MediaMetaRegistry.register(
-                    postId: gid,
-                    extraVideoURLs: media.extraVideos,
-                    tags: subreddit.map { [$0.lowercased()] } ?? [],
-                    creatorName: author
-                )
+            MediaMetaRegistry.register(
+                postId: gid,
+                extraVideoURLs: media.extraVideos,
+                tags: subreddit.map { [$0.lowercased()] } ?? [],
+                creatorName: author
+            )
+            if media.galleryItems.count > 1 {
+                MediaMetaRegistry.registerAlbumItems(postId: gid, items: media.galleryItems)
             }
 
             posts.append(
@@ -148,9 +155,9 @@ final class RedditPersonalAPI {
                     mediaUrl: media.primaryURL,
                     muxedUrl: media.isImage ? nil : (media.sdURL ?? media.primaryURL),
                     muxedUrlHd: media.isImage ? nil : (media.hdURL ?? media.primaryURL),
-                    hlsUrl: media.isImage ? nil : (media.hdURL?.contains(".m3u8") == true ? media.hdURL : nil),
-                    posterUrl: thumb,
-                    thumbnailUrl: thumb,
+                    hlsUrl: media.isImage ? nil : media.hlsURL,
+                    posterUrl: thumb ?? (media.isImage ? media.primaryURL : nil),
+                    thumbnailUrl: thumb ?? (media.isImage ? media.primaryURL : nil),
                     sourceUrl: permalink,
                     permalink: permalink,
                     createdUtc: createdISO
@@ -165,7 +172,9 @@ final class RedditPersonalAPI {
         let primaryURL: String
         let sdURL: String?
         let hdURL: String?
+        let hlsURL: String?
         let extraVideos: [String]
+        let galleryItems: [AlbumMediaItem]
         let width: Int?
         let height: Int?
         let duration: Double?
@@ -187,23 +196,25 @@ final class RedditPersonalAPI {
     }
 
     private static func extractMedia(from node: [String: Any]) -> ExtractedMedia? {
-        // 1. Native Reddit Video (secure_media.reddit_video or media.reddit_video)
+        // 1. Native Reddit Video — ALWAYS prefer HLS (.m3u8) so audio is muxed (fallback_url is video-only!)
         let rv = (node["secure_media"] as? [String: Any])?["reddit_video"] as? [String: Any]
             ?? (node["media"] as? [String: Any])?["reddit_video"] as? [String: Any]
             ?? (node["preview"] as? [String: Any])?["reddit_video_preview"] as? [String: Any]
 
         if let rv {
-            let hls = (rv["hls_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&")
-            let fallback = (rv["fallback_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&")
-            let scrubber = (rv["scrubber_media_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&")
+            let hls = (rv["hls_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&").trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallback = (rv["fallback_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&").trimmingCharacters(in: .whitespacesAndNewlines)
+            let scrubber = (rv["scrubber_media_url"] as? String)?.replacingOccurrences(of: "&amp;", with: "&").trimmingCharacters(in: .whitespacesAndNewlines)
             let candidates = [hls, fallback, scrubber].compactMap { $0 }.filter { !$0.isEmpty }
             if let primary = candidates.first {
                 return ExtractedMedia(
                     isImage: false,
                     primaryURL: primary,
-                    sdURL: fallback ?? primary,
+                    sdURL: hls ?? fallback ?? primary,
                     hdURL: hls ?? fallback ?? primary,
+                    hlsURL: hls,
                     extraVideos: candidates,
+                    galleryItems: [],
                     width: rv["width"] as? Int,
                     height: rv["height"] as? Int,
                     duration: rv["duration"] as? Double ?? (rv["duration"] as? Int).map(Double.init)
@@ -211,7 +222,7 @@ final class RedditPersonalAPI {
             }
         }
 
-        // 2. Preview MP4 variant (for animated GIFs / imgur / redgifs embeds)
+        // 2. Preview MP4 variant (animated GIFs / imgur / redgifs embeds)
         if let preview = node["preview"] as? [String: Any],
            let images = preview["images"] as? [[String: Any]],
            let first = images.first,
@@ -225,48 +236,71 @@ final class RedditPersonalAPI {
                 primaryURL: mp4URL,
                 sdURL: mp4URL,
                 hdURL: mp4URL,
+                hlsURL: nil,
                 extraVideos: [mp4URL],
+                galleryItems: [],
                 width: src["width"] as? Int,
                 height: src["height"] as? Int,
                 duration: nil
             )
         }
 
-        // 3. Direct URL (mp4 / gifv / image)
-        let rawURL = ((node["url_overridden_by_dest"] as? String) ?? (node["url"] as? String) ?? "")
-            .replacingOccurrences(of: "&amp;", with: "&")
-        let lower = rawURL.lowercased()
-        if lower.hasPrefix("http") {
-            if lower.contains(".mp4") || lower.contains(".mov") {
-                return ExtractedMedia(isImage: false, primaryURL: rawURL, sdURL: rawURL, hdURL: rawURL, extraVideos: [rawURL], width: nil, height: nil, duration: nil)
+        // 3. Reddit Gallery (preserve gallery_data.items order + register all slides)
+        if let gallery = node["media_metadata"] as? [String: Any] {
+            var orderedIds: [String] = []
+            if let gData = node["gallery_data"] as? [String: Any],
+               let gItems = gData["items"] as? [[String: Any]] {
+                orderedIds = gItems.compactMap { $0["media_id"] as? String }
             }
-            if lower.hasSuffix(".gifv") {
-                let mp4 = String(rawURL.dropLast(5)) + ".mp4"
-                return ExtractedMedia(isImage: false, primaryURL: mp4, sdURL: mp4, hdURL: mp4, extraVideos: [mp4], width: nil, height: nil, duration: nil)
+            if orderedIds.isEmpty {
+                orderedIds = Array(gallery.keys)
             }
-            if lower.contains("i.redd.it/") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".webp") || lower.hasSuffix(".gif") {
-                return ExtractedMedia(isImage: true, primaryURL: rawURL, sdURL: nil, hdURL: nil, extraVideos: [], width: nil, height: nil, duration: nil)
+            var slides: [AlbumMediaItem] = []
+            var firstW: Int? = nil
+            var firstH: Int? = nil
+            for (idx, mid) in orderedIds.enumerated() {
+                guard let item = gallery[mid] as? [String: Any],
+                      let s = item["s"] as? [String: Any],
+                      let u = (s["u"] as? String ?? s["gif"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
+                      u.hasPrefix("http"),
+                      let urlObj = URL(string: u) else { continue }
+                if firstW == nil { firstW = s["x"] as? Int }
+                if firstH == nil { firstH = s["y"] as? Int }
+                slides.append(AlbumMediaItem(id: "rdg_\(mid)_\(idx)", url: urlObj, posterURL: urlObj, isVideo: false))
+            }
+            if let first = slides.first {
+                return ExtractedMedia(
+                    isImage: true,
+                    primaryURL: first.url.absoluteString,
+                    sdURL: nil,
+                    hdURL: nil,
+                    hlsURL: nil,
+                    extraVideos: [],
+                    galleryItems: slides,
+                    width: firstW,
+                    height: firstH,
+                    duration: nil
+                )
             }
         }
 
-        // 4. Reddit Gallery (media_metadata)
-        if let gallery = node["media_metadata"] as? [String: Any] {
-            for (_, val) in gallery {
-                guard let item = val as? [String: Any],
-                      let s = item["s"] as? [String: Any] else { continue }
-                if let u = (s["u"] as? String ?? s["gif"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
-                   u.hasPrefix("http") {
-                    return ExtractedMedia(
-                        isImage: true,
-                        primaryURL: u,
-                        sdURL: nil,
-                        hdURL: nil,
-                        extraVideos: [],
-                        width: s["x"] as? Int,
-                        height: s["y"] as? Int,
-                        duration: nil
-                    )
-                }
+        // 4. Direct URL (mp4 / gifv / image — strip ?query before extension check!)
+        let rawURL = ((node["url_overridden_by_dest"] as? String) ?? (node["url"] as? String) ?? "")
+            .replacingOccurrences(of: "&amp;", with: "&")
+        let lower = rawURL.lowercased()
+        let pathOnly = lower.split(separator: "?", maxSplits: 1).first.map(String.init) ?? lower
+        if lower.hasPrefix("http") {
+            if pathOnly.hasSuffix(".mp4") || pathOnly.hasSuffix(".mov") || lower.contains(".mp4?") {
+                return ExtractedMedia(isImage: false, primaryURL: rawURL, sdURL: rawURL, hdURL: rawURL, hlsURL: nil, extraVideos: [rawURL], galleryItems: [], width: nil, height: nil, duration: nil)
+            }
+            if pathOnly.hasSuffix(".gifv") {
+                let mp4 = String(rawURL.dropLast(5)) + ".mp4"
+                return ExtractedMedia(isImage: false, primaryURL: mp4, sdURL: mp4, hdURL: mp4, hlsURL: nil, extraVideos: [mp4], galleryItems: [], width: nil, height: nil, duration: nil)
+            }
+            if lower.contains("i.redd.it/") || lower.contains("preview.redd.it/") ||
+                pathOnly.hasSuffix(".jpg") || pathOnly.hasSuffix(".jpeg") ||
+                pathOnly.hasSuffix(".png") || pathOnly.hasSuffix(".webp") || pathOnly.hasSuffix(".gif") {
+                return ExtractedMedia(isImage: true, primaryURL: rawURL, sdURL: nil, hdURL: nil, hlsURL: nil, extraVideos: [], galleryItems: [], width: nil, height: nil, duration: nil)
             }
         }
 
@@ -287,7 +321,8 @@ final class RedditPersonalAPI {
         req.setValue(mobileUA, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        req.setValue("https://www.reddit.com/", forHTTPHeaderField: "Referer")
+        guard let (data, resp) = try? await RedditPersonalAPI.shared.session.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let me = root["data"] as? [String: Any],
@@ -299,15 +334,14 @@ final class RedditPersonalAPI {
     }
 }
 
-// MARK: - Personal Reddit Login Sheet (WKWebView)
+// MARK: - Personal Reddit Login Sheet (WKWebView + Google / Apple OAuth Popup Support)
 
 struct RedditLoginSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: UserStore
     var onSuccess: () -> Void
 
-    @State private var statusText = "Sign in to link your personal Reddit feeds"
-    @State private var isChecking = false
+    @State private var statusText = "Sign in (email, Google, or Apple) to link your Reddit feeds"
 
     var body: some View {
         NavigationStack {
@@ -364,9 +398,18 @@ private struct RedditLoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()
+        cfg.allowsInlineMediaPlayback = true
+        cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
+        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+
         let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.customUserAgent = Config.userAgent
+        wv.isOpaque = false
+        wv.backgroundColor = .black
+        wv.uiDelegate = context.coordinator
         wv.navigationDelegate = context.coordinator
-        wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        context.coordinator.parentWebView = wv
+
         wv.load(URLRequest(url: URL(string: "https://www.reddit.com/login")!))
         context.coordinator.startPolling(webView: wv)
         return wv
@@ -376,24 +419,91 @@ private struct RedditLoginWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         coordinator.stopPolling()
+        coordinator.dismissPopup()
+        uiView.uiDelegate = nil
+        uiView.navigationDelegate = nil
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         let onCaptured: (String, String, String) -> Void
         let onStatus: (String) -> Void
+        weak var parentWebView: WKWebView?
+        private var popupWebView: WKWebView?
+        private var closeButton: UIButton?
         private var pollTask: Task<Void, Never>?
         private var didCapture = false
+        private var isCheckingCookies = false
 
         init(onCaptured: @escaping (String, String, String) -> Void, onStatus: @escaping (String) -> Void) {
             self.onCaptured = onCaptured
             self.onStatus = onStatus
         }
 
+        /// Supports Google & Apple OAuth popups (`window.open` / `target="_blank"`) while preserving `window.opener`.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                configuration.websiteDataStore = .default()
+                configuration.allowsInlineMediaPlayback = true
+                configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+                configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+
+                let popup = WKWebView(frame: webView.bounds, configuration: configuration)
+                popup.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                popup.customUserAgent = Config.userAgent
+                popup.uiDelegate = self
+                popup.navigationDelegate = self
+                popup.backgroundColor = .systemBackground
+                webView.addSubview(popup)
+
+                let closeBtn = UIButton(type: .system)
+                closeBtn.setImage(UIImage(systemName: "xmark.circle.fill"), for: .normal)
+                closeBtn.tintColor = .white
+                closeBtn.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+                closeBtn.layer.cornerRadius = 16
+                closeBtn.frame = CGRect(x: max(12, webView.bounds.width - 46), y: 12, width: 32, height: 32)
+                closeBtn.autoresizingMask = [.flexibleLeftMargin, .flexibleBottomMargin]
+                closeBtn.addTarget(self, action: #selector(dismissPopup), for: .touchUpInside)
+                webView.addSubview(closeBtn)
+
+                self.popupWebView?.removeFromSuperview()
+                self.closeButton?.removeFromSuperview()
+                self.popupWebView = popup
+                self.closeButton = closeBtn
+                return popup
+            }
+            return nil
+        }
+
+        func webViewDidClose(_ webView: WKWebView) {
+            if webView === popupWebView {
+                dismissPopup()
+                if let parent = parentWebView {
+                    Task { @MainActor [weak self, weak parent] in
+                        guard let self, let parent else { return }
+                        await self.checkCookies(in: parent)
+                    }
+                }
+            }
+        }
+
+        @objc func dismissPopup() {
+            popupWebView?.stopLoading()
+            popupWebView?.removeFromSuperview()
+            popupWebView = nil
+            closeButton?.removeFromSuperview()
+            closeButton = nil
+        }
+
         func startPolling(webView: WKWebView) {
             stopPolling()
             pollTask = Task { @MainActor [weak self, weak webView] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 1_300_000_000)
+                    try? await Task.sleep(nanoseconds: 1_400_000_000)
                     guard let self, let webView, !self.didCapture else { break }
                     await self.checkCookies(in: webView)
                 }
@@ -414,17 +524,22 @@ private struct RedditLoginWebView: UIViewRepresentable {
 
         @MainActor
         private func checkCookies(in webView: WKWebView) async {
-            guard !didCapture else { return }
+            guard !didCapture, !isCheckingCookies else { return }
+            isCheckingCookies = true
+            defer { isCheckingCookies = false }
+
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-            let rdCookies = cookies.filter { $0.domain.lowercased().contains("reddit.com") }
+            let rdCookies = cookies.filter { $0.domain.lowercased().contains("reddit.com") && !$0.value.isEmpty }
             let sessionVal = rdCookies.first(where: { $0.name == "reddit_session" })?.value ?? ""
             let tokenVal = rdCookies.first(where: { $0.name == "token_v2" })?.value ?? ""
             guard !sessionVal.isEmpty || !tokenVal.isEmpty else { return }
 
             let tempSession = RedditAccountSession(redditSessionCookie: sessionVal, tokenV2: tokenVal, username: "")
             if let uname = await RedditPersonalAPI.verifyUsername(cookieHeader: tempSession.cookieHeader) {
+                guard !didCapture else { return }
                 didCapture = true
                 stopPolling()
+                dismissPopup()
                 onStatus("Connected as u/\(uname)!")
                 onCaptured(sessionVal, tokenVal, uname)
             }

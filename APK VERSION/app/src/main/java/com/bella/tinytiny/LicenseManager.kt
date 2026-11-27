@@ -609,6 +609,7 @@ object LicenseManager {
                             removedFollows = mergedRemovedFollows,
                             xSession = if (!local.xSession.isConnected && backup.userData.xSession.isConnected) backup.userData.xSession else local.xSession,
                             igSession = if (!local.igSession.isConnected && backup.userData.igSession.isConnected) backup.userData.igSession else local.igSession,
+                            redditSession = if (!local.redditSession.isConnected && backup.userData.redditSession.isConnected) backup.userData.redditSession else local.redditSession,
                             r34Credentials = if (!local.r34Credentials.isConnected && backup.userData.r34Credentials.isConnected) backup.userData.r34Credentials else local.r34Credentials,
                             seenIDs = (UserStore.shared.exportSnapshotForBackup().seenIDs + backup.userData.seenIDs).distinct().takeLast(12_000)
                         )
@@ -649,6 +650,15 @@ object LicenseManager {
                 if (v.isNotEmpty()) {
                     cm.setCookie("https://www.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
                     cm.setCookie("https://i.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
+                }
+            }
+        }
+        val rd = UserStore.shared.data.value.redditSession
+        if (rd.isConnected) {
+            for ((k, v) in listOf("reddit_session" to rd.redditSessionCookie, "token_v2" to rd.tokenV2, "over18" to "1")) {
+                if (v.isNotEmpty()) {
+                    cm.setCookie("https://www.reddit.com", "$k=$v; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
+                    cm.setCookie("https://reddit.com", "$k=$v; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
                 }
             }
         }

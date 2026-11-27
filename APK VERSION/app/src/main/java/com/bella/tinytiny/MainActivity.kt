@@ -256,6 +256,7 @@ fun GoonedMainShell() {
     val haptic = LocalHapticFeedback.current
     val userData by UserStore.shared.data.collectAsState()
     val tinted = userData.settings.tintedGlass
+    val isLandscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
     val scope = rememberCoroutineScope()
 
     val followingModel = remember { FeedModel(FeedSource.Following) }
@@ -646,7 +647,7 @@ fun GoonedMainShell() {
         }
 
         // Top Channel Rail & Single Centered Glass Sub-Channel Pill
-        if (activeTab == GoonedDockTab.HOME && !userData.settings.controlsCollapsed) {
+        if (activeTab == GoonedDockTab.HOME && !userData.settings.controlsCollapsed && !isLandscape) {
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -900,6 +901,7 @@ fun GoonedMainShell() {
                         when {
                             src.isXFeed -> selectXOrLogin(src)
                             src.isIGFeed -> selectIGOrLogin(src)
+                            src.isRedditPersonalFeed -> selectRedditOrLogin(src)
                             else -> selectFeed(src)
                         }
                     },
@@ -921,6 +923,7 @@ fun GoonedMainShell() {
                     when {
                         src.isXFeed -> selectXOrLogin(src)
                         src.isIGFeed -> selectIGOrLogin(src)
+                        src.isRedditPersonalFeed -> selectRedditOrLogin(src)
                         else -> selectFeed(src)
                     }
                 },
@@ -931,7 +934,7 @@ fun GoonedMainShell() {
         }
 
         // Compact Liquid Glass Bottom Dock (exact iOS sizing & proportions)
-        if (activeTab != GoonedDockTab.BROWSE && !(activeTab == GoonedDockTab.HOME && userData.settings.controlsCollapsed)) {
+        if (activeTab != GoonedDockTab.BROWSE && !(activeTab == GoonedDockTab.HOME && (userData.settings.controlsCollapsed || isLandscape))) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)

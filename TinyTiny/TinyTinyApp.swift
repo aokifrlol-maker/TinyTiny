@@ -543,6 +543,8 @@ struct GoonedMainShell: View {
                             selectXFeedOrLogin(src)
                         } else if src.isIGFeed {
                             selectIGFeedOrLogin(src)
+                        } else if src.isRedditPersonalFeed {
+                            selectRedditFeedOrLogin(src)
                         } else {
                             selectFeed(src)
                         }
@@ -574,6 +576,8 @@ struct GoonedMainShell: View {
                             selectXFeedOrLogin(src)
                         } else if src.isIGFeed {
                             selectIGFeedOrLogin(src)
+                        } else if src.isRedditPersonalFeed {
+                            selectRedditFeedOrLogin(src)
                         } else {
                             selectFeed(src)
                         }

@@ -259,6 +259,7 @@ final class UserStore: ObservableObject {
         // 2. Clear seen history, cursors, and in-memory caches
         _seenIDs = []
         seenSet = []
+        _savedCursors = [:]
         data = fresh
 
         if !options.keepAlgorithm {
@@ -278,8 +279,10 @@ final class UserStore: ObservableObject {
         // 3. Clear FeedDiskCache, tmp media, and legacy files from older app versions (never touch License!)
         let fm = FileManager.default
         if let cachesDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let feedCache = cachesDir.appendingPathComponent("FeedDiskCache", isDirectory: true)
+            let feedCache = cachesDir.appendingPathComponent("FeedCache", isDirectory: true)
+            let legacyCache = cachesDir.appendingPathComponent("FeedDiskCache", isDirectory: true)
             try? fm.removeItem(at: feedCache)
+            try? fm.removeItem(at: legacyCache)
         }
         if let items = try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil) {
             for item in items { try? fm.removeItem(at: item) }
@@ -972,9 +975,13 @@ final class UserStore: ObservableObject {
         SmartTasteEngine.shared.reset()
     }
 
+    var seenCount: Int { seenSet.count }
+
     func eraseAll() {
         saveTask?.cancel()
         seenSet.removeAll()
+        _seenIDs.removeAll()
+        _savedCursors.removeAll()
         SmartTasteEngine.shared.reset()
         OfflineManager.shared.clearAllDownloads()
         var fresh = UserData()
@@ -984,6 +991,7 @@ final class UserStore: ObservableObject {
         Task {
             await XWebEngine.shared.resetSession()
             await InstagramWebEngine.shared.resetSession()
+            await RedditPersonalAPI.clearCookies()
         }
     }
 }
@@ -1308,6 +1316,8 @@ enum AdultContentClassifier {
     @MainActor
     static func isEligible(_ post: Gif, source: FeedSource, categories: [GoonedCategory], store: UserStore) -> Bool {
         guard post.hasPlayableMedia else { return false }
+        // User's own personal Reddit feeds (Home / Popular / Saved / Upvoted) show all playable media
+        if source.isRedditPersonalFeed { return true }
         guard !store.isBlockedByAlgorithm(post) else { return false }
 
         if let sub = post.subreddit?.lowercased(), !sub.isEmpty {

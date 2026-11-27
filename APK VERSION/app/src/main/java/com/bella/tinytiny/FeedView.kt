@@ -137,7 +137,7 @@ fun FeedView(
 
     LaunchedEffect(targetPostId) {
         if (targetPostId != null && targetPostId != lastReportedPostId) {
-            val idx = items.indexOfFirst { it.id == targetPostId }
+            val idx = model.items.value.indexOfFirst { it.id == targetPostId }
             if (idx >= 0 && idx != pagerState.currentPage) {
                 pagerState.scrollToPage(idx)
             }
@@ -153,7 +153,7 @@ fun FeedView(
                     UserStore.shared.recordDwellSignal(prevGif, elapsedSec)
                 }
             }
-            val current = items.getOrNull(page)
+            val current = model.items.value.getOrNull(page)
             if (current != null) {
                 activePostRef = current to System.currentTimeMillis()
                 lastReportedPostId = current.id
@@ -350,7 +350,7 @@ fun GoonedReelCell(
 
     var albumItems by remember(gif.id) { mutableStateOf(MediaMetaRegistry.albumItems(gif.id)) }
     var albumIndex by remember(gif.id) { mutableIntStateOf(0) }
-    var resolvedUrls by remember(gif.id) { mutableStateOf(gif.allVideoURLs(userData.settings.hd)) }
+    var resolvedUrls by remember(gif.id, userData.settings.hd) { mutableStateOf(gif.allVideoURLs(userData.settings.hd)) }
     var resolvingLongVideo by remember(gif.id) { mutableStateOf(false) }
     var urlIndex by remember(gif.id, albumIndex) { mutableIntStateOf(0) }
     var useReferer by remember(gif.id, albumIndex, urlIndex) { mutableStateOf(true) }
@@ -1792,20 +1792,23 @@ private fun formatTime(sec: Double): String {
 
 private val framePreviewLock = Any()
 
-private fun fetchFramePreview(url: String, seconds: Double): Bitmap? = synchronized(framePreviewLock) {
-    val mmr = MediaMetadataRetriever()
-    return try {
-        if (url.startsWith("file://")) mmr.setDataSource(url.removePrefix("file://"))
-        else mmr.setDataSource(url, MediaHeaders.headers(url))
-        val timeUs = (seconds * 1_000_000).toLong()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
-            mmr.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 224, 312)
-        } else {
-            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+private fun fetchFramePreview(url: String, seconds: Double): Bitmap? {
+    if (url.contains(".m3u8", ignoreCase = true)) return null
+    return synchronized(framePreviewLock) {
+        val mmr = MediaMetadataRetriever()
+        try {
+            if (url.startsWith("file://")) mmr.setDataSource(url.removePrefix("file://"))
+            else mmr.setDataSource(url, MediaHeaders.headers(url))
+            val timeUs = (seconds * 1_000_000).toLong()
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                mmr.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 224, 312)
+            } else {
+                mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            try { mmr.release() } catch (_: Throwable) {}
         }
-    } catch (_: Throwable) {
-        null
-    } finally {
-        try { mmr.release() } catch (_: Throwable) {}
     }
 }

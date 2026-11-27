@@ -931,7 +931,7 @@ object AdultContentClassifier {
 
     fun isEligible(post: Gif, source: FeedSource, categories: List<GoonedCategory>, store: UserStore): Boolean {
         if (!post.hasPlayableMedia) return false
-        if (source.isList) return true
+        if (source.isList || source.isRedditPersonalFeed) return true
         val sub = (post.subreddit ?: "").lowercase()
         if (sub in sfwBlockedSubreddits) return false
         val combined = "${post.title ?: ""} ${post.author ?: ""} $sub"

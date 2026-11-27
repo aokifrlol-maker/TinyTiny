@@ -1,8 +1,12 @@
 package com.bella.tinytiny
 
 import android.annotation.SuppressLint
+import android.os.Message
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -20,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import okhttp3.Request
@@ -81,6 +86,7 @@ object RedditPersonalAPI {
                 .url("https://www.reddit.com/api/me.json")
                 .header("User-Agent", MOBILE_UA)
                 .header("Accept", "application/json")
+                .header("Referer", "https://www.reddit.com/")
                 .header("Cookie", cookieHeader)
                 .get()
                 .build()
@@ -147,13 +153,14 @@ object RedditPersonalAPI {
             val thumb = extractThumb(mediaNode) ?: extractThumb(raw)
             val media = extractMedia(mediaNode) ?: extractMedia(raw) ?: continue
 
-            if (media.extraVideos.isNotEmpty()) {
-                MediaMetaRegistry.register(
-                    postId = gid,
-                    tags = listOfNotNull(subreddit?.lowercase()),
-                    creatorName = author,
-                    extraVideoURLs = media.extraVideos
-                )
+            MediaMetaRegistry.register(
+                postId = gid,
+                tags = listOfNotNull(subreddit?.lowercase()),
+                creatorName = author,
+                extraVideoURLs = media.extraVideos
+            )
+            if (media.galleryItems.size > 1) {
+                MediaMetaRegistry.registerAlbumItems(gid, media.galleryItems)
             }
 
             posts.add(
@@ -170,8 +177,9 @@ object RedditPersonalAPI {
                     mediaUrl = media.primaryUrl,
                     muxedUrl = if (media.isImage) null else (media.sdUrl ?: media.primaryUrl),
                     muxedUrlHd = if (media.isImage) null else (media.hdUrl ?: media.primaryUrl),
-                    posterUrl = thumb,
-                    thumbnailUrl = thumb,
+                    hlsUrl = if (media.isImage) null else media.hlsUrl,
+                    posterUrl = thumb ?: if (media.isImage) media.primaryUrl else null,
+                    thumbnailUrl = thumb ?: if (media.isImage) media.primaryUrl else null,
                     sourceUrl = permalink,
                     permalink = permalink,
                     createdUtc = createdIso
@@ -186,7 +194,9 @@ object RedditPersonalAPI {
         val primaryUrl: String,
         val sdUrl: String?,
         val hdUrl: String?,
+        val hlsUrl: String?,
         val extraVideos: List<String>,
+        val galleryItems: List<AlbumMediaItem>,
         val width: Int?,
         val height: Int?,
         val duration: Double?
@@ -205,22 +215,25 @@ object RedditPersonalAPI {
     }
 
     private fun extractMedia(node: JSONObject): ExtractedMedia? {
+        // 1. Native Reddit Video — ALWAYS prefer HLS (.m3u8) so audio is muxed (fallback_url is video-only!)
         val rv = node.optJSONObject("secure_media")?.optJSONObject("reddit_video")
             ?: node.optJSONObject("media")?.optJSONObject("reddit_video")
             ?: node.optJSONObject("preview")?.optJSONObject("reddit_video_preview")
 
         if (rv != null) {
-            val hls = rv.optString("hls_url").replace("&amp;", "&").takeIf { it.startsWith("http") }
-            val fallback = rv.optString("fallback_url").replace("&amp;", "&").takeIf { it.startsWith("http") }
-            val scrubber = rv.optString("scrubber_media_url").replace("&amp;", "&").takeIf { it.startsWith("http") }
+            val hls = rv.optString("hls_url").replace("&amp;", "&").trim().takeIf { it.startsWith("http") }
+            val fallback = rv.optString("fallback_url").replace("&amp;", "&").trim().takeIf { it.startsWith("http") }
+            val scrubber = rv.optString("scrubber_media_url").replace("&amp;", "&").trim().takeIf { it.startsWith("http") }
             val candidates = listOfNotNull(hls, fallback, scrubber).distinct()
             if (candidates.isNotEmpty()) {
                 return ExtractedMedia(
                     isImage = false,
                     primaryUrl = candidates.first(),
-                    sdUrl = fallback ?: candidates.first(),
+                    sdUrl = hls ?: fallback ?: candidates.first(),
                     hdUrl = hls ?: fallback ?: candidates.first(),
+                    hlsUrl = hls,
                     extraVideos = candidates,
+                    galleryItems = emptyList(),
                     width = rv.optInt("width", 0).takeIf { it > 0 },
                     height = rv.optInt("height", 0).takeIf { it > 0 },
                     duration = rv.optDouble("duration", 0.0).takeIf { it > 0.0 }
@@ -228,6 +241,7 @@ object RedditPersonalAPI {
             }
         }
 
+        // 2. Preview MP4 variant
         val mp4Src = node.optJSONObject("preview")
             ?.optJSONArray("images")
             ?.optJSONObject(0)
@@ -241,48 +255,74 @@ object RedditPersonalAPI {
                 primaryUrl = mp4Url,
                 sdUrl = mp4Url,
                 hdUrl = mp4Url,
+                hlsUrl = null,
                 extraVideos = listOf(mp4Url),
+                galleryItems = emptyList(),
                 width = mp4Src.optInt("width", 0).takeIf { it > 0 },
                 height = mp4Src.optInt("height", 0).takeIf { it > 0 },
                 duration = null
             )
         }
 
-        val rawUrl = (node.optString("url_overridden_by_dest").ifEmpty { node.optString("url") }).replace("&amp;", "&")
-        val lower = rawUrl.lowercase()
-        if (lower.startsWith("http")) {
-            if (lower.contains(".mp4") || lower.contains(".mov")) {
-                return ExtractedMedia(false, rawUrl, rawUrl, rawUrl, listOf(rawUrl), null, null, null)
+        // 3. Reddit Gallery (ordered by gallery_data.items)
+        val gallery = node.optJSONObject("media_metadata")
+        if (gallery != null) {
+            val orderedIds = mutableListOf<String>()
+            val gItems = node.optJSONObject("gallery_data")?.optJSONArray("items")
+            if (gItems != null) {
+                for (j in 0 until gItems.length()) {
+                    gItems.optJSONObject(j)?.optString("media_id")?.takeIf { it.isNotEmpty() }?.let { orderedIds.add(it) }
+                }
             }
-            if (lower.endsWith(".gifv")) {
-                val mp4 = rawUrl.dropLast(5) + ".mp4"
-                return ExtractedMedia(false, mp4, mp4, mp4, listOf(mp4), null, null, null)
+            if (orderedIds.isEmpty()) {
+                val keys = gallery.keys()
+                while (keys.hasNext()) orderedIds.add(keys.next())
             }
-            if (lower.contains("i.redd.it/") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
-                lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif")
-            ) {
-                return ExtractedMedia(true, rawUrl, null, null, emptyList(), null, null, null)
+            val slides = mutableListOf<AlbumMediaItem>()
+            var firstW: Int? = null
+            var firstH: Int? = null
+            for ((idx, mid) in orderedIds.withIndex()) {
+                val s = gallery.optJSONObject(mid)?.optJSONObject("s") ?: continue
+                val u = (s.optString("u").ifEmpty { s.optString("gif") }).replace("&amp;", "&")
+                if (u.startsWith("http")) {
+                    if (firstW == null) firstW = s.optInt("x", 0).takeIf { it > 0 }
+                    if (firstH == null) firstH = s.optInt("y", 0).takeIf { it > 0 }
+                    slides.add(AlbumMediaItem(id = "rdg_${mid}_$idx", url = u, posterUrl = u, isVideo = false))
+                }
+            }
+            if (slides.isNotEmpty()) {
+                return ExtractedMedia(
+                    isImage = true,
+                    primaryUrl = slides.first().url,
+                    sdUrl = null,
+                    hdUrl = null,
+                    hlsUrl = null,
+                    extraVideos = emptyList(),
+                    galleryItems = slides,
+                    width = firstW,
+                    height = firstH,
+                    duration = null
+                )
             }
         }
 
-        val gallery = node.optJSONObject("media_metadata")
-        if (gallery != null) {
-            val keys = gallery.keys()
-            while (keys.hasNext()) {
-                val s = gallery.optJSONObject(keys.next())?.optJSONObject("s") ?: continue
-                val u = (s.optString("u").ifEmpty { s.optString("gif") }).replace("&amp;", "&")
-                if (u.startsWith("http")) {
-                    return ExtractedMedia(
-                        isImage = true,
-                        primaryUrl = u,
-                        sdUrl = null,
-                        hdUrl = null,
-                        extraVideos = emptyList(),
-                        width = s.optInt("x", 0).takeIf { it > 0 },
-                        height = s.optInt("y", 0).takeIf { it > 0 },
-                        duration = null
-                    )
-                }
+        // 4. Direct URL (strip ?query before extension check)
+        val rawUrl = (node.optString("url_overridden_by_dest").ifEmpty { node.optString("url") }).replace("&amp;", "&")
+        val lower = rawUrl.lowercase()
+        val pathOnly = lower.substringBefore("?")
+        if (lower.startsWith("http")) {
+            if (pathOnly.endsWith(".mp4") || pathOnly.endsWith(".mov") || lower.contains(".mp4?")) {
+                return ExtractedMedia(false, rawUrl, rawUrl, rawUrl, null, listOf(rawUrl), emptyList(), null, null, null)
+            }
+            if (pathOnly.endsWith(".gifv")) {
+                val mp4 = rawUrl.dropLast(5) + ".mp4"
+                return ExtractedMedia(false, mp4, mp4, mp4, null, listOf(mp4), emptyList(), null, null, null)
+            }
+            if (lower.contains("i.redd.it/") || lower.contains("preview.redd.it/") ||
+                pathOnly.endsWith(".jpg") || pathOnly.endsWith(".jpeg") ||
+                pathOnly.endsWith(".png") || pathOnly.endsWith(".webp") || pathOnly.endsWith(".gif")
+            ) {
+                return ExtractedMedia(true, rawUrl, null, null, null, emptyList(), emptyList(), null, null, null)
             }
         }
 
@@ -296,38 +336,77 @@ fun RedditLoginSheet(
     onSuccess: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var statusText by remember { mutableStateOf("Sign in to link your personal Reddit feeds") }
+    val scope = rememberCoroutineScope()
+    var statusText by remember { mutableStateOf("Sign in (email or Google) to link your Reddit feeds") }
     var captured by remember { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(false) }
+    var popupWebView by remember { mutableStateOf<WebView?>(null) }
+
+    fun closePopup() {
+        popupWebView?.let { pop ->
+            try {
+                pop.stopLoading()
+                pop.destroy()
+            } catch (_: Throwable) {}
+        }
+        popupWebView = null
+    }
+
+    fun checkCookiesNow() {
+        if (captured || checking) return
+        checking = true
+        scope.launch {
+            try {
+                val cm = CookieManager.getInstance()
+                cm.flush()
+                val combined = listOfNotNull(
+                    cm.getCookie("https://www.reddit.com"),
+                    cm.getCookie("https://reddit.com")
+                ).joinToString("; ")
+                val map = combined.split(";").mapNotNull {
+                    val idx = it.indexOf('=')
+                    if (idx > 0) {
+                        val k = it.substring(0, idx).trim()
+                        val v = it.substring(idx + 1).trim()
+                        if (v.isNotEmpty()) k to v else null
+                    } else null
+                }.toMap()
+                val sessionVal = map["reddit_session"] ?: ""
+                val tokenVal = map["token_v2"] ?: ""
+                if (sessionVal.isNotEmpty() || tokenVal.isNotEmpty()) {
+                    val temp = RedditAccountSession(redditSessionCookie = sessionVal, tokenV2 = tokenVal)
+                    val uname = RedditPersonalAPI.verifyUsername(temp.cookieHeader)
+                    if (!uname.isNullOrEmpty() && !captured) {
+                        captured = true
+                        statusText = "Connected as u/$uname!"
+                        closePopup()
+                        val keepMix = UserStore.shared.data.value.redditSession.mixIntoForYou
+                        UserStore.shared.updateRedditSession(
+                            RedditAccountSession(
+                                redditSessionCookie = sessionVal,
+                                tokenV2 = tokenVal,
+                                username = uname,
+                                mixIntoForYou = keepMix
+                            )
+                        )
+                        onSuccess()
+                        onDismiss()
+                    }
+                }
+            } finally {
+                checking = false
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { closePopup() }
+    }
 
     LaunchedEffect(Unit) {
         while (!captured) {
-            delay(1300)
-            val cookieStr = CookieManager.getInstance().getCookie("https://www.reddit.com") ?: ""
-            val map = cookieStr.split(";").mapNotNull {
-                val idx = it.indexOf('=')
-                if (idx > 0) it.substring(0, idx).trim() to it.substring(idx + 1).trim() else null
-            }.toMap()
-            val sessionVal = map["reddit_session"] ?: ""
-            val tokenVal = map["token_v2"] ?: ""
-            if (sessionVal.isNotEmpty() || tokenVal.isNotEmpty()) {
-                val temp = RedditAccountSession(redditSessionCookie = sessionVal, tokenV2 = tokenVal)
-                val uname = RedditPersonalAPI.verifyUsername(temp.cookieHeader)
-                if (!uname.isNullOrEmpty()) {
-                    captured = true
-                    statusText = "Connected as u/$uname!"
-                    val keepMix = UserStore.shared.data.value.redditSession.mixIntoForYou
-                    UserStore.shared.updateRedditSession(
-                        RedditAccountSession(
-                            redditSessionCookie = sessionVal,
-                            tokenV2 = tokenVal,
-                            username = uname,
-                            mixIntoForYou = keepMix
-                        )
-                    )
-                    onSuccess()
-                    onDismiss()
-                }
-            }
+            delay(1400)
+            checkCookiesNow()
         }
     }
 
@@ -350,30 +429,114 @@ fun RedditLoginSheet(
                     Text("Connect Reddit", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     Text(statusText, color = Theme.textSecondary, fontSize = 11.5.sp, maxLines = 1)
                 }
-                IconButton(onClick = onDismiss) {
+                TextButton(onClick = { checkCookiesNow() }) {
+                    Text("Done", color = Theme.accentBright, fontWeight = FontWeight.Bold)
+                }
+                IconButton(onClick = { closePopup(); onDismiss() }) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
                 }
             }
 
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    WebView(ctx).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-                        CookieManager.getInstance().setAcceptCookie(true)
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                        webChromeClient = WebChromeClient()
-                        webViewClient = WebViewClient()
-                        loadUrl("https://www.reddit.com/login")
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            isFocusable = true
+                            isFocusableInTouchMode = true
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            val chromeUa = try {
+                                WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
+                            } catch (_: Throwable) {
+                                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                            }
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            @Suppress("DEPRECATION")
+                            settings.databaseEnabled = true
+                            settings.loadWithOverviewMode = true
+                            settings.useWideViewPort = true
+                            settings.setSupportMultipleWindows(true)
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            settings.userAgentString = chromeUa
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onCreateWindow(
+                                    view: WebView?,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: Message?
+                                ): Boolean {
+                                    val popup = WebView(ctx).apply {
+                                        layoutParams = ViewGroup.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        settings.loadWithOverviewMode = true
+                                        settings.useWideViewPort = true
+                                        settings.setSupportMultipleWindows(true)
+                                        settings.javaScriptCanOpenWindowsAutomatically = true
+                                        settings.userAgentString = chromeUa
+                                        CookieManager.getInstance().setAcceptCookie(true)
+                                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                        webViewClient = object : WebViewClient() {
+                                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                checkCookiesNow()
+                                            }
+                                        }
+                                        webChromeClient = object : WebChromeClient() {
+                                            override fun onCloseWindow(window: WebView?) {
+                                                closePopup()
+                                                checkCookiesNow()
+                                            }
+                                        }
+                                    }
+                                    closePopup()
+                                    popupWebView = popup
+                                    val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                    transport?.webView = popup
+                                    resultMsg?.sendToTarget()
+                                    return true
+                                }
+                            }
+                            webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    checkCookiesNow()
+                                }
+                            }
+                            loadUrl("https://www.reddit.com/login")
+                        }
+                    },
+                    onRelease = { wv ->
+                        try {
+                            wv.stopLoading()
+                            wv.destroy()
+                        } catch (_: Throwable) {}
                     }
-                },
-                onRelease = { wv ->
-                    wv.stopLoading()
-                    wv.destroy()
+                )
+
+                popupWebView?.let { pop ->
+                    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                        AndroidView(factory = { pop }, modifier = Modifier.fillMaxSize())
+                        IconButton(
+                            onClick = { closePopup(); checkCookiesNow() },
+                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Close Popup", tint = Color.White)
+                        }
+                    }
                 }
-            )
+            }
         }
     }
 }

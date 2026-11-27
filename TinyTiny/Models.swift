@@ -227,7 +227,7 @@ struct Gif: Codable, Identifiable, Hashable {
         // Prefer adaptive HLS (.m3u8) first on X posts for near-instant startup like x.com;
         // OfflineManager filters out .m3u8 and still downloads the highest-quality direct MP4.
         var candidates: [String?]
-        if isXPost, let hls = hlsUrl, !hls.isEmpty {
+        if (isXPost || hlsUrl?.contains("v.redd.it") == true), let hls = hlsUrl, !hls.isEmpty {
             candidates = hd
                 ? [hls, muxedUrlHd, muxedUrl, mediaUrl]
                 : [hls, muxedUrl, muxedUrlHd, mediaUrl]
