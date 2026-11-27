@@ -1766,11 +1766,9 @@ struct XLoginWebViewRepresentable: UIViewRepresentable {
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
             if navigationAction.targetFrame == nil {
-                configuration.websiteDataStore = .default()
-                configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
                 let popup = WKWebView(frame: webView.bounds, configuration: configuration)
                 popup.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                popup.customUserAgent = Config.userAgent
+                popup.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
                 popup.uiDelegate = self
                 popup.navigationDelegate = self
                 popup.backgroundColor = .systemBackground

@@ -959,30 +959,6 @@ final class SmartTasteEngine: ObservableObject {
             add(t)
         }
 
-        // 3. NaturalLanguage Semantic Word Embedding Fallback (never load model synchronously on MainActor)
-        if !didWarmWordEmbedding {
-            didWarmWordEmbedding = true
-            Task.detached(priority: .utility) {
-                Self.cachedWordEmbedding = NLEmbedding.wordEmbedding(for: .english)
-            }
-        }
-        if tags.isEmpty, let title = post.title, title.count >= 6,
-           let embedding = Self.cachedWordEmbedding {
-            let candidateSeeds: [(word: String, canonical: String)] = [
-                ("goth", "goth"), ("latina", "latina"), ("asian", "asian"), ("ebony", "ebony"),
-                ("femboy", "femboy"), ("transgender", "trans_woman"), ("cosplay", "cosplay"),
-                ("milf", "milf"), ("lesbian", "lesbian"), ("bondage", "bdsm"), ("anime", "hentai")
-            ]
-            for token in words.prefix(12) where token.count >= 4 && !MediaMetaRegistry.isStopTag(token) {
-                for seed in candidateSeeds {
-                    let dist = embedding.distance(between: token, and: seed.word)
-                    if dist < 0.68 {
-                        add(seed.canonical)
-                    }
-                }
-            }
-        }
-
         // 4. Orthogonal Creator Gender Resolution (ONLY label `man` as `gay`/`men` if NOT `femboy` or `trans_woman`!)
         let currentSet = Set(tags)
         let isFemboyOrTrans = !currentSet.isDisjoint(with: femboyOrTransRescueTags)

@@ -337,7 +337,7 @@ fun RedditLoginSheet(
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var statusText by remember { mutableStateOf("Sign in (email or Google) to link your Reddit feeds") }
+    var statusText by remember { mutableStateOf("Sign in · Google account? Or tap 'Email me a one-time link'") }
     var captured by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
@@ -449,11 +449,8 @@ fun RedditLoginSheet(
                             isFocusable = true
                             isFocusableInTouchMode = true
                             setBackgroundColor(android.graphics.Color.BLACK)
-                            val chromeUa = try {
-                                WebSettings.getDefaultUserAgent(ctx).replace("; wv", "")
-                            } catch (_: Throwable) {
-                                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-                            }
+                            // Firefox Mobile UA avoids Google OAuth's Android Chrome WebView (wv / X-Requested-With) 403 block
+                            val oauthSafeUa = "Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0"
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             @Suppress("DEPRECATION")
@@ -463,7 +460,7 @@ fun RedditLoginSheet(
                             settings.setSupportMultipleWindows(true)
                             settings.javaScriptCanOpenWindowsAutomatically = true
                             settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            settings.userAgentString = chromeUa
+                            settings.userAgentString = oauthSafeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             webChromeClient = object : WebChromeClient() {
@@ -484,7 +481,7 @@ fun RedditLoginSheet(
                                         settings.useWideViewPort = true
                                         settings.setSupportMultipleWindows(true)
                                         settings.javaScriptCanOpenWindowsAutomatically = true
-                                        settings.userAgentString = chromeUa
+                                        settings.userAgentString = oauthSafeUa
                                         CookieManager.getInstance().setAcceptCookie(true)
                                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                                         webViewClient = object : WebViewClient() {

@@ -246,35 +246,68 @@ private struct RemoteGateOverlay: View {
     }
 }
 
+/// Holds all channel FeedModels WITHOUT `@Published` properties so background feed updates
+/// never trigger root `GoonedMainShell` re-renders, and instantiates non-primary channels lazily.
+@MainActor
+private final class FeedModelRegistry: ObservableObject {
+    lazy var followingModel = FeedModel(source: .following)
+    lazy var forYouModel = FeedModel(source: .forYou)
+    lazy var xForYouModel = FeedModel(source: .xForYou)
+    lazy var xFollowingModel = FeedModel(source: .xFollowing)
+    lazy var xBookmarksModel = FeedModel(source: .xBookmarks)
+    lazy var redditHomeModel = FeedModel(source: .redditHome)
+    lazy var redditPopularModel = FeedModel(source: .redditPopular)
+    lazy var redditSavedModel = FeedModel(source: .redditSaved)
+    lazy var redditUpvotedModel = FeedModel(source: .redditUpvoted)
+    lazy var r34Model = FeedModel(source: .rule34(""))
+    lazy var igReelsModel = FeedModel(source: .igReels)
+    lazy var igFollowingModel = FeedModel(source: .igFollowing)
+    lazy var igSavedModel = FeedModel(source: .igSaved)
+    lazy var ofForYouModel = FeedModel(source: .ofForYou)
+    lazy var ofTrendingModel = FeedModel(source: .ofTrending)
+    lazy var ofLatestModel = FeedModel(source: .ofLatest)
+    lazy var ofDMsModel = FeedModel(source: .ofDMs)
+    lazy var longAllModel = FeedModel(source: .longVideos(.all))
+    lazy var longEpornerModel = FeedModel(source: .longVideos(.eporner))
+    lazy var longXVideosModel = FeedModel(source: .longVideos(.xvideos))
+    lazy var longPornhubModel = FeedModel(source: .longVideos(.pornhub))
+    lazy var longXHamsterModel = FeedModel(source: .longVideos(.xhamster))
+    lazy var longSpankBangModel = FeedModel(source: .longVideos(.spankbang))
+    lazy var longEromeModel = FeedModel(source: .longVideos(.erome))
+    lazy var customModel = FeedModel(source: .forYou)
+}
+
 struct GoonedMainShell: View {
     @EnvironmentObject var store: UserStore
     @ObservedObject private var shareService = ShareService.shared
     @ObservedObject private var license = LicenseManager.shared
-    @StateObject private var followingModel = FeedModel(source: .following)
-    @StateObject private var forYouModel = FeedModel(source: .forYou)
-    @StateObject private var xForYouModel = FeedModel(source: .xForYou)
-    @StateObject private var xFollowingModel = FeedModel(source: .xFollowing)
-    @StateObject private var xBookmarksModel = FeedModel(source: .xBookmarks)
-    @StateObject private var redditHomeModel = FeedModel(source: .redditHome)
-    @StateObject private var redditPopularModel = FeedModel(source: .redditPopular)
-    @StateObject private var redditSavedModel = FeedModel(source: .redditSaved)
-    @StateObject private var redditUpvotedModel = FeedModel(source: .redditUpvoted)
-    @StateObject private var r34Model = FeedModel(source: .rule34(""))
-    @StateObject private var igReelsModel = FeedModel(source: .igReels)
-    @StateObject private var igFollowingModel = FeedModel(source: .igFollowing)
-    @StateObject private var igSavedModel = FeedModel(source: .igSaved)
-    @StateObject private var ofForYouModel = FeedModel(source: .ofForYou)
-    @StateObject private var ofTrendingModel = FeedModel(source: .ofTrending)
-    @StateObject private var ofLatestModel = FeedModel(source: .ofLatest)
-    @StateObject private var ofDMsModel = FeedModel(source: .ofDMs)
-    @StateObject private var longAllModel = FeedModel(source: .longVideos(.all))
-    @StateObject private var longEpornerModel = FeedModel(source: .longVideos(.eporner))
-    @StateObject private var longXVideosModel = FeedModel(source: .longVideos(.xvideos))
-    @StateObject private var longPornhubModel = FeedModel(source: .longVideos(.pornhub))
-    @StateObject private var longXHamsterModel = FeedModel(source: .longVideos(.xhamster))
-    @StateObject private var longSpankBangModel = FeedModel(source: .longVideos(.spankbang))
-    @StateObject private var longEromeModel = FeedModel(source: .longVideos(.erome))
-    @StateObject private var customModel = FeedModel(source: .forYou)
+    @StateObject private var feeds = FeedModelRegistry()
+
+    private var followingModel: FeedModel { feeds.followingModel }
+    private var forYouModel: FeedModel { feeds.forYouModel }
+    private var xForYouModel: FeedModel { feeds.xForYouModel }
+    private var xFollowingModel: FeedModel { feeds.xFollowingModel }
+    private var xBookmarksModel: FeedModel { feeds.xBookmarksModel }
+    private var redditHomeModel: FeedModel { feeds.redditHomeModel }
+    private var redditPopularModel: FeedModel { feeds.redditPopularModel }
+    private var redditSavedModel: FeedModel { feeds.redditSavedModel }
+    private var redditUpvotedModel: FeedModel { feeds.redditUpvotedModel }
+    private var r34Model: FeedModel { feeds.r34Model }
+    private var igReelsModel: FeedModel { feeds.igReelsModel }
+    private var igFollowingModel: FeedModel { feeds.igFollowingModel }
+    private var igSavedModel: FeedModel { feeds.igSavedModel }
+    private var ofForYouModel: FeedModel { feeds.ofForYouModel }
+    private var ofTrendingModel: FeedModel { feeds.ofTrendingModel }
+    private var ofLatestModel: FeedModel { feeds.ofLatestModel }
+    private var ofDMsModel: FeedModel { feeds.ofDMsModel }
+    private var longAllModel: FeedModel { feeds.longAllModel }
+    private var longEpornerModel: FeedModel { feeds.longEpornerModel }
+    private var longXVideosModel: FeedModel { feeds.longXVideosModel }
+    private var longPornhubModel: FeedModel { feeds.longPornhubModel }
+    private var longXHamsterModel: FeedModel { feeds.longXHamsterModel }
+    private var longSpankBangModel: FeedModel { feeds.longSpankBangModel }
+    private var longEromeModel: FeedModel { feeds.longEromeModel }
+    private var customModel: FeedModel { feeds.customModel }
 
     private struct CustomBackHistoryItem {
         let channel: HomeChannel
@@ -678,33 +711,8 @@ struct GoonedMainShell: View {
         .animation(.easeOut(duration: 0.14), value: showSettingsModal)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.data.settings.controlsCollapsed)
         .task {
-            guard !didPrewarm else { return }
+            // Channels load lazily on first visit to keep cold launch & scrolling 100% freeze-free
             didPrewarm = true
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            // Stagger pre-warming so cold launch never spikes multiple engines/WebViews at once
-            if r34Model.items.isEmpty {
-                await r34Model.loadMore()
-            }
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            if ofForYouModel.items.isEmpty {
-                await ofForYouModel.loadMore()
-            }
-            if store.data.xSession.isConnected {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if xForYouModel.items.isEmpty {
-                    await xForYouModel.loadMore()
-                } else {
-                    await XWebEngine.shared.warmUp()
-                }
-            }
-            if store.data.igSession.isConnected {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if igReelsModel.items.isEmpty {
-                    await igReelsModel.loadMore()
-                } else {
-                    await InstagramWebEngine.shared.warmUp()
-                }
-            }
         }
         .sheet(isPresented: $showXLoginSheet) {
             XLoginSheet {

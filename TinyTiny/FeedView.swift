@@ -57,6 +57,12 @@ struct PlayerLayerView: UIViewRepresentable {
             v.playerLayer.videoGravity = targetGravity
         }
     }
+
+    static func dismantleUIView(_ v: PlayerUIView, coordinator: Coordinator) {
+        coordinator.readyObservation?.invalidate()
+        coordinator.readyObservation = nil
+        v.playerLayer.player = nil
+    }
 }
 
 // MARK: - Source-Aware HTTP Headers & Fast Cached Image/Video Preloaders
@@ -399,7 +405,7 @@ final class PlayerProgressState: ObservableObject {
 
 @MainActor
 final class PlayerModel: ObservableObject {
-    let player = AVQueuePlayer()
+    let player = AVPlayer()
     let progressState = PlayerProgressState()
     @Published var durationSeconds: Double = 0
     @Published var is2xSpeed: Bool = false
@@ -413,8 +419,8 @@ final class PlayerModel: ObservableObject {
     private var lastPreviewRequestAt: Date = .distantPast
     private var lastSeekRequestAt: Date = .distantPast
     private var teardownGeneration: Int = 0
+    private var loadItemTask: Task<Void, Never>?
 
-    private var looper: AVPlayerLooper?
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
@@ -563,18 +569,14 @@ final class PlayerModel: ObservableObject {
             allFailed = true
             return
         }
+        loadItemTask?.cancel()
+        loadItemTask = nil
+
         let entry = candidateEntries[index]
         let url = entry.url
         let isHLS = url.absoluteString.lowercased().contains(".m3u8")
-        let item: AVPlayerItem
-        if let prebuffered = VideoPreloader.shared.popPreloadedItem(for: url, includeReferer: entry.includeReferer) {
-            item = prebuffered
-        } else {
-            let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
-            item = AVPlayerItem(asset: asset)
-        }
-        item.preferredForwardBufferDuration = isHLS ? 2.5 : 2.0
-        player.automaticallyWaitsToMinimizeStalling = true
+        let asset = VideoPreloader.shared.asset(for: url, includeReferer: entry.includeReferer)
+        let gen = teardownGeneration
 
         statusObservation?.invalidate()
         statusObservation = nil
@@ -584,65 +586,75 @@ final class PlayerModel: ObservableObject {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
         }
-        looper?.disableLooping()
-        looper = nil
-        player.removeAllItems()
 
-        // Loop via AVPlayerItemDidPlayToEndTime for all media (avoids AVPlayerLooper main-thread freezes)
-        player.actionAtItemEnd = .none
-        player.insert(item, after: nil)
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.onClipEnded?()
-                self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.wantsPlaying else { return }
-                        self.player.play()
-                        if self.is2xSpeed { self.player.rate = 2.0 }
+        // Construct AVPlayerItem off the MainActor so mediaserverd IPC never stalls UI scrolling
+        loadItemTask = Task { [weak self] in
+            let item = await Task.detached(priority: .userInitiated) { () -> AVPlayerItem in
+                let built = AVPlayerItem(asset: asset)
+                built.preferredForwardBufferDuration = isHLS ? 2.5 : 2.0
+                return built
+            }.value
+            guard !Task.isCancelled, let self, self.teardownGeneration == gen else { return }
+
+            self.player.automaticallyWaitsToMinimizeStalling = true
+            self.player.actionAtItemEnd = .none
+            self.player.replaceCurrentItem(with: item)
+
+            self.endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.onClipEnded?()
+                    self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.wantsPlaying else { return }
+                            self.player.play()
+                            if self.is2xSpeed { self.player.rate = 2.0 }
+                        }
                     }
                 }
             }
-        }
 
-        sizeObservation = player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
-            let sz = p.currentItem?.presentationSize ?? .zero
-            guard sz.width > 0, sz.height > 0 else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.detectedAspect = Double(sz.width / sz.height)
-                self.hasValidVideoSize = true
-                self.promoteReadyIfRenderable()
-            }
-        }
-
-        statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
-            let status = p.currentItem?.status
-            let sz = p.currentItem?.presentationSize ?? .zero
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                switch status {
-                case .readyToPlay:
-                    self.allFailed = false
-                    if sz.width > 0, sz.height > 0 {
-                        self.detectedAspect = Double(sz.width / sz.height)
-                        self.hasValidVideoSize = true
-                    }
+            self.sizeObservation = self.player.observe(\.currentItem?.presentationSize, options: [.new, .initial]) { [weak self] p, _ in
+                let sz = p.currentItem?.presentationSize ?? .zero
+                guard sz.width > 0, sz.height > 0 else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.detectedAspect = Double(sz.width / sz.height)
+                    self.hasValidVideoSize = true
                     self.promoteReadyIfRenderable()
-                case .failed:
-                    self.advanceToNextCandidate()
-                default:
-                    break
                 }
             }
-        }
 
-        if wantsPlaying {
-            scheduleStallWatchdog(forGeneration: index)
+            self.statusObservation = self.player.observe(\.currentItem?.status, options: [.new]) { [weak self] p, _ in
+                let status = p.currentItem?.status
+                let sz = p.currentItem?.presentationSize ?? .zero
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch status {
+                    case .readyToPlay:
+                        self.allFailed = false
+                        if sz.width > 0, sz.height > 0 {
+                            self.detectedAspect = Double(sz.width / sz.height)
+                            self.hasValidVideoSize = true
+                        }
+                        self.promoteReadyIfRenderable()
+                    case .failed:
+                        self.advanceToNextCandidate()
+                    default:
+                        break
+                    }
+                }
+            }
+
+            if self.wantsPlaying {
+                self.player.play()
+                if self.is2xSpeed { self.player.rate = 2.0 }
+                self.scheduleStallWatchdog(forGeneration: index)
+            }
         }
     }
 
@@ -755,15 +767,15 @@ final class PlayerModel: ObservableObject {
         statusObservation = nil
         sizeObservation?.invalidate()
         sizeObservation = nil
+        loadItemTask?.cancel()
+        loadItemTask = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
-        looper?.disableLooping()
-        looper = nil
         teardownGeneration += 1
         let gen = teardownGeneration
         let p = player
         DispatchQueue.main.async { [weak self] in
             if let self, self.teardownGeneration != gen { return }
-            p.removeAllItems()
+            p.replaceCurrentItem(with: nil)
         }
         prepared = false
         progressState.progress = 0
@@ -1285,6 +1297,7 @@ struct GoonedReelCell: View {
     @State private var localFitOverride: Bool? = nil
     @State private var albumItems: [AlbumMediaItem] = []
     @State private var albumIndex: Int = 0
+    @State private var activateTask: Task<Void, Never>? = nil
 
     private var shouldPlay: Bool { isActive && !app.isLocked && !userPaused && !showMoreSheet }
     private var isShowingImage: Bool {
@@ -1689,39 +1702,17 @@ struct GoonedReelCell: View {
         }
         .onAppear {
             player.onClipEnded = onClipFinished
-            if !gif.isImage {
-                let urls = gif.allVideoURLs(hd: store.data.settings.hd)
-                if !urls.isEmpty {
-                    player.prepare(urls: urls)
-                }
-                if gif.isLongVideoPost {
-                    Task {
-                        let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
-                        let album = MediaMetaRegistry.albumItems(for: gif.id)
-                        if !album.isEmpty {
-                            albumItems = album
-                        }
-                        if album.first?.isVideo == false {
-                            player.pause()
-                            player.allFailed = false
-                        } else if !resolved.isEmpty {
-                            player.updateCandidateURLs(resolved)
-                            if shouldPlay { player.play() }
-                        } else if !album.isEmpty {
-                            // Photo-only album (e.g. Erome image album)
-                            player.allFailed = false
-                        } else if urls.isEmpty {
-                            player.allFailed = true
-                        }
-                    }
-                } else if urls.isEmpty {
-                    player.allFailed = true
-                }
+            let preloadedAlbum = MediaMetaRegistry.albumItems(for: gif.id)
+            if !preloadedAlbum.isEmpty {
+                albumItems = preloadedAlbum
             }
-            player.setMuted(store.data.settings.muted)
-            syncPlayback()
+            if isActive {
+                scheduleActivePrepare()
+            }
         }
         .onDisappear {
+            activateTask?.cancel()
+            activateTask = nil
             player.teardown()
             userPaused = false
             isHolding = false
@@ -1730,12 +1721,61 @@ struct GoonedReelCell: View {
             albumItems = []
             albumIndex = 0
         }
+        .onChange(of: isActive) { _, nowActive in
+            if nowActive {
+                scheduleActivePrepare()
+            } else {
+                activateTask?.cancel()
+                activateTask = nil
+                speedLocked2x = false
+                player.teardown()
+            }
+        }
         .onChange(of: shouldPlay) { _, _ in
             if !isActive { speedLocked2x = false }
             syncPlayback()
         }
         .onChange(of: store.data.settings.muted) { _, m in
             player.setMuted(m)
+        }
+    }
+
+    private func scheduleActivePrepare() {
+        activateTask?.cancel()
+        activateTask = Task { @MainActor in
+            // 55ms debounce: fast flicking through multiple videos never spins up decoders for skipped cells
+            try? await Task.sleep(nanoseconds: 55_000_000)
+            guard !Task.isCancelled, isActive else { return }
+            player.onClipEnded = onClipFinished
+            player.setMuted(store.data.settings.muted)
+            if !gif.isImage {
+                let urls = gif.allVideoURLs(hd: store.data.settings.hd)
+                if !urls.isEmpty {
+                    player.prepare(urls: urls)
+                }
+                if gif.isLongVideoPost {
+                    let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
+                    guard !Task.isCancelled, isActive else { return }
+                    let album = MediaMetaRegistry.albumItems(for: gif.id)
+                    if !album.isEmpty {
+                        albumItems = album
+                    }
+                    if album.first?.isVideo == false {
+                        player.pause()
+                        player.allFailed = false
+                    } else if !resolved.isEmpty {
+                        player.updateCandidateURLs(resolved)
+                        if shouldPlay { player.play() }
+                    } else if !album.isEmpty {
+                        player.allFailed = false
+                    } else if urls.isEmpty {
+                        player.allFailed = true
+                    }
+                } else if urls.isEmpty {
+                    player.allFailed = true
+                }
+            }
+            syncPlayback()
         }
     }
 

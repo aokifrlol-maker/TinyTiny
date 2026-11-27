@@ -341,7 +341,7 @@ struct RedditLoginSheet: View {
     @EnvironmentObject private var store: UserStore
     var onSuccess: () -> Void
 
-    @State private var statusText = "Sign in (email, Google, or Apple) to link your Reddit feeds"
+    @State private var statusText = "Sign in · Google account? Or tap 'Email me a one-time link'"
 
     var body: some View {
         NavigationStack {
@@ -440,6 +440,7 @@ private struct RedditLoginWebView: UIViewRepresentable {
         }
 
         /// Supports Google & Apple OAuth popups (`window.open` / `target="_blank"`) while preserving `window.opener`.
+        /// IMPORTANT: Never reassign `configuration.websiteDataStore` here — WebKit binds it to the opener process pool!
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -447,14 +448,10 @@ private struct RedditLoginWebView: UIViewRepresentable {
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
             if navigationAction.targetFrame == nil {
-                configuration.websiteDataStore = .default()
-                configuration.allowsInlineMediaPlayback = true
-                configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-                configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
                 let popup = WKWebView(frame: webView.bounds, configuration: configuration)
                 popup.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                popup.customUserAgent = Config.userAgent
+                // Desktop Safari UA avoids Google's mobile WKWebView 403 disallowed_useragent block
+                popup.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
                 popup.uiDelegate = self
                 popup.navigationDelegate = self
                 popup.backgroundColor = .systemBackground
