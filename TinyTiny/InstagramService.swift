@@ -854,7 +854,7 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         return (cookieStr, csrf)
     }
 
-    private static func extractThreadsRecursively(from obj: Any, into out: inout [IGDirectThread], seen: inout Set<String>, depth: Int = 0) {
+    nonisolated private static func extractThreadsRecursively(from obj: Any, into out: inout [IGDirectThread], seen: inout Set<String>, depth: Int = 0) {
         guard depth < 14 else { return }
         if let dict = obj as? [String: Any] {
             let tid = (dict["thread_id"] as? String)

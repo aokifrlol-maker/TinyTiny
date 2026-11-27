@@ -128,9 +128,9 @@ final class RedditPersonalAPI {
             if !media.extraVideos.isEmpty {
                 MediaMetaRegistry.register(
                     postId: gid,
+                    extraVideoURLs: media.extraVideos,
                     tags: subreddit.map { [$0.lowercased()] } ?? [],
-                    creatorName: author,
-                    extraVideoURLs: media.extraVideos
+                    creatorName: author
                 )
             }
 
@@ -148,6 +148,7 @@ final class RedditPersonalAPI {
                     mediaUrl: media.primaryURL,
                     muxedUrl: media.isImage ? nil : (media.sdURL ?? media.primaryURL),
                     muxedUrlHd: media.isImage ? nil : (media.hdURL ?? media.primaryURL),
+                    hlsUrl: media.isImage ? nil : (media.hdURL?.contains(".m3u8") == true ? media.hdURL : nil),
                     posterUrl: thumb,
                     thumbnailUrl: thumb,
                     sourceUrl: permalink,
