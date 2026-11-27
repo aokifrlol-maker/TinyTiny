@@ -98,15 +98,15 @@ fun Modifier.liquidGlassBackground(tinted: Boolean = false): Modifier {
     val bgBrush = if (tinted) {
         Brush.verticalGradient(
             listOf(
-                Color(0xFF290A17).copy(alpha = 0.92f),
-                Color(0xFF14050B).copy(alpha = 0.96f)
+                Color(0xFF210812),
+                Color(0xFF100409)
             )
         )
     } else {
         Brush.verticalGradient(
             listOf(
-                Color(0xFF140B10).copy(alpha = 0.92f),
-                Color(0xFF070306).copy(alpha = 0.96f)
+                Color(0xFF120A0F),
+                Color(0xFF060205)
             )
         )
     }

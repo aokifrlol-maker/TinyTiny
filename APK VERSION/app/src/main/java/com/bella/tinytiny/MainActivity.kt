@@ -193,20 +193,22 @@ fun RootView() {
                         Row(
                             modifier = Modifier
                                 .statusBarsPadding()
-                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                                .padding(top = 104.dp, start = 14.dp, end = 14.dp)
                                 .fillMaxWidth()
-                                .liquidGlassCard(18.dp, userData.settings.tintedGlass)
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                                .background(Color(0xEB290A17))
+                                .border(1.dp, Theme.accentBright.copy(alpha = 0.45f), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Campaign, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.Campaign, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text(ann.second, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 3, modifier = Modifier.weight(1f))
+                            Text(ann.second, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, modifier = Modifier.weight(1f))
                             IconButton(
                                 onClick = { LicenseManager.dismissAnnouncement(ann.first) },
-                                modifier = Modifier.size(28.dp).liquidGlassCircle(userData.settings.tintedGlass)
+                                modifier = Modifier.size(26.dp).liquidGlassCircle(true)
                             ) {
-                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(13.dp))
                             }
                         }
                     }
@@ -663,8 +665,8 @@ fun GoonedMainShell() {
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                         .fillMaxWidth()
                 ) {
-                    IconButton(onClick = { activeTab = GoonedDockTab.BROWSE }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
-                        Icon(Icons.Default.Search, contentDescription = "Explore", tint = Color.White)
+                    IconButton(onClick = { activeTab = GoonedDockTab.BROWSE }, modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)) {
+                        Icon(Icons.Default.Search, contentDescription = "Explore", tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                     Spacer(Modifier.width(8.dp))
                     if (activeChannel == HomeChannel.CUSTOM) {
@@ -742,8 +744,8 @@ fun GoonedMainShell() {
                         }
                     }
                     Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = { showSettingsModal = true }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                    IconButton(onClick = { showSettingsModal = true }, modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                 }
 
@@ -873,15 +875,15 @@ fun GoonedMainShell() {
             else -> {}
         }
 
-        // Full-Width Liquid Glass Bottom Dock with Swipe-Down-to-Collapse & Haptics (exact iOS parity)
+        // Compact Liquid Glass Bottom Dock (exact iOS sizing & proportions)
         if (activeTab != GoonedDockTab.BROWSE && !(activeTab == GoonedDockTab.HOME && userData.settings.controlsCollapsed)) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 24.dp, vertical = 10.dp)
+                    .padding(horizontal = 28.dp, vertical = 8.dp)
                     .fillMaxWidth()
-                    .height(58.dp)
+                    .height(50.dp)
                     .liquidGlassCapsule(tinted)
                     .pointerInput(activeTab) {
                         var accumDy = 0f
@@ -1026,7 +1028,7 @@ private fun DockButton(
 ) {
     Box(
         modifier = Modifier
-            .size(46.dp)
+            .size(38.dp)
             .clip(CircleShape)
             .background(if (active) Color.White.copy(alpha = 0.16f) else Color.Transparent)
             .then(if (active) Modifier.border(0.9.dp, Color.White.copy(0.28f), CircleShape) else Modifier)
@@ -1037,7 +1039,7 @@ private fun DockButton(
             imageVector = if (active) filledIcon else outlinedIcon,
             contentDescription = null,
             tint = if (active) Color.White else Color.White.copy(alpha = 0.65f),
-            modifier = Modifier.size(23.dp)
+            modifier = Modifier.size(20.dp)
         )
     }
 }

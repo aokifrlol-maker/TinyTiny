@@ -993,8 +993,8 @@ fun GoonedReelCell(
                             }
                         }
 
-                        // Row 1: [Sort Dropdown] [Fit/Fill] [Collapse]
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        // Row 1: [Sort Dropdown] [Fit/Fill] [Collapse] (sleek iOS sizing)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                             Box {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -1002,7 +1002,7 @@ fun GoonedReelCell(
                                     modifier = Modifier
                                         .liquidGlassCapsule(tinted)
                                         .clickable { showSortMenu = true }
-                                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
                                 ) {
                                     Icon(
                                         imageVector = when (sort) {
@@ -1012,9 +1012,9 @@ fun GoonedReelCell(
                                         },
                                         contentDescription = null,
                                         tint = Color.White,
-                                        modifier = Modifier.size(14.dp)
+                                        modifier = Modifier.size(13.dp)
                                     )
-                                    Text(sort.label, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                    Text(sort.label, color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                                 }
                                 DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
                                     FeedSort.entries.forEach { opt ->
@@ -1027,41 +1027,42 @@ fun GoonedReelCell(
                             }
                             IconButton(
                                 onClick = { localFitOverride = !effectiveFill },
-                                modifier = Modifier.size(36.dp).liquidGlassCircle(tinted, active = effectiveFill)
+                                modifier = Modifier.size(32.dp).liquidGlassCircle(tinted, active = effectiveFill)
                             ) {
                                 Icon(
                                     if (effectiveFill) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
                                     contentDescription = "Fit/Fill",
                                     tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
                             }
                             IconButton(
                                 onClick = { UserStore.shared.updateSettings { it.copy(controlsCollapsed = true) } },
-                                modifier = Modifier.size(36.dp).liquidGlassCircle(tinted)
+                                modifier = Modifier.size(32.dp).liquidGlassCircle(tinted)
                             ) {
-                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = Color.White, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = Color.White, modifier = Modifier.size(16.dp))
                             }
                         }
 
-                        // Row 2: [Browse] [Shuffle] [Auto-Scroll] [Quick Follow +] (42dp circles matching iOS)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onOpenCategories, modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)) {
-                                Icon(Icons.Default.GridView, contentDescription = "Browse", tint = Color.White, modifier = Modifier.size(19.dp))
+                        // Row 2: [Browse] [Shuffle] [Auto-Scroll] [Quick Follow +] (compact 34dp iOS circles)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onOpenCategories, modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)) {
+                                Icon(Icons.Default.GridView, contentDescription = "Browse", tint = Color.White, modifier = Modifier.size(16.dp))
                             }
-                            IconButton(onClick = onShuffle, modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)) {
-                                Icon(Icons.Default.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(19.dp))
+                            IconButton(onClick = onShuffle, modifier = Modifier.size(34.dp).liquidGlassCircle(tinted)) {
+                                Icon(Icons.Default.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(16.dp))
                             }
                             IconButton(
                                 onClick = { UserStore.shared.updateSettings { it.copy(autoScroll = !it.autoScroll) } },
-                                modifier = Modifier.size(42.dp).liquidGlassCircle(tinted, active = userData.settings.autoScroll)
+                                modifier = Modifier.size(34.dp).liquidGlassCircle(tinted, active = userData.settings.autoScroll)
                             ) {
-                                Icon(Icons.Default.KeyboardDoubleArrowDown, contentDescription = "Auto-Scroll", tint = Color.White, modifier = Modifier.size(19.dp))
+                                Icon(Icons.Default.KeyboardDoubleArrowDown, contentDescription = "Auto-Scroll", tint = Color.White, modifier = Modifier.size(16.dp))
                             }
-                            val canFollow = !gif.author.isNullOrEmpty() || !gif.subreddit.isNullOrEmpty()
+                            val canFollow = !gif.author.isNullOrEmpty() || !gif.subreddit.isNullOrEmpty() || !gif.onlyFansCreatorId.isNullOrEmpty()
                             if (canFollow) {
+                                val ofKey = gif.onlyFansCreatorId ?: gif.author
                                 val isFollowed = when {
-                                    gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { UserStore.shared.isFollowingOFCreator(it, gif.author ?: "") } == true
+                                    gif.isOnlyFansPost -> ofKey?.let { UserStore.shared.isFollowingOFCreator(it, gif.author ?: it) } == true
                                     gif.isXPost -> gif.author?.let { UserStore.shared.isFollowingXUser(it) } == true
                                     gif.isIGPost -> gif.author?.let { UserStore.shared.isFollowingIGUser(it) } == true
                                     !gif.subreddit.isNullOrEmpty() -> UserStore.shared.isFollowingSubreddit(gif.subreddit!!)
@@ -1071,29 +1072,29 @@ fun GoonedReelCell(
                                     onClick = {
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         when {
-                                            gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { UserStore.shared.toggleFollowOFCreator(it, gif.author ?: it, null) }
+                                            gif.isOnlyFansPost -> ofKey?.let { UserStore.shared.toggleFollowOFCreator(it, gif.author ?: it, null) }
                                             gif.isXPost -> gif.author?.let { UserStore.shared.toggleFollowXUser(it) }
                                             gif.isIGPost -> gif.author?.let { UserStore.shared.toggleFollowIGUser(it) }
                                             !gif.subreddit.isNullOrEmpty() -> UserStore.shared.toggleFollowSubreddit(gif.subreddit!!)
                                             else -> gif.author?.let { UserStore.shared.toggleFollowUser(it) }
                                         }
                                     },
-                                    modifier = Modifier.size(42.dp).liquidGlassCircle(tinted, active = isFollowed)
+                                    modifier = Modifier.size(34.dp).liquidGlassCircle(tinted, active = isFollowed)
                                 ) {
-                                    Icon(if (isFollowed) Icons.Default.Check else Icons.Default.Add, contentDescription = "Follow", tint = Color.White, modifier = Modifier.size(19.dp))
+                                    Icon(if (isFollowed) Icons.Default.Check else Icons.Default.Add, contentDescription = "Follow", tint = Color.White, modifier = Modifier.size(16.dp))
                                 }
                             }
                         }
                     }
 
-                    Spacer(Modifier.width(12.dp))
+                    Spacer(Modifier.width(10.dp))
 
-                    // Right Action Rail
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Right Action Rail (compact iOS proportions: 36dp avatar, 38dp buttons, 18dp icons)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         Box(
                             modifier = Modifier.clickable {
                                 when {
-                                    gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { onSelectOFCreator(it, gif.author ?: it) }
+                                    gif.isOnlyFansPost -> (gif.onlyFansCreatorId ?: gif.author)?.let { onSelectOFCreator(it, gif.author ?: it) }
                                     gif.isXPost -> gif.author?.let { onSelectXUser(it) }
                                     gif.isIGPost -> gif.author?.let { onSelectIGUser(it) }
                                     gif.isRule34Post -> {
@@ -1107,13 +1108,13 @@ fun GoonedReelCell(
                             }
                         ) {
                             when {
-                                gif.isRule34Post -> BrandLogoRule34(40.dp)
-                                gif.isXPost -> BrandLogoX(40.dp)
-                                gif.isIGPost -> BrandLogoInstagram(40.dp)
-                                gif.isOnlyFansPost -> BrandLogoOnlyFans(40.dp)
-                                gif.isLongVideoPost -> BrandLogoLongVideos(40.dp)
-                                else -> Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFF078A0)), contentAlignment = Alignment.Center) {
-                                    Text("r/", color = Color.Black, fontWeight = FontWeight.Black, fontSize = 14.sp)
+                                gif.isRule34Post -> BrandLogoRule34(36.dp)
+                                gif.isXPost -> BrandLogoX(36.dp)
+                                gif.isIGPost -> BrandLogoInstagram(36.dp)
+                                gif.isOnlyFansPost -> BrandLogoOnlyFans(36.dp)
+                                gif.isLongVideoPost -> BrandLogoLongVideos(36.dp)
+                                else -> Box(Modifier.size(36.dp).clip(CircleShape).background(Color(0xFFF078A0)), contentAlignment = Alignment.Center) {
+                                    Text("r/", color = Color.Black, fontWeight = FontWeight.Black, fontSize = 13.sp)
                                 }
                             }
                         }
@@ -1125,34 +1126,35 @@ fun GoonedReelCell(
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     UserStore.shared.toggleLike(gif)
                                 },
-                                modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)
+                                modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)
                             ) {
-                                Icon(Icons.Default.Favorite, contentDescription = "Like", tint = if (liked) Theme.accent else Color.White)
+                                Icon(Icons.Default.Favorite, contentDescription = "Like", tint = if (liked) Theme.accent else Color.White, modifier = Modifier.size(19.dp))
                             }
                             val baseUp = gif.upvotes ?: 0
                             val displayUp = baseUp + if (liked) 1 else 0
                             if (displayUp > 0) {
-                                Text(Gif.shortCount(displayUp), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text(Gif.shortCount(displayUp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                        IconButton(onClick = onDislike, modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)) {
-                            Icon(Icons.Default.ThumbDown, contentDescription = "Dislike", tint = Color.White)
+                        IconButton(onClick = onDislike, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.ThumbDown, contentDescription = "Dislike", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
                                 onClick = { UserStore.shared.updateSettings { it.copy(muted = !it.muted) } },
-                                modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)
+                                modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)
                             ) {
                                 Icon(
                                     if (userData.settings.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                     contentDescription = "Sound",
-                                    tint = Color.White
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                             Text(
                                 if (userData.settings.muted) "Muted" else "Sound",
                                 color = Color.White,
-                                fontSize = 10.5.sp,
+                                fontSize = 9.5.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -1161,7 +1163,7 @@ fun GoonedReelCell(
                         val dlFrac = downloadProgressMap[activeDownloadGif.id]?.toFloat()
                         IconButton(
                             onClick = { OfflineManager.toggleDownload(activeDownloadGif) },
-                            modifier = Modifier.size(42.dp).liquidGlassCircle(tinted, active = downloaded)
+                            modifier = Modifier.size(38.dp).liquidGlassCircle(tinted, active = downloaded)
                         ) {
                             if (downloading) {
                                 if (dlFrac != null) {
@@ -1169,25 +1171,26 @@ fun GoonedReelCell(
                                         progress = { dlFrac },
                                         color = Theme.accentBright,
                                         trackColor = Color.White.copy(0.25f),
-                                        modifier = Modifier.size(22.dp),
-                                        strokeWidth = 2.5.dp
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
                                     )
                                 } else {
-                                    CircularProgressIndicator(color = Theme.accentBright, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    CircularProgressIndicator(color = Theme.accentBright, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                                 }
                             } else {
                                 Icon(
                                     if (downloaded) Icons.Default.CheckCircle else Icons.Default.Download,
                                     contentDescription = "Download",
-                                    tint = Color.White
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                         }
-                        IconButton(onClick = onShare, modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)) {
-                            Icon(Icons.Default.Send, contentDescription = "Share", tint = Color.White)
+                        IconButton(onClick = onShare, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.Send, contentDescription = "Share", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
-                        IconButton(onClick = { showMoreSheet = true }, modifier = Modifier.size(42.dp).liquidGlassCircle(tinted)) {
-                            Icon(Icons.Default.MoreHoriz, contentDescription = "More", tint = Color.White)
+                        IconButton(onClick = { showMoreSheet = true }, modifier = Modifier.size(38.dp).liquidGlassCircle(tinted)) {
+                            Icon(Icons.Default.MoreHoriz, contentDescription = "More", tint = Color.White, modifier = Modifier.size(19.dp))
                         }
                     }
                 }
@@ -1588,15 +1591,29 @@ fun PostMoreSheet(
         OfflineManager.localMediaURL(activeDownloadGif.id)?.removePrefix("file://")?.let { File(it) }?.takeIf { it.exists() }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .liquidGlassBackground(tinted = tinted)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(20.dp)
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.65f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.76f)
+                    .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                    .background(if (tinted) Color(0xFF1F0812) else Color(0xFF12080E))
+                    .border(1.dp, Color.White.copy(0.14f), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                    .clickable(enabled = false) {}
+                    .navigationBarsPadding()
+                    .padding(20.dp)
+            ) {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Post Info & Offline", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
@@ -1750,6 +1767,8 @@ fun PostMoreSheet(
                 Icon(Icons.Default.ThumbDown, contentDescription = null, tint = Color(0xFFFF6B6B), modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Not Interested · Show Less Like This", color = Color(0xFFFF6B6B), fontWeight = FontWeight.Bold)
+            }
+                }
             }
         }
     }

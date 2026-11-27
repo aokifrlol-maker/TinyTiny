@@ -278,6 +278,23 @@ object InstagramWebEngine {
             });
             return origSend.apply(this, arguments);
           };
+          function scanSSR(){
+            try {
+              const scripts = document.querySelectorAll('script[type="application/json"]');
+              for(let i=0;i<scripts.length;i++){
+                const s = scripts[i];
+                if(s.__ttScanned) continue;
+                s.__ttScanned = true;
+                const t = s.textContent || '';
+                if(t.length > 80 && (t.includes('video_versions') || t.includes('video_url'))){
+                  window.TTIGBridge.onPayload('ssr_ig', location.href || '', t);
+                }
+              }
+            } catch(e){}
+          }
+          document.addEventListener('DOMContentLoaded', scanSSR);
+          setTimeout(scanSSR, 450);
+          setTimeout(scanSSR, 1600);
         })();
     """
 
@@ -636,11 +653,53 @@ object InstagramWebEngine {
 }
 
 object InstagramAPI {
+    private suspend fun fetchClipsHomeDirect(maxId: String = ""): GoonedFeedResponse? = withContext(Dispatchers.IO) {
+        val ig = UserStore.shared.data.value.igSession
+        if (!ig.isConnected) return@withContext null
+        try {
+            val cookies = CookieManager.getInstance().getCookie("https://www.instagram.com")
+                ?.takeIf { it.contains("sessionid=") }
+                ?: "sessionid=${ig.sessionId}; csrftoken=${ig.csrfToken}; ds_user_id=${ig.userId}"
+            val bodyStr = if (maxId.isNotEmpty()) {
+                "page_size=12&max_id=${URLEncoder.encode(maxId, "UTF-8")}"
+            } else {
+                "page_size=12"
+            }
+            val req = Request.Builder()
+                .url("https://www.instagram.com/api/v1/clips/home/")
+                .header("User-Agent", Config.userAgent)
+                .header("X-IG-App-ID", "936619743392459")
+                .header("X-ASBD-ID", "129477")
+                .header("X-CSRFToken", ig.csrfToken)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Origin", "https://www.instagram.com")
+                .header("Referer", "https://www.instagram.com/reels/")
+                .header("Cookie", cookies)
+                .post(bodyStr.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+                .build()
+            TinyTinyApplication.sharedHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val raw = resp.body?.string() ?: return@withContext null
+                val posts = InstagramParser.parseReels(raw, routeKey = "ig_reels")
+                    .filter { !UserStore.shared.isBlockedByAlgorithm(it) }
+                val nextCursor = InstagramParser.extractNextCursor(raw)
+                if (posts.isNotEmpty()) GoonedFeedResponse(posts = posts, after = nextCursor) else null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     suspend fun reelsFeed(after: String? = null): GoonedFeedResponse {
         val maxId = after?.takeIf { !it.startsWith("igpage_") } ?: ""
+        // Try fast direct authenticated Clips API first (~300ms), then fall back to WebView scraper
+        fetchClipsHomeDirect(maxId)?.let { return it }
+        val escapedMax = maxId.replace("\\", "\\\\").replace("'", "\\'")
         val trigger = if (maxId.isNotEmpty()) {
-            """fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'page_size=12&max_id='+encodeURIComponent('$maxId') }).catch(()=>{});"""
-        } else null
+            """fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'page_size=12&max_id='+encodeURIComponent('$escapedMax') }).catch(()=>{});"""
+        } else {
+            """fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'page_size=12' }).catch(()=>{});"""
+        }
         return InstagramWebEngine.fetchRoute("ig_reels", "https://www.instagram.com/reels/", after, apiTriggerJS = trigger)
     }
 

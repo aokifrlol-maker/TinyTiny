@@ -8,6 +8,7 @@ import android.net.Uri
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -371,15 +372,19 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
         return
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .liquidGlassBackground(tinted = settings.settings.tintedGlass)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(20.dp)
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(if (settings.settings.tintedGlass) Color(0xFF1D0711) else Color(0xFF0E060B))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(20.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright)
                 Spacer(Modifier.width(8.dp))
@@ -474,6 +479,7 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text("Share Source URL", color = Color.White)
             }
+            }
         }
     }
 }
@@ -507,15 +513,19 @@ fun ShareCollectionSheet(posts: List<Gif>, title: String? = null, onDismiss: () 
 
     LaunchedEffect(posts) { generate() }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .liquidGlassBackground(tinted = settings.settings.tintedGlass)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(20.dp)
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(if (settings.settings.tintedGlass) Color(0xFF1D0711) else Color(0xFF0E060B))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(20.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright)
                 Spacer(Modifier.width(8.dp))
@@ -571,6 +581,7 @@ fun ShareCollectionSheet(posts: List<Gif>, title: String? = null, onDismiss: () 
                     Text("Regenerate Link", fontWeight = FontWeight.Bold)
                 }
             }
+            }
         }
     }
 }
@@ -611,15 +622,19 @@ fun ReceiveDropSheet(onDismiss: () -> Unit, onOpenPost: ((Gif) -> Unit)? = null)
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .liquidGlassBackground(tinted = settings.settings.tintedGlass)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(20.dp)
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(if (settings.settings.tintedGlass) Color(0xFF1D0711) else Color(0xFF0E060B))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(20.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Open Encrypted Drop", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
@@ -667,6 +682,7 @@ fun ReceiveDropSheet(onDismiss: () -> Unit, onOpenPost: ((Gif) -> Unit)? = null)
                 Icon(Icons.Default.UploadFile, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Share a Video or File (AES-256 Encrypted)", color = Color.White, fontSize = 13.sp)
+            }
             }
         }
     }
