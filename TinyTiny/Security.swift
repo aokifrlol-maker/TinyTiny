@@ -1,31 +1,75 @@
 import SwiftUI
 import Security
 import CryptoKit
+import CommonCrypto
 import LocalAuthentication
 
-/// Your 4-digit passcode is your account. Only a hash of it is stored (in the Keychain).
+/// Your 4-digit passcode is your account. Stored as salted PBKDF2-HMAC-SHA256 in the Keychain only.
 enum Passcode {
     private static let account = "tinytiny.passcode"
-    private static let fallbackKey = "tinytiny.passcode.fallback"
+    private static let lockStateAccount = "tinytiny.passcode.lockstate.v1"
+    private static let legacyFallbackKey = "tinytiny.passcode.fallback"
+    private static let pbkdf2Iterations: UInt32 = 100_000
 
-    static func hash(_ code: String) -> Data {
+    private struct LockState: Codable {
+        var failures: Int = 0
+        var lockedUntilUptime: Double = 0
+        var lockedUntilWall: Double = 0
+    }
+
+    private static func legacyHash(_ code: String) -> Data {
         Data(SHA256.hash(data: Data(("tt.v1." + code).utf8)))
+    }
+
+    private static func pbkdf2(code: String, salt: Data) -> Data? {
+        let passwordBytes = Array(code.utf8)
+        let saltBytes = Array(salt)
+        var derived = [UInt8](repeating: 0, count: 32)
+        let status = derived.withUnsafeMutableBytes { derivedPtr in
+            CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                passwordBytes,
+                passwordBytes.count,
+                saltBytes,
+                saltBytes.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                pbkdf2Iterations,
+                derivedPtr.bindMemory(to: UInt8.self).baseAddress,
+                32
+            )
+        }
+        guard status == kCCSuccess else { return nil }
+        return Data(derived)
+    }
+
+    private static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count, !a.isEmpty else { return false }
+        var diff: UInt8 = 0
+        for (x, y) in zip(a, b) { diff |= x ^ y }
+        return diff == 0
+    }
+
+    private static func encodeV2(code: String) -> Data? {
+        var saltBytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes) == errSecSuccess else { return nil }
+        let salt = Data(saltBytes)
+        guard let dk = pbkdf2(code: code, salt: salt) else { return nil }
+        let s = "v2:\(salt.base64EncodedString()):\(dk.base64EncodedString())"
+        return Data(s.utf8)
     }
 
     static var exists: Bool { read() != nil }
 
     static func set(_ code: String) {
         delete()
+        guard let blob = encodeV2(code: code) else { return }
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
-            kSecValueData as String: hash(code),
+            kSecValueData as String: blob,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        let status = SecItemAdd(q as CFDictionary, nil)
-        if status != errSecSuccess {
-            UserDefaults.standard.set(hash(code), forKey: fallbackKey)
-        }
+        SecItemAdd(q as CFDictionary, nil)
     }
 
     static func read() -> Data? {
@@ -39,10 +83,31 @@ enum Passcode {
         if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data {
             return d
         }
-        return UserDefaults.standard.data(forKey: fallbackKey)
+        // One-time read of legacy fallback for seamless migration only
+        if let legacy = UserDefaults.standard.data(forKey: legacyFallbackKey) {
+            return legacy
+        }
+        return nil
     }
 
-    static func verify(_ code: String) -> Bool { read() == hash(code) }
+    static func verify(_ code: String) -> Bool {
+        guard let stored = read() else { return false }
+        if let str = String(data: stored, encoding: .utf8), str.hasPrefix("v2:") {
+            let parts = str.split(separator: ":")
+            guard parts.count == 3,
+                  let salt = Data(base64Encoded: String(parts[1])),
+                  let expected = Data(base64Encoded: String(parts[2])),
+                  let computed = pbkdf2(code: code, salt: salt) else { return false }
+            return constantTimeEqual(computed, expected)
+        }
+        // Legacy v1 SHA-256 verification + transparent migration to v2 PBKDF2 in Keychain
+        if constantTimeEqual(stored, legacyHash(code)) {
+            set(code)
+            UserDefaults.standard.removeObject(forKey: legacyFallbackKey)
+            return true
+        }
+        return false
+    }
 
     static func delete() {
         let q: [String: Any] = [
@@ -50,7 +115,74 @@ enum Passcode {
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(q as CFDictionary)
-        UserDefaults.standard.removeObject(forKey: fallbackKey)
+        UserDefaults.standard.removeObject(forKey: legacyFallbackKey)
+        clearFailures()
+    }
+
+    // MARK: - Keychain-Persisted Monotonic Lockout State
+
+    private static func readLockState() -> LockState {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: lockStateAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: AnyObject?
+        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+           let d = out as? Data,
+           let st = try? JSONDecoder().decode(LockState.self, from: d) {
+            return st
+        }
+        return LockState()
+    }
+
+    private static func saveLockState(_ st: LockState) {
+        guard let d = try? JSONEncoder().encode(st) else { return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: lockStateAccount,
+        ]
+        let attrs: [String: Any] = [
+            kSecValueData as String: d,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        if SecItemUpdate(query as CFDictionary, attrs as CFDictionary) == errSecItemNotFound {
+            SecItemAdd(query.merging(attrs) { _, new in new } as CFDictionary, nil)
+        }
+    }
+
+    static func lockoutRemainingSeconds() -> Int {
+        let st = readLockState()
+        let upRem = st.lockedUntilUptime - ProcessInfo.processInfo.systemUptime
+        let wallRem = st.lockedUntilWall - Date().timeIntervalSince1970
+        let rem = max(upRem, wallRem)
+        return rem > 0 ? Int(ceil(rem)) : 0
+    }
+
+    /// Records a failed passcode attempt and returns the lockout duration in seconds if triggered (0 otherwise).
+    static func recordFailure() -> Int {
+        var st = readLockState()
+        st.failures += 1
+        var lockSeconds = 0
+        if st.failures >= 5 {
+            let tier = st.failures - 5
+            let durations = [30, 60, 180, 300]
+            lockSeconds = durations[min(tier, durations.count - 1)]
+            st.lockedUntilUptime = ProcessInfo.processInfo.systemUptime + Double(lockSeconds)
+            st.lockedUntilWall = Date().timeIntervalSince1970 + Double(lockSeconds)
+        }
+        saveLockState(st)
+        return lockSeconds
+    }
+
+    static func clearFailures() {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: lockStateAccount,
+        ]
+        SecItemDelete(q as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: "tt.passcode.lockedUntil")
     }
 }
 
@@ -1003,7 +1135,19 @@ struct PasscodeSetupView: View {
         code = ""
         switch step {
         case .current:
-            if Passcode.verify(c) { step = .enter; message = nil } else { fail("Incorrect passcode") }
+            let rem = Passcode.lockoutRemainingSeconds()
+            if rem > 0 {
+                fail("Too many attempts. Try again in \(rem)s.")
+                return
+            }
+            if Passcode.verify(c) {
+                Passcode.clearFailures()
+                step = .enter
+                message = nil
+            } else {
+                let lockSec = Passcode.recordFailure()
+                fail(lockSec > 0 ? "Too many attempts. Wait \(lockSec) seconds." : "Incorrect passcode")
+            }
         case .enter:
             first = c
             step = .confirm
@@ -1030,6 +1174,7 @@ struct PasscodeSetupView: View {
         app.passcodeChoiceCompleted = true
         if mode == .create {
             app.hasPasscode = true
+            app.requirePasscodeOnOpen = true
             app.unlock()
         } else {
             dismiss()
@@ -1044,16 +1189,11 @@ struct LockView: View {
 
     @State private var code = ""
     @State private var shakes = 0
-    @State private var failures = 0
-    @State private var lockedUntil: Date? = {
-        let ts = UserDefaults.standard.double(forKey: "tt.passcode.lockedUntil")
-        let d = Date(timeIntervalSince1970: ts)
-        return (ts > 0 && d > Date()) ? d : nil
-    }()
     @State private var message: String?
     @State private var showKeyRecovery = false
     @State private var recoveryKeyInput = ""
     @State private var recoveryError: String?
+    @State private var isAuthenticatingFaceID = false
 
     private var faceIDOn: Bool { store.data.settings.faceID && Biometrics.available }
 
@@ -1095,35 +1235,32 @@ struct LockView: View {
     }
 
     private func tryFaceID() {
-        guard faceIDOn, app.isLocked else { return }
+        guard faceIDOn, app.isLocked, !isAuthenticatingFaceID else { return }
+        isAuthenticatingFaceID = true
         Task {
+            defer { isAuthenticatingFaceID = false }
             if await Biometrics.authenticate() { app.unlock() }
         }
     }
 
     private func check(_ c: String) {
         code = ""
-        if let until = lockedUntil, until > Date() {
-            message = "Too many attempts. Try again in \(Int(until.timeIntervalSinceNow) + 1)s."
+        let rem = Passcode.lockoutRemainingSeconds()
+        if rem > 0 {
+            message = "Too many attempts. Try again in \(rem)s."
             shakes += 1
             return
         }
         if Passcode.verify(c) {
-            failures = 0
-            lockedUntil = nil
-            UserDefaults.standard.removeObject(forKey: "tt.passcode.lockedUntil")
+            Passcode.clearFailures()
             message = nil
             app.unlock()
         } else {
-            failures += 1
             shakes += 1
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            if failures >= 5 {
-                failures = 0
-                let until = Date().addingTimeInterval(30)
-                lockedUntil = until
-                UserDefaults.standard.set(until.timeIntervalSince1970, forKey: "tt.passcode.lockedUntil")
-                message = "Too many attempts. Wait 30 seconds."
+            let lockSec = Passcode.recordFailure()
+            if lockSec > 0 {
+                message = "Too many attempts. Wait \(lockSec) seconds."
             } else {
                 message = "Incorrect passcode"
             }

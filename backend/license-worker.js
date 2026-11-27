@@ -136,6 +136,17 @@ async function saveLicense(env, rec) {
   });
 }
 
+function constantTimeEqual(aStr, bStr) {
+  const a = new TextEncoder().encode(String(aStr || ""));
+  const b = new TextEncoder().encode(String(bStr || ""));
+  const len = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < len; i++) {
+    diff |= (a[i] || 0) ^ (b[i] || 0);
+  }
+  return diff === 0 && a.length > 0;
+}
+
 function validateRecordAccess(rec, deviceId, opts = {}) {
   if (!rec) return { ok: false, error: "License key not found." };
   if (rec.revoked) return { ok: false, error: "This license key has been revoked." };
@@ -143,10 +154,16 @@ function validateRecordAccess(rec, deviceId, opts = {}) {
     return { ok: false, error: "License key has expired." };
   }
   const dev = String(deviceId || "").trim();
-  if (opts.requireDeviceId && !dev) {
+  if ((opts.requireDeviceId || opts.requireBoundDevice) && !dev) {
     return { ok: false, error: "Missing deviceId." };
   }
   const devices = Array.isArray(rec.deviceIds) ? rec.deviceIds : [];
+  if (opts.requireBoundDevice) {
+    if (!devices.includes(dev)) {
+      return { ok: false, error: "Device is not activated on this license key." };
+    }
+    return { ok: true };
+  }
   if (dev && !devices.includes(dev)) {
     const cap = Math.max(1, rec.maxDevices || 1);
     if (devices.length >= cap) {
@@ -159,9 +176,22 @@ function validateRecordAccess(rec, deviceId, opts = {}) {
   return { ok: true };
 }
 
+function stripHtmlTags(s) {
+  return String(s || "").replace(/<[^>]*>/g, "");
+}
+
+function safeTruncateTelegram(text, maxLen = 3940) {
+  const str = String(text || "");
+  if (str.length <= maxLen) return str;
+  const cut = str.slice(0, maxLen);
+  const lastNl = cut.lastIndexOf("\n");
+  const base = lastNl > maxLen - 600 ? cut.slice(0, lastNl) : cut;
+  return base + "\n…(truncated)";
+}
+
 async function sendTelegram(env, chatId, text, replyMarkup = null) {
-  if (!env.TELEGRAM_BOT_TOKEN) return;
-  const safeText = String(text || "").length > 3950 ? String(text).slice(0, 3940) + "\n…(truncated)" : String(text || "");
+  if (!env.TELEGRAM_BOT_TOKEN) return false;
+  const safeText = safeTruncateTelegram(text);
   const payload = {
     chat_id: chatId,
     text: safeText,
@@ -169,11 +199,28 @@ async function sendTelegram(env, chatId, text, replyMarkup = null) {
     disable_web_page_preview: true,
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch(() => null);
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (r.ok) return true;
+    // Fallback to plain text if truncated/malformed HTML caused HTTP 400
+    if (r.status === 400) {
+      const plainPayload = { ...payload, text: stripHtmlTags(safeText) };
+      delete plainPayload.parse_mode;
+      const r2 = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(plainPayload),
+      });
+      return r2.ok;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 async function sendTelegramDocumentUrl(env, chatId, docUrl, caption = "", replyMarkup = null) {
@@ -205,9 +252,16 @@ async function sendTelegramBinaryFile(env, chatId, sourceUrl, filename, caption 
       redirect: "follow",
     });
     if (!dl.ok) return { ok: false, error: `download_${dl.status}` };
+    const cl = Number(dl.headers.get("Content-Length") || 0);
+    if (cl > 49 * 1024 * 1024) {
+      return { ok: false, error: `too_large_${cl}` };
+    }
     const buf = await dl.arrayBuffer();
     if (!buf || buf.byteLength < 100_000) {
       return { ok: false, error: `too_small_${buf?.byteLength || 0}` };
+    }
+    if (buf.byteLength > 49 * 1024 * 1024) {
+      return { ok: false, error: `too_large_${buf.byteLength}` };
     }
     const form = new FormData();
     form.append("chat_id", String(chatId));
@@ -235,7 +289,7 @@ async function sendTelegramBinaryFile(env, chatId, sourceUrl, filename, caption 
 
 async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
-  const safeText = String(text || "").length > 3950 ? String(text).slice(0, 3940) + "\n…(truncated)" : String(text || "");
+  const safeText = safeTruncateTelegram(text);
   const payload = {
     chat_id: chatId,
     message_id: messageId,
@@ -244,11 +298,22 @@ async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = n
     disable_web_page_preview: true,
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch(() => null);
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok && r.status === 400) {
+      const plainPayload = { ...payload, text: stripHtmlTags(safeText) };
+      delete plainPayload.parse_mode;
+      await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(plainPayload),
+      }).catch(() => null);
+    }
+  } catch {}
 }
 
 async function answerCallbackQuery(env, callbackQueryId, text = "") {
@@ -569,12 +634,15 @@ async function buildErrorsText(env) {
 }
 
 async function sendLatestBuildsToTelegram(env, chatId) {
-  const apkUrl = "https://raw.githubusercontent.com/aokifrlol-maker/TinyTiny/main/APK%20VERSION/TinyTiny.apk";
+  const apkUrl = "https://github.com/aokifrlol-maker/TinyTiny/releases/download/latest/TinyTiny.apk";
+  const apkFallbackUrl = "https://raw.githubusercontent.com/aokifrlol-maker/TinyTiny/main/APK%20VERSION/TinyTiny.apk";
   const ipaUrl = "https://github.com/aokifrlol-maker/TinyTiny/releases/download/latest/TinyTiny.ipa";
+  const ghHeaders = { "User-Agent": "TinyTiny-Worker" };
+  if (env.GITHUB_TOKEN) ghHeaders["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
   let commitShort = "main";
   try {
     const r = await fetch("https://api.github.com/repos/aokifrlol-maker/TinyTiny/actions/workflows/build.yml/runs?per_page=1", {
-      headers: { "User-Agent": "TinyTiny-Worker" },
+      headers: ghHeaders,
     });
     if (r.ok) {
       const data = await r.json();
@@ -587,21 +655,36 @@ async function sendLatestBuildsToTelegram(env, chatId) {
     inline_keyboard: [[{ text: "🏠 Back to Menu", callback_data: "menu:home" }]],
   };
 
-  const apkRes = await sendTelegramBinaryFile(
+  let apkRes = await sendTelegramBinaryFile(
     env,
     chatId,
     apkUrl,
     "TinyTiny.apk",
-    `🤖 <b>TinyTiny Android APK</b> (<code>${commitShort}</code>)`
+    `🤖 <b>TinyTiny Android APK</b> (<code>${escapeHtmlTg(commitShort)}</code>)`
   );
+  if (!apkRes.ok && String(apkRes.error || "").startsWith("download_404")) {
+    apkRes = await sendTelegramBinaryFile(
+      env,
+      chatId,
+      apkFallbackUrl,
+      "TinyTiny.apk",
+      `🤖 <b>TinyTiny Android APK</b> (<code>${escapeHtmlTg(commitShort)}</code>)`
+    );
+  }
   const ipaRes = await sendTelegramBinaryFile(
     env,
     chatId,
     ipaUrl,
     "TinyTiny.ipa",
-    `🍎 <b>TinyTiny iOS IPA</b> (<code>${commitShort}</code>)`,
+    `🍎 <b>TinyTiny iOS IPA</b> (<code>${escapeHtmlTg(commitShort)}</code>)`,
     menuKb
   );
+  if (!apkRes.ok || !ipaRes.ok) {
+    const errs = [];
+    if (!apkRes.ok) errs.push(`APK: ${escapeHtmlTg(apkRes.error || "failed")}`);
+    if (!ipaRes.ok) errs.push(`IPA: ${escapeHtmlTg(ipaRes.error || "failed")}`);
+    await sendTelegram(env, chatId, `⚠️ <b>Build delivery warning</b>\n${errs.join("\n")}`, menuKb);
+  }
   return { commitShort, apk: apkRes, ipa: ipaRes };
 }
 
@@ -1424,7 +1507,7 @@ async function handleTelegramUpdate(env, update) {
     for (const k of idx.slice(0, 20)) {
       const rec = await getLicense(env, k);
       if (rec) {
-        lines.push(`<code>${rec.key}</code> — ${formatRemaining(rec)}${rec.note ? ` (${rec.note})` : ""}`);
+        lines.push(`<code>${escapeHtmlTg(rec.key)}</code> — ${formatRemaining(rec)}${rec.note ? ` (${escapeHtmlTg(rec.note)})` : ""}`);
       }
     }
     await sendTelegram(env, chatId, `<b>Recent Keys</b>\n${lines.join("\n")}`);
@@ -1699,7 +1782,7 @@ async function handleTelegramUpdate(env, update) {
   if (cmd === "/watchit") {
     const res = await syncWatchitFolder(env, getPublicBaseUrl(env), true);
     if (!res.ok) {
-      await sendTelegram(env, chatId, `Watchit sync error: ${res.error}`);
+      await sendTelegram(env, chatId, `Watchit sync error: ${escapeHtmlTg(res.error)}`);
     } else if (res.sent === 0) {
       await sendTelegram(
         env,
@@ -2040,12 +2123,14 @@ function isDirectAuthorized(request, env) {
   const secret = env.DIRECT_UPLOAD_SECRET;
   if (!secret) return false;
   const provided = request.headers.get("X-Direct-Secret") || "";
-  if (provided.length !== secret.length || provided.length === 0) return false;
-  const a = new TextEncoder().encode(provided);
-  const b = new TextEncoder().encode(secret);
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
+  return constantTimeEqual(provided, secret);
+}
+
+function isAdminApiAuthorized(request, env) {
+  const secret = env.ADMIN_API_SECRET || env.DIRECT_UPLOAD_SECRET || env.WEBHOOK_SECRET;
+  if (!secret) return false;
+  const provided = request.headers.get("X-Admin-Secret") || request.headers.get("X-Direct-Secret") || "";
+  return constantTimeEqual(provided, secret);
 }
 
 function parseByteRange(rangeHeader, totalSize) {
@@ -2211,8 +2296,18 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 1. Telegram Admin Bot Webhook
-    if (request.method === "POST" && env.WEBHOOK_SECRET && path === `/telegram/${env.WEBHOOK_SECRET}`) {
+    // 1. Telegram Admin Bot Webhook (constant-time path secret + optional header secret)
+    if (request.method === "POST" && env.WEBHOOK_SECRET && path.startsWith("/telegram/")) {
+      const providedPathSecret = path.slice("/telegram/".length);
+      if (!constantTimeEqual(providedPathSecret, env.WEBHOOK_SECRET)) {
+        return json({ error: "Forbidden" }, 403);
+      }
+      if (env.TELEGRAM_SECRET_TOKEN) {
+        const hdrToken = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+        if (!constantTimeEqual(hdrToken, env.TELEGRAM_SECRET_TOKEN)) {
+          return json({ error: "Forbidden" }, 403);
+        }
+      }
       const update = await request.json().catch(() => null);
       return await handleTelegramUpdate(env, update);
     }
@@ -2267,7 +2362,7 @@ export default {
     if (request.method === "POST" && path === "/v1/verify") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ valid: false, error: check.error }, 200);
 
       const dev = String(body.deviceId || "").trim();
@@ -2293,15 +2388,22 @@ export default {
 
     if (request.method === "POST" && path === "/v1/report-error") {
       const body = await request.json().catch(() => ({}));
+      const licKey = body.key || request.headers.get("X-License-Key") || "";
+      const devId = String(body.deviceId || request.headers.get("X-Device-Id") || "").slice(0, 48);
+      const rec = licKey ? await getLicense(env, licKey) : null;
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
+      if (!check.ok) {
+        return json({ ok: false, error: "Unauthorized" }, 403);
+      }
+
       const source = String(body.source || "Unknown").slice(0, 40);
       const detail = String(body.detail || "").slice(0, 240);
-      const devId = String(body.deviceId || "anon").slice(0, 48);
       const d = body.deviceInfo || {};
-      const rlKey = `err_rl:${devId}:${source}`;
+      const rlKey = `err_rl:${rec.key}:${devId}:${source}`;
       if (await env.LICENSES.get(rlKey)) {
         return json({ ok: true, throttled: true });
       }
-      await env.LICENSES.put(rlKey, "1", { expirationTtl: 300 });
+      await env.LICENSES.put(rlKey, "1", { expirationTtl: 600 });
 
       const raw = await env.LICENSES.get("errors:recent");
       const list = safeJsonParse(raw, []);
@@ -2316,12 +2418,16 @@ export default {
       await env.LICENSES.put("errors:recent", JSON.stringify(list.slice(0, 25)));
 
       if (env.ADMIN_USER_ID && (await env.LICENSES.get("alerts:enabled")) === "1") {
-        const alertPromise = sendTelegram(
-          env,
-          env.ADMIN_USER_ID,
-          `⚠️ <b>${escapeHtmlTg(source)} Error</b>\n${escapeHtmlTg(d.model || "Device")} (${escapeHtmlTg(formatOsLabel(d.ios))}, v${escapeHtmlTg(d.app || "1.0")})\n<i>${escapeHtmlTg(detail)}</i>`
-        ).catch(() => null);
-        if (ctx?.waitUntil) ctx.waitUntil(alertPromise);
+        const tgThrottle = await env.LICENSES.get("err_tg_rl");
+        if (!tgThrottle) {
+          await env.LICENSES.put("err_tg_rl", "1", { expirationTtl: 60 });
+          const alertPromise = sendTelegram(
+            env,
+            env.ADMIN_USER_ID,
+            `⚠️ <b>${escapeHtmlTg(source)} Error</b>\n${escapeHtmlTg(d.model || "Device")} (${escapeHtmlTg(formatOsLabel(d.ios))}, v${escapeHtmlTg(d.app || "1.0")})\n<i>${escapeHtmlTg(detail)}</i>`
+          ).catch(() => null);
+          if (ctx?.waitUntil) ctx.waitUntil(alertPromise);
+        }
       }
       return json({ ok: true });
     }
@@ -2330,7 +2436,7 @@ export default {
     if (request.method === "PUT" && path === "/v1/backup") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ error: check.error }, 403);
       if (!body.blob || typeof body.blob !== "string") return json({ error: "Missing blob" }, 400);
       if (body.blob.length > 12 * 1024 * 1024) return json({ error: "Backup exceeds 12MB cap" }, 413);
@@ -2348,7 +2454,7 @@ export default {
     if (request.method === "POST" && path === "/v1/backup/version") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ error: check.error }, 403);
 
       const version = await env.LICENSES.get(`backup_ver:${rec.key}`);
@@ -2358,7 +2464,7 @@ export default {
     if (request.method === "POST" && path === "/v1/backup/get") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true });
+      const check = validateRecordAccess(rec, body.deviceId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ error: check.error }, 403);
 
       const { value: blob, metadata } = await env.LICENSES.getWithMetadata(`backup:${rec.key}`);
@@ -2371,9 +2477,11 @@ export default {
     if (request.method === "POST" && path === "/v1/share") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
-      const check = validateRecordAccess(rec, null);
+      const devId = body.deviceId || request.headers.get("X-Device-Id");
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ error: check.error }, 403);
       if (!body.cipher || typeof body.cipher !== "string") return json({ error: "Missing cipher" }, 400);
+      if (body.cipher.length > 2 * 1024 * 1024) return json({ error: "Share payload exceeds 2MB cap" }, 413);
 
       const id = randomId(10);
       await env.LICENSES.put(`share:${id}`, body.cipher, { expirationTtl: 7 * DAY_SEC });
@@ -2399,7 +2507,7 @@ export default {
       const licKey = request.headers.get("X-License-Key");
       const devId = request.headers.get("X-Device-Id");
       const rec = await getLicense(env, licKey);
-      const check = validateRecordAccess(rec, devId);
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
       if (!check.ok) return json({ error: check.error }, 403);
 
       const buf = await request.arrayBuffer();
@@ -2496,13 +2604,13 @@ export default {
       if (!nonceB64) return json({ error: "Missing X-Nonce-B64" }, 400);
 
       const r2Key = `direct/${id}.enc`;
-      const buf = await request.arrayBuffer();
-      await env.DIRECT_R2.put(r2Key, buf);
+      if (!request.body) return json({ error: "Empty body" }, 400);
+      const putObj = await env.DIRECT_R2.put(r2Key, request.body);
 
       const meta = {
         filename,
         contentType,
-        size: size || buf.byteLength,
+        size: putObj?.size || size || 0,
         nonceB64,
         r2Key,
         createdAt: nowSec(),
@@ -2527,8 +2635,8 @@ export default {
       if (!id || !uploadId || partNumber < 1) return json({ error: "Invalid multipart params" }, 400);
 
       const mpu = env.DIRECT_R2.resumeMultipartUpload(`direct/${id}.enc`, uploadId);
-      const buf = await request.arrayBuffer();
-      const uploaded = await mpu.uploadPart(partNumber, buf);
+      if (!request.body) return json({ error: "Empty part body" }, 400);
+      const uploaded = await mpu.uploadPart(partNumber, request.body);
       return json({ ok: true, partNumber: uploaded.partNumber, etag: uploaded.etag });
     }
 
@@ -2762,9 +2870,15 @@ export default {
     }
 
     if (request.method === "POST" && path === "/v1/admin/deliver-builds") {
+      if (!isAdminApiAuthorized(request, env)) {
+        return json({ ok: false, error: "unauthorized" }, 403);
+      }
       if (!env.TELEGRAM_BOT_TOKEN || !env.ADMIN_USER_ID) {
         return json({ ok: false, error: "telegram_not_configured" }, 500);
       }
+      const rl = await env.LICENSES.get("builds:deliver_rl");
+      if (rl) return json({ ok: false, error: "rate_limited" }, 429);
+      await env.LICENSES.put("builds:deliver_rl", "1", { expirationTtl: 60 });
       const res = await sendLatestBuildsToTelegram(env, env.ADMIN_USER_ID);
       return json({ ok: Boolean(res.apk?.ok && res.ipa?.ok), ...res });
     }
@@ -2788,8 +2902,10 @@ export default {
 async function autoDeliverLatestBuildsToTelegram(env) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.ADMIN_USER_ID) return;
   try {
+    const ghHeaders = { "User-Agent": "TinyTiny-Worker" };
+    if (env.GITHUB_TOKEN) ghHeaders["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
     const r = await fetch("https://api.github.com/repos/aokifrlol-maker/TinyTiny/actions/workflows/build.yml/runs?per_page=1", {
-      headers: { "User-Agent": "TinyTiny-Worker" },
+      headers: ghHeaders,
     });
     if (!r.ok) return;
     const data = await r.json();
@@ -2797,8 +2913,10 @@ async function autoDeliverLatestBuildsToTelegram(env) {
     if (!run || run.status !== "completed" || run.conclusion !== "success" || !run.head_sha) return;
     const lastSha = await env.LICENSES.get("builds:last_notified_sha");
     if (lastSha === run.head_sha) return;
-    await env.LICENSES.put("builds:last_notified_sha", run.head_sha);
-    await sendLatestBuildsToTelegram(env, env.ADMIN_USER_ID);
+    const res = await sendLatestBuildsToTelegram(env, env.ADMIN_USER_ID);
+    if (res?.apk?.ok && res?.ipa?.ok) {
+      await env.LICENSES.put("builds:last_notified_sha", run.head_sha);
+    }
   } catch {}
 }
 

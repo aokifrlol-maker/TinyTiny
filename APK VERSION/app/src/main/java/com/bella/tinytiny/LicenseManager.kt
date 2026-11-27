@@ -208,9 +208,11 @@ object LicenseManager {
             val s = status.value
             if (!s.isActivated || s.isExpiredOrRevoked) return false
             if (s.isLifetime) return true
-            val exp = s.expiresAt ?: return true
-            if (exp.isNaN()) return true
-            return (System.currentTimeMillis() / 1000.0) < exp
+            val exp = s.expiresAt ?: return false
+            if (exp.isNaN()) return false
+            val now = System.currentTimeMillis() / 1000.0
+            if (s.lastVerifiedAt > 0.0 && now + 86_400.0 < s.lastVerifiedAt) return false
+            return now < exp
         }
 
     val isAdmin: Boolean get() = isValidAccess && status.value.isAdmin
@@ -325,7 +327,7 @@ object LicenseManager {
                         lastVerifiedAt = System.currentTimeMillis() / 1000.0
                     )
                     saveStatus(next)
-                    restoreEncryptedBackupIfPresent()
+                    syncMutex.withLock { restoreEncryptedBackupIfPresent() }
                     true
                 } else {
                     val srvErr = if (json.has("error") && !json.isNull("error")) json.optString("error", "").trim() else ""
@@ -355,7 +357,7 @@ object LicenseManager {
                 .post(bodyJson.toRequestBody("application/json".toMediaType()))
                 .build()
             client.newCall(req).execute().use { resp ->
-                if (resp.code != 200) return@withContext
+                if (resp.code != 200 && resp.code != 401 && resp.code != 403) return@withContext
                 val json = JSONObject(resp.body?.string() ?: return@withContext)
                 applyRemoteConfig(json)
                 val hasValid = json.has("valid") && !json.isNull("valid")
@@ -373,16 +375,17 @@ object LicenseManager {
                     durationLabel = if (valid) dur else s.durationLabel
                 )
                 saveStatus(next)
+                AppState.markLicenseActivated(isValidAccess)
             }
         } catch (_: Throwable) {}
     }
 
     suspend fun verifyPasscodeRecovery(rawKey: String): Boolean {
         val entered = rawKey.trim().uppercase()
-        if (entered.isEmpty()) return false
         val active = status.value.licenseKey.trim().uppercase()
-        if (active.isNotEmpty() && entered != active) return false
-        return activate(entered)
+        if (entered.isEmpty() || active.isEmpty() || entered != active) return false
+        verifySilently()
+        return isValidAccess
     }
 
     // HKDF-SHA256 matching iOS CryptoKit HKDF<SHA256> + v1 legacy fallback
@@ -508,11 +511,14 @@ object LicenseManager {
                 val local = UserStore.shared.data.value
                 val isTrulyEmpty = local.liked.isEmpty() && local.downloaded.isEmpty() &&
                     !local.xSession.isConnected && !local.igSession.isConnected &&
+                    !local.redditSession.isConnected && !local.r34Credentials.isConnected &&
                     local.followedUsers.isEmpty() && local.followedXUsers.isEmpty() &&
                     local.followedIGUsers.isEmpty() && local.followedSubreddits.isEmpty() &&
-                    local.followedOFCreators.isEmpty()
+                    local.followedOFCreators.isEmpty() &&
+                    local.removedLikedIDs.isEmpty() && local.removedDownloadedIDs.isEmpty() && local.removedFollows.isEmpty()
                 val remoteHasData = backup.userData.liked.isNotEmpty() || backup.userData.downloaded.isNotEmpty() ||
                     backup.userData.xSession.isConnected || backup.userData.igSession.isConnected ||
+                    backup.userData.redditSession.isConnected || backup.userData.r34Credentials.isConnected ||
                     backup.userData.followedUsers.isNotEmpty() || backup.userData.followedXUsers.isNotEmpty() ||
                     backup.userData.followedIGUsers.isNotEmpty() || backup.userData.followedSubreddits.isNotEmpty() ||
                     backup.userData.followedOFCreators.isNotEmpty()
@@ -615,8 +621,8 @@ object LicenseManager {
                         )
                     )
                 }
-                SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
-                CryptoBox.restoreSeedrMasterKeyIfMissing(backup.seedrMasterKey)
+                SmartTasteEngine.shared.mergeImportedBackup(backup.tasteV2, isLocalEmpty = isTrulyEmpty)
+                CryptoBox.restoreSeedrMasterKeyIfMissing(backup.seedrMasterKey, force = isTrulyEmpty && remoteHasData)
                 injectRestoredSocialCookies()
                 if (UserStore.shared.data.value.xSession.isConnected) {
                     scope.launch { XWebEngine.warmUp() }
@@ -633,36 +639,41 @@ object LicenseManager {
     }
 
     suspend fun injectRestoredSocialCookies() = withContext(Dispatchers.Main) {
-        val cm = CookieManager.getInstance()
-        cm.setAcceptCookie(true)
-        val x = UserStore.shared.data.value.xSession
-        if (x.isConnected) {
-            for ((k, v) in listOf("auth_token" to x.authToken, "ct0" to x.ct0)) {
-                if (v.isNotEmpty()) {
-                    cm.setCookie("https://x.com", "$k=$v; Domain=.x.com; Path=/; Max-Age=31536000; Secure")
-                    cm.setCookie("https://twitter.com", "$k=$v; Domain=.twitter.com; Path=/; Max-Age=31536000; Secure")
+        try {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            val x = UserStore.shared.data.value.xSession
+            if (x.isConnected) {
+                for ((k, v) in listOf("auth_token" to x.authToken, "ct0" to x.ct0)) {
+                    val clean = v.replace(";", "").replace("\r", "").replace("\n", "")
+                    if (clean.isNotEmpty()) {
+                        cm.setCookie("https://x.com", "$k=$clean; Domain=.x.com; Path=/; Max-Age=31536000; Secure")
+                        cm.setCookie("https://twitter.com", "$k=$clean; Domain=.twitter.com; Path=/; Max-Age=31536000; Secure")
+                    }
                 }
             }
-        }
-        val ig = UserStore.shared.data.value.igSession
-        if (ig.isConnected) {
-            for ((k, v) in listOf("sessionid" to ig.sessionId, "csrftoken" to ig.csrfToken, "ds_user_id" to ig.userId)) {
-                if (v.isNotEmpty()) {
-                    cm.setCookie("https://www.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
-                    cm.setCookie("https://i.instagram.com", "$k=$v; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
+            val ig = UserStore.shared.data.value.igSession
+            if (ig.isConnected) {
+                for ((k, v) in listOf("sessionid" to ig.sessionId, "csrftoken" to ig.csrfToken, "ds_user_id" to ig.userId)) {
+                    val clean = v.replace(";", "").replace("\r", "").replace("\n", "")
+                    if (clean.isNotEmpty()) {
+                        cm.setCookie("https://www.instagram.com", "$k=$clean; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
+                        cm.setCookie("https://i.instagram.com", "$k=$clean; Domain=.instagram.com; Path=/; Max-Age=31536000; Secure")
+                    }
                 }
             }
-        }
-        val rd = UserStore.shared.data.value.redditSession
-        if (rd.isConnected) {
-            for ((k, v) in listOf("reddit_session" to rd.redditSessionCookie, "token_v2" to rd.tokenV2, "over18" to "1")) {
-                if (v.isNotEmpty()) {
-                    cm.setCookie("https://www.reddit.com", "$k=$v; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
-                    cm.setCookie("https://reddit.com", "$k=$v; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
+            val rd = UserStore.shared.data.value.redditSession
+            if (rd.isConnected) {
+                for ((k, v) in listOf("reddit_session" to rd.redditSessionCookie, "token_v2" to rd.tokenV2, "over18" to "1")) {
+                    val clean = v.replace(";", "").replace("\r", "").replace("\n", "")
+                    if (clean.isNotEmpty()) {
+                        cm.setCookie("https://www.reddit.com", "$k=$clean; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
+                        cm.setCookie("https://reddit.com", "$k=$clean; Domain=.reddit.com; Path=/; Max-Age=31536000; Secure")
+                    }
                 }
             }
-        }
-        cm.flush()
+            cm.flush()
+        } catch (_: Throwable) {}
     }
 
     suspend fun syncBidirectionalBackup(): String = syncMutex.withLock {
@@ -673,8 +684,10 @@ object LicenseManager {
         }
         val d = UserStore.shared.data.value
         val hasData = d.liked.isNotEmpty() || d.downloaded.isNotEmpty() || d.xSession.isConnected ||
-            d.igSession.isConnected || d.followedUsers.isNotEmpty() || d.followedXUsers.isNotEmpty() ||
-            d.followedIGUsers.isNotEmpty() || d.followedSubreddits.isNotEmpty() || d.followedOFCreators.isNotEmpty()
+            d.igSession.isConnected || d.redditSession.isConnected || d.r34Credentials.isConnected ||
+            d.followedUsers.isNotEmpty() || d.followedXUsers.isNotEmpty() ||
+            d.followedIGUsers.isNotEmpty() || d.followedSubreddits.isNotEmpty() || d.followedOFCreators.isNotEmpty() ||
+            d.removedLikedIDs.isNotEmpty() || d.removedDownloadedIDs.isNotEmpty() || d.removedFollows.isNotEmpty()
         if (hasData) {
             syncEncryptedBackupNow()
             val upErr = lastSyncError

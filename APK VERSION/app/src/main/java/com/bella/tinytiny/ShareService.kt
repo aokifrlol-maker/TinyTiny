@@ -109,6 +109,7 @@ object ShareService {
         try {
             val bodyJson = JSONObject().apply {
                 put("key", LicenseManager.status.value.licenseKey)
+                put("deviceId", LicenseManager.deviceId)
                 put("cipher", b64)
             }.toString()
             val req = Request.Builder()
@@ -149,6 +150,7 @@ object ShareService {
         try {
             val bodyJson = JSONObject().apply {
                 put("key", LicenseManager.status.value.licenseKey)
+                put("deviceId", LicenseManager.deviceId)
                 put("cipher", b64)
             }.toString()
             val req = Request.Builder()

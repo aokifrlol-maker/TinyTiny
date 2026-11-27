@@ -28,15 +28,17 @@ object CryptoBox {
         encodeDefaults = true
     }
 
+    private val secureRandom = SecureRandom()
+
     @Volatile
     private var cachedLocalKey: ByteArray? = null
 
     @Volatile
     private var cachedSeedrKey: ByteArray? = null
 
-    private val cachedSecurePrefs: SharedPreferences by lazy {
+    private fun openEncryptedPrefs(): SharedPreferences? {
         val context = TinyTinyApplication.instance
-        try {
+        return try {
             val masterKey = MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build()
@@ -48,15 +50,29 @@ object CryptoBox {
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
         } catch (_: Throwable) {
-            context.getSharedPreferences(PREFS_NAME + "_fallback", Context.MODE_PRIVATE)
+            null
         }
     }
 
-    private fun securePrefs(): SharedPreferences = cachedSecurePrefs
+    @Volatile
+    private var cachedSecurePrefs: SharedPreferences? = null
+
+    private fun securePrefs(): SharedPreferences {
+        cachedSecurePrefs?.let { return it }
+        synchronized(this) {
+            cachedSecurePrefs?.let { return it }
+            val enc = openEncryptedPrefs()
+            if (enc != null) {
+                cachedSecurePrefs = enc
+                return enc
+            }
+            throw IllegalStateException("Android Keystore / EncryptedSharedPreferences unavailable")
+        }
+    }
 
     fun generateKey(): ByteArray {
         val bytes = ByteArray(32)
-        SecureRandom().nextBytes(bytes)
+        secureRandom.nextBytes(bytes)
         return bytes
     }
 
@@ -68,6 +84,18 @@ object CryptoBox {
         if (!existing.isNullOrEmpty()) {
             val decoded = importKeyBase64URL(existing)
             if (decoded != null && decoded.size == 32) {
+                cachedLocalKey = decoded
+                return decoded
+            }
+        }
+        // One-time read of legacy fallback if it exists, migrating into EncryptedSharedPreferences
+        val legacyPrefs = TinyTinyApplication.instance.getSharedPreferences(PREFS_NAME + "_fallback", Context.MODE_PRIVATE)
+        val legacyVal = legacyPrefs.getString(LOCAL_VAULT_KEY_PREF, null)
+        if (!legacyVal.isNullOrEmpty()) {
+            val decoded = importKeyBase64URL(legacyVal)
+            if (decoded != null && decoded.size == 32) {
+                prefs.edit().putString(LOCAL_VAULT_KEY_PREF, legacyVal).apply()
+                legacyPrefs.edit().remove(LOCAL_VAULT_KEY_PREF).apply()
                 cachedLocalKey = decoded
                 return decoded
             }
@@ -114,10 +142,10 @@ object CryptoBox {
     fun exportSeedrMasterKeyString(): String = exportKeyBase64URL(seedrVaultKey())
 
     @Synchronized
-    fun restoreSeedrMasterKeyIfMissing(token: String) {
-        val prefs = securePrefs()
-        if (prefs.contains(SEEDR_MASTER_KEY_PREF)) return
+    fun restoreSeedrMasterKeyIfMissing(token: String, force: Boolean = false) {
         val key = importKeyBase64URL(token) ?: return
+        val prefs = try { securePrefs() } catch (_: Throwable) { return }
+        if (!force && prefs.contains(SEEDR_MASTER_KEY_PREF)) return
         prefs.edit().putString(SEEDR_MASTER_KEY_PREF, exportKeyBase64URL(key)).apply()
         cachedSeedrKey = key
     }
@@ -125,7 +153,7 @@ object CryptoBox {
     fun seal(plaintext: ByteArray, key: ByteArray): ByteArray {
         require(key.size == 32) { "Key must be 256-bit" }
         val iv = ByteArray(12)
-        SecureRandom().nextBytes(iv)
+        secureRandom.nextBytes(iv)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
         val ctAndTag = cipher.doFinal(plaintext)

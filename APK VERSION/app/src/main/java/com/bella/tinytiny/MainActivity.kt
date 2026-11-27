@@ -160,14 +160,21 @@ fun RootView() {
     val directIGId by RootDeepLinkState.pendingDirectIGDropId.collectAsState()
     val shareUri by RootDeepLinkState.pendingShareUri.collectAsState()
     var directIGPayload by remember { mutableStateOf<DirectIGDropPayload?>(null) }
+    val canHandleDeepLinks = ageConfirmed && onboardingCompleted && licenseActivated && passcodeChoiceCompleted && !isLocked
 
-    LaunchedEffect(directIGId) {
+    LaunchedEffect(isLocked) {
+        if (isLocked) directIGPayload = null
+    }
+
+    LaunchedEffect(directIGId, canHandleDeepLinks) {
+        if (!canHandleDeepLinks) return@LaunchedEffect
         val id = directIGId ?: return@LaunchedEffect
         RootDeepLinkState.pendingDirectIGDropId.value = null
         directIGPayload = ShareService.fetchDirectIGDrop(id)
     }
 
-    LaunchedEffect(shareUri) {
+    LaunchedEffect(shareUri, canHandleDeepLinks) {
+        if (!canHandleDeepLinks) return@LaunchedEffect
         val uri = shareUri ?: return@LaunchedEffect
         RootDeepLinkState.pendingShareUri.value = null
         ShareService.handleIncomingShare(uri)
@@ -205,8 +212,10 @@ fun RootView() {
         }
     }
 
-    directIGPayload?.let { payload ->
-        IGDirectSendSheet(payload = payload, onDismiss = { directIGPayload = null })
+    if (canHandleDeepLinks) {
+        directIGPayload?.let { payload ->
+            IGDirectSendSheet(payload = payload, onDismiss = { directIGPayload = null })
+        }
     }
 }
 

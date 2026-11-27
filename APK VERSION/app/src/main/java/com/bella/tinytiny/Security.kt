@@ -37,58 +37,158 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.security.crypto.EncryptedSharedPreferences
+import android.os.SystemClock
+import android.util.Base64
 import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 object Passcode {
     private const val PREFS_NAME = "tinytiny_passcode_v1"
     private const val HASH_KEY = "tinytiny.passcode.hash"
+    private const val FAILURES_KEY = "tinytiny.passcode.failures"
+    private const val LOCK_ELAPSED_KEY = "tinytiny.passcode.lockElapsedMs"
+    private const val LOCK_WALL_KEY = "tinytiny.passcode.lockWallMs"
+    private const val PBKDF2_ITERATIONS = 100_000
+    private val secureRandom = SecureRandom()
 
     private val prefs by lazy {
         val ctx = TinyTinyApplication.instance
-        try {
-            val mk = MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
-            EncryptedSharedPreferences.create(
-                ctx, PREFS_NAME, mk,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (_: Throwable) {
-            ctx.getSharedPreferences(PREFS_NAME + "_fb", Context.MODE_PRIVATE)
+        val mk = MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        EncryptedSharedPreferences.create(
+            ctx, PREFS_NAME, mk,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    private fun legacyHash(code: String): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(("tt.v1.$code").toByteArray(Charsets.UTF_8))
+
+    private fun pbkdf2(code: String, salt: ByteArray): ByteArray {
+        val spec = PBEKeySpec(code.toCharArray(), salt, PBKDF2_ITERATIONS, 256)
+        return try {
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
         }
     }
 
-    private fun hash(code: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(("tt.v1.$code").toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it) }
+    private fun encodeV2(code: String): String {
+        val salt = ByteArray(16)
+        secureRandom.nextBytes(salt)
+        val dk = pbkdf2(code, salt)
+        val saltB64 = Base64.encodeToString(salt, Base64.NO_WRAP)
+        val dkB64 = Base64.encodeToString(dk, Base64.NO_WRAP)
+        return "v2:$saltB64:$dkB64"
     }
 
-    val exists: Boolean get() = !prefs.getString(HASH_KEY, null).isNullOrEmpty()
+    private fun readStoredHash(): String? {
+        val cur = try { prefs.getString(HASH_KEY, null) } catch (_: Throwable) { null }
+        if (!cur.isNullOrEmpty()) return cur
+        // One-time read of legacy fallback for transparent migration
+        val fb = TinyTinyApplication.instance.getSharedPreferences(PREFS_NAME + "_fb", Context.MODE_PRIVATE)
+        return fb.getString(HASH_KEY, null)?.takeIf { it.isNotEmpty() }
+    }
+
+    val exists: Boolean get() = readStoredHash() != null
 
     fun set(code: String) {
-        prefs.edit().putString(HASH_KEY, hash(code)).apply()
+        prefs.edit().putString(HASH_KEY, encodeV2(code)).apply()
+        TinyTinyApplication.instance.getSharedPreferences(PREFS_NAME + "_fb", Context.MODE_PRIVATE)
+            .edit().remove(HASH_KEY).apply()
+        clearFailures()
     }
 
-    fun verify(code: String): Boolean = prefs.getString(HASH_KEY, null) == hash(code)
+    fun verify(code: String): Boolean {
+        val stored = readStoredHash() ?: return false
+        if (stored.startsWith("v2:")) {
+            val parts = stored.split(":")
+            if (parts.size != 3) return false
+            return try {
+                val salt = Base64.decode(parts[1], Base64.NO_WRAP)
+                val expected = Base64.decode(parts[2], Base64.NO_WRAP)
+                val computed = pbkdf2(code, salt)
+                MessageDigest.isEqual(computed, expected)
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        // Legacy v1 hex SHA-256 verification + transparent migration to v2 PBKDF2
+        val legacyHex = legacyHash(code).joinToString("") { "%02x".format(it) }
+        val ok = MessageDigest.isEqual(stored.toByteArray(Charsets.UTF_8), legacyHex.toByteArray(Charsets.UTF_8))
+        if (ok) {
+            try { set(code) } catch (_: Throwable) {}
+        }
+        return ok
+    }
 
     fun delete() {
-        prefs.edit().remove(HASH_KEY).apply()
+        try { prefs.edit().remove(HASH_KEY).apply() } catch (_: Throwable) {}
+        TinyTinyApplication.instance.getSharedPreferences(PREFS_NAME + "_fb", Context.MODE_PRIVATE)
+            .edit().remove(HASH_KEY).apply()
+        clearFailures()
+    }
+
+    fun lockoutRemainingSeconds(): Int {
+        return try {
+            val elapsedRem = prefs.getLong(LOCK_ELAPSED_KEY, 0L) - SystemClock.elapsedRealtime()
+            val wallRem = prefs.getLong(LOCK_WALL_KEY, 0L) - System.currentTimeMillis()
+            val remMs = maxOf(elapsedRem, wallRem)
+            if (remMs > 0L) ceil(remMs / 1000.0).toInt() else 0
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    fun recordFailure(): Int {
+        return try {
+            val fails = prefs.getInt(FAILURES_KEY, 0) + 1
+            val ed = prefs.edit().putInt(FAILURES_KEY, fails)
+            var lockSec = 0
+            if (fails >= 5) {
+                val durations = intArrayOf(30, 60, 180, 300)
+                lockSec = durations[minOf(fails - 5, durations.lastIndex)]
+                val lockMs = lockSec * 1000L
+                ed.putLong(LOCK_ELAPSED_KEY, SystemClock.elapsedRealtime() + lockMs)
+                ed.putLong(LOCK_WALL_KEY, System.currentTimeMillis() + lockMs)
+            }
+            ed.apply()
+            lockSec
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    fun clearFailures() {
+        try {
+            prefs.edit()
+                .remove(FAILURES_KEY)
+                .remove(LOCK_ELAPSED_KEY)
+                .remove(LOCK_WALL_KEY)
+                .apply()
+        } catch (_: Throwable) {}
+        TinyTinyApplication.instance.getSharedPreferences("tt_passcode_lock", Context.MODE_PRIVATE)
+            .edit().remove("lockedUntilMs").apply()
     }
 }
 
 object Biometrics {
     fun available(context: Context = TinyTinyApplication.instance): Boolean {
         val bm = BiometricManager.from(context)
-        return bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
-            BiometricManager.BIOMETRIC_SUCCESS
+        return bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS ||
+            bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == BiometricManager.BIOMETRIC_SUCCESS
     }
 
     fun authenticate(activity: FragmentActivity?, onResult: (Boolean) -> Unit) {
-        if (activity == null) {
+        if (activity == null || activity.isFinishing || activity.isDestroyed) {
             onResult(false)
             return
         }
@@ -102,10 +202,16 @@ object Biometrics {
                 onResult(false)
             }
         })
+        val bm = BiometricManager.from(activity)
+        val authenticators = if (bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS) {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG
+        } else {
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.BIOMETRIC_STRONG
+        }
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Unlock TinyTiny Vault")
             .setNegativeButtonText("Enter Passcode")
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .setAllowedAuthenticators(authenticators)
             .build()
         prompt.authenticate(info)
     }
@@ -170,6 +276,7 @@ object AppState {
 
     fun finishPasscodeSetup() {
         hasPasscode.value = true
+        setRequirePasscodeOnOpen(true)
         passcodeChoiceCompleted.value = true
         prefs.edit().putBoolean("tt.passcodeChoiceCompleted", true).apply()
         unlock()
@@ -408,12 +515,19 @@ fun PasscodeSetupView(
                         delay(110)
                         when (step) {
                             -1 -> {
-                                if (Passcode.verify(entered)) {
+                                val rem = Passcode.lockoutRemainingSeconds()
+                                if (rem > 0) {
+                                    errorMsg = "Too many attempts. Try again in ${rem}s."
+                                    code = ""
+                                    triggerShake()
+                                } else if (Passcode.verify(entered)) {
+                                    Passcode.clearFailures()
                                     code = ""
                                     step = 0
                                     errorMsg = null
                                 } else {
-                                    errorMsg = "Incorrect current passcode."
+                                    val lockSec = Passcode.recordFailure()
+                                    errorMsg = if (lockSec > 0) "Too many attempts. Wait ${lockSec}s." else "Incorrect current passcode."
                                     code = ""
                                     triggerShake()
                                 }
@@ -473,13 +587,12 @@ fun LockView() {
     val activity = ctx as? FragmentActivity
     val haptic = LocalHapticFeedback.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val prefs = remember { ctx.getSharedPreferences("tt_passcode_lock", Context.MODE_PRIVATE) }
     val settings by UserStore.shared.data.collectAsState()
     val scope = rememberCoroutineScope()
 
     var code by remember { mutableStateOf("") }
-    var failures by remember { mutableIntStateOf(0) }
-    var lockedUntilMs by remember { mutableLongStateOf(prefs.getLong("lockedUntilMs", 0L)) }
+    var isVerifying by remember { mutableStateOf(false) }
+    var isPromptingBiometric by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var showRecovery by remember { mutableStateOf(false) }
     var recoveryKey by remember { mutableStateOf("") }
@@ -487,12 +600,15 @@ fun LockView() {
     val shakeOffset = remember { Animatable(0f) }
 
     fun tryBiometric() {
+        if (isPromptingBiometric) return
         if (settings.settings.faceID && Biometrics.available(ctx)) {
-            Biometrics.authenticate(activity) { ok -> if (ok) AppState.unlock() }
+            isPromptingBiometric = true
+            Biometrics.authenticate(activity) { ok ->
+                isPromptingBiometric = false
+                if (ok) AppState.unlock()
+            }
         }
     }
-
-    LaunchedEffect(Unit) { tryBiometric() }
 
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
@@ -513,9 +629,9 @@ fun LockView() {
             showBiometric = settings.settings.faceID && Biometrics.available(ctx),
             onBiometric = { tryBiometric() },
             onDigit = { d ->
-                val now = System.currentTimeMillis()
-                if (lockedUntilMs > now) {
-                    val rem = ((lockedUntilMs - now) / 1000L) + 1
+                if (isVerifying) return@PasscodePadScreen
+                val rem = Passcode.lockoutRemainingSeconds()
+                if (rem > 0) {
                     message = "Too many attempts. Try again in ${rem}s."
                     return@PasscodePadScreen
                 }
@@ -523,33 +639,34 @@ fun LockView() {
                     code += d
                     if (code.length == 4) {
                         val entered = code
+                        isVerifying = true
                         scope.launch {
-                            delay(90)
-                            if (Passcode.verify(entered)) {
-                                failures = 0
-                                prefs.edit().remove("lockedUntilMs").apply()
-                                AppState.unlock()
-                            } else {
-                                code = ""
-                                failures += 1
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                for (dx in listOf(-14f, 14f, -10f, 10f, -5f, 0f)) {
-                                    shakeOffset.animateTo(dx, tween(40))
-                                }
-                                if (failures >= 5) {
-                                    failures = 0
-                                    lockedUntilMs = System.currentTimeMillis() + 30_000L
-                                    prefs.edit().putLong("lockedUntilMs", lockedUntilMs).apply()
-                                    message = "Too many attempts. Wait 30 seconds."
+                            try {
+                                delay(90)
+                                if (Passcode.verify(entered)) {
+                                    Passcode.clearFailures()
+                                    AppState.unlock()
                                 } else {
-                                    message = "Incorrect passcode"
+                                    code = ""
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    for (dx in listOf(-14f, 14f, -10f, 10f, -5f, 0f)) {
+                                        shakeOffset.animateTo(dx, tween(40))
+                                    }
+                                    val lockSec = Passcode.recordFailure()
+                                    message = if (lockSec > 0) {
+                                        "Too many attempts. Wait $lockSec seconds."
+                                    } else {
+                                        "Incorrect passcode"
+                                    }
                                 }
+                            } finally {
+                                isVerifying = false
                             }
                         }
                     }
                 }
             },
-            onBackspace = { if (code.isNotEmpty()) code = code.dropLast(1) }
+            onBackspace = { if (!isVerifying && code.isNotEmpty()) code = code.dropLast(1) }
         )
 
         TextButton(

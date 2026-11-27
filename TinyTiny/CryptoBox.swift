@@ -9,19 +9,41 @@ enum CryptoBox {
     private static let seedrMasterKeyAccount = "tinytiny.seedr.masterkey.v1"
     private static let localVaultKeyAccount = "tinytiny.local.vaultkey.v1"
     private static let magicHeader = Data("TTENC1".utf8) // 6 bytes
+    private static let keyLock = NSLock()
+    private static var cachedLocalKey: SymmetricKey?
+    private static var cachedSeedrKey: SymmetricKey?
 
     static func generateKey() -> SymmetricKey {
         SymmetricKey(size: .bits256)
     }
 
     /// Persistent 256-bit AES-GCM key stored in iOS Keychain for encrypting all local app data at rest.
+    /// Serialized and cached so transient Keychain errors (e.g. `errSecInteractionNotAllowed`) never overwrite an existing key.
     static func localVaultKey() -> SymmetricKey {
-        if let existingData = readKeychain(account: localVaultKeyAccount), existingData.count == 32 {
-            return SymmetricKey(data: existingData)
+        keyLock.lock()
+        defer { keyLock.unlock() }
+        if let cached = cachedLocalKey { return cached }
+        let (existingData, status) = readKeychainStatus(account: localVaultKeyAccount)
+        if let existingData, existingData.count == 32 {
+            let k = SymmetricKey(data: existingData)
+            cachedLocalKey = k
+            return k
+        }
+        guard status == errSecItemNotFound else {
+            // Transient Keychain unavailability — do NOT overwrite the stored key; return ephemeral key without saving.
+            return generateKey()
         }
         let fresh = generateKey()
         let raw = fresh.withUnsafeBytes { Data($0) }
-        saveKeychain(raw, account: localVaultKeyAccount)
+        let addStatus = addKeychainOnly(raw, account: localVaultKeyAccount, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+        if addStatus == errSecDuplicateItem,
+           let raced = readKeychainStatus(account: localVaultKeyAccount).data,
+           raced.count == 32 {
+            let k = SymmetricKey(data: raced)
+            cachedLocalKey = k
+            return k
+        }
+        cachedLocalKey = fresh
         return fresh
     }
 
@@ -41,12 +63,29 @@ enum CryptoBox {
 
     /// Persistent 256-bit AES-GCM key stored in iOS Keychain so your encrypted Seedr library remains readable across sessions.
     static func seedrVaultKey() -> SymmetricKey {
-        if let existingData = readKeychain(account: seedrMasterKeyAccount), existingData.count == 32 {
-            return SymmetricKey(data: existingData)
+        keyLock.lock()
+        defer { keyLock.unlock() }
+        if let cached = cachedSeedrKey { return cached }
+        let (existingData, status) = readKeychainStatus(account: seedrMasterKeyAccount)
+        if let existingData, existingData.count == 32 {
+            let k = SymmetricKey(data: existingData)
+            cachedSeedrKey = k
+            return k
+        }
+        guard status == errSecItemNotFound else {
+            return generateKey()
         }
         let fresh = generateKey()
         let raw = fresh.withUnsafeBytes { Data($0) }
-        saveKeychain(raw, account: seedrMasterKeyAccount)
+        let addStatus = addKeychainOnly(raw, account: seedrMasterKeyAccount, accessible: kSecAttrAccessibleAfterFirstUnlock)
+        if addStatus == errSecDuplicateItem,
+           let raced = readKeychainStatus(account: seedrMasterKeyAccount).data,
+           raced.count == 32 {
+            let k = SymmetricKey(data: raced)
+            cachedSeedrKey = k
+            return k
+        }
+        cachedSeedrKey = fresh
         return fresh
     }
 
@@ -73,11 +112,17 @@ enum CryptoBox {
         exportKeyBase64URL(seedrVaultKey())
     }
 
-    static func restoreSeedrMasterKeyIfMissing(from token: String) {
-        guard readKeychain(account: seedrMasterKeyAccount) == nil,
-              let key = importKeyBase64URL(token) else { return }
+    static func restoreSeedrMasterKeyIfMissing(from token: String, force: Bool = false) {
+        keyLock.lock()
+        defer { keyLock.unlock() }
+        guard let key = importKeyBase64URL(token) else { return }
+        if !force {
+            let (existing, status) = readKeychainStatus(account: seedrMasterKeyAccount)
+            guard existing == nil && status == errSecItemNotFound else { return }
+        }
         let raw = key.withUnsafeBytes { Data($0) }
         saveKeychain(raw, account: seedrMasterKeyAccount)
+        cachedSeedrKey = key
     }
 
     /// Seals plaintext data into `TTENC1` + combined AES-256-GCM `(nonce + ciphertext + tag)`.
@@ -108,6 +153,17 @@ enum CryptoBox {
 
     // MARK: - Keychain Helpers
 
+    @discardableResult
+    private static func addKeychainOnly(_ data: Data, account: String, accessible: CFString) -> OSStatus {
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessible
+        ]
+        return SecItemAdd(add as CFDictionary, nil)
+    }
+
     private static func saveKeychain(_ data: Data, account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -124,7 +180,7 @@ enum CryptoBox {
         }
     }
 
-    private static func readKeychain(account: String) -> Data? {
+    private static func readKeychainStatus(account: String) -> (data: Data?, status: OSStatus) {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
@@ -132,9 +188,14 @@ enum CryptoBox {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var out: AnyObject?
-        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data {
-            return d
+        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        if status == errSecSuccess, let d = out as? Data {
+            return (d, status)
         }
-        return nil
+        return (nil, status)
+    }
+
+    private static func readKeychain(account: String) -> Data? {
+        readKeychainStatus(account: account).data
     }
 }

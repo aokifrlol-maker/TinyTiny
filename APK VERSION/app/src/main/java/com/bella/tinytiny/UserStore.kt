@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
@@ -124,18 +125,31 @@ class UserStore private constructor() {
 
     val data = MutableStateFlow(UserData())
     val categories = MutableStateFlow(GoonedCategory.defaultCategories)
+    @Volatile private var suppressSaveDueToDecryptError = false
 
     private val dataFile: File
         get() = File(TinyTinyApplication.instance.filesDir, DATA_FILENAME)
 
     init {
+        var decryptFailed = false
         val loaded = try {
-            if (dataFile.exists()) {
-                CryptoBox.openCodable<UserData>(dataFile.readBytes()) ?: UserData()
+            if (dataFile.exists() && dataFile.length() > 0L) {
+                val raw = dataFile.readBytes()
+                val decoded = CryptoBox.openCodable<UserData>(raw)
+                if (decoded != null) {
+                    decoded
+                } else {
+                    val bak = File(dataFile.parentFile, "$DATA_FILENAME.bak")
+                    if (!bak.exists()) runCatching { bak.writeBytes(raw) }
+                    decryptFailed = true
+                    UserData()
+                }
             } else UserData()
         } catch (_: Throwable) {
+            if (dataFile.exists() && dataFile.length() > 0L) decryptFailed = true
             UserData()
         }
+        suppressSaveDueToDecryptError = decryptFailed
         seenList.addAll(loaded.seenIDs)
         seenSet.addAll(loaded.seenIDs)
         data.value = sanitizeLoadedData(loaded)
@@ -170,15 +184,23 @@ class UserStore private constructor() {
     }
 
     fun saveNow() {
+        if (suppressSaveDueToDecryptError) return
         val f = dataFile
         scope.launch {
             synchronized(saveFileLock) {
+                if (suppressSaveDueToDecryptError) return@synchronized
                 val snapshot = exportSnapshotForBackup()
                 CryptoBox.sealCodable(snapshot)?.let { bytes ->
-                    val tmp = File(f.parentFile, f.name + ".tmp")
-                    tmp.writeBytes(bytes)
-                    if (f.exists()) f.delete()
-                    tmp.renameTo(f)
+                    val tmp = File(f.parentFile, "${f.name}.${java.util.UUID.randomUUID()}.tmp")
+                    try {
+                        tmp.writeBytes(bytes)
+                        if (!tmp.renameTo(f)) {
+                            tmp.copyTo(f, overwrite = true)
+                            tmp.delete()
+                        }
+                    } catch (_: Throwable) {
+                        tmp.delete()
+                    }
                 }
             }
         }
@@ -441,29 +463,30 @@ class UserStore private constructor() {
     fun toggleFollowOFCreator(id: String, name: String, displayName: String? = null, avatarURL: String? = null) {
         val cleanName = name.trim().replace("@", "")
         if (id.isEmpty() && cleanName.isEmpty()) return
-        val cur = data.value
-        val next = cur.followedOFCreators.toMutableList()
-        val nextRem = cur.removedFollows.toMutableMap()
         val key = "of:${id.ifEmpty { cleanName }.lowercase()}"
-        val idx = next.indexOfFirst { (id.isNotEmpty() && it.id == id) || it.handle.equals(cleanName, ignoreCase = true) }
         val now = System.currentTimeMillis() / 1000.0
-        if (idx >= 0) {
-            next.removeAt(idx)
-            nextRem[key] = now
-            localAddedTimestamps.remove("follow:$key")
-        } else {
-            next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
-            nextRem.remove(key)
-            localAddedTimestamps["follow:$key"] = now
+        data.update { cur ->
+            val next = cur.followedOFCreators.toMutableList()
+            val nextRem = cur.removedFollows.toMutableMap()
+            val idx = next.indexOfFirst { (id.isNotEmpty() && it.id == id) || it.handle.equals(cleanName, ignoreCase = true) }
+            if (idx >= 0) {
+                val removed = next.removeAt(idx)
+                val remKey = "of:${removed.id.ifEmpty { removed.handle }.lowercase()}"
+                nextRem[remKey] = now
+                localAddedTimestamps.remove("follow:$remKey")
+            } else {
+                next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
+                nextRem.remove(key)
+                localAddedTimestamps["follow:$key"] = now
+            }
+            cur.copy(followedOFCreators = next, removedFollows = trimTombstones(nextRem))
         }
-        data.value = cur.copy(followedOFCreators = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
-        val cur = data.value
-        data.value = cur.copy(settings = transform(cur.settings))
+        data.update { cur -> cur.copy(settings = transform(cur.settings)) }
         scheduleSave()
     }
 
@@ -792,6 +815,7 @@ class UserStore private constructor() {
         AdultContentClassifier.isEligible(post, source, categories.value, this)
 
     fun replaceWithBackup(restored: UserData) {
+        suppressSaveDueToDecryptError = false
         synchronized(seenList) {
             seenList.clear()
             seenList.addAll(restored.seenIDs)
@@ -816,7 +840,26 @@ class UserStore private constructor() {
     )
 
     suspend fun performSelectiveWipe(options: WipeOptions) = withContext(Dispatchers.IO) {
+        suppressSaveDueToDecryptError = false
         val cur = data.value
+        val now = System.currentTimeMillis() / 1000.0
+        val remLikes = cur.removedLikedIDs.toMutableMap()
+        val remDl = cur.removedDownloadedIDs.toMutableMap()
+        val remFollows = cur.removedFollows.toMutableMap()
+        if (!options.keepLikes) {
+            for (item in cur.liked) remLikes[item.id] = now
+        }
+        if (!options.keepOfflineVault) {
+            for (item in cur.downloaded) remDl[item.id] = now
+        }
+        if (!options.keepFollowing) {
+            for (u in cur.followedUsers) remFollows["u:${u.lowercase()}"] = now
+            for (s in cur.followedSubreddits) remFollows["sub:${s.lowercase()}"] = now
+            for (x in cur.followedXUsers) remFollows["x:${x.lowercase()}"] = now
+            for (ig in cur.followedIGUsers) remFollows["ig:${ig.lowercase()}"] = now
+            for (of in cur.followedOFCreators) remFollows["of:${of.id.ifEmpty { of.handle }.lowercase()}"] = now
+        }
+        localAddedTimestamps.clear()
         val fresh = UserData(
             liked = if (options.keepLikes) cur.liked else emptyList(),
             downloaded = if (options.keepOfflineVault) cur.downloaded else emptyList(),
@@ -825,12 +868,15 @@ class UserStore private constructor() {
             followedXUsers = if (options.keepFollowing) cur.followedXUsers else emptyList(),
             followedIGUsers = if (options.keepFollowing) cur.followedIGUsers else emptyList(),
             followedOFCreators = if (options.keepFollowing) cur.followedOFCreators else emptyList(),
+            removedLikedIDs = trimTombstones(remLikes),
+            removedDownloadedIDs = trimTombstones(remDl),
+            removedFollows = trimTombstones(remFollows),
             xSession = if (options.keepAccounts) cur.xSession else XAccountSession(),
             igSession = if (options.keepAccounts) cur.igSession else InstagramAccountSession(),
             redditSession = if (options.keepAccounts) cur.redditSession else RedditAccountSession(),
             r34Credentials = if (options.keepAccounts) cur.r34Credentials else Rule34Credentials(),
             algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile(),
-            settings = AppSettings()
+            settings = cur.settings
         )
         synchronized(seenList) {
             seenList.clear()

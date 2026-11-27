@@ -60,6 +60,7 @@ struct RootView: View {
     @ObservedObject private var license = LicenseManager.shared
     @Environment(\.scenePhase) private var phase
     @State private var directIGPayload: DirectIGDropPayload?
+    @State private var pendingOpenURL: URL?
 
     var body: some View {
         ZStack {
@@ -129,25 +130,18 @@ struct RootView: View {
                 app.licenseActivated = license.isValidAccess
             }
         }
-        .onChange(of: phase) { _, newPhase in
-            if newPhase == .active && license.status.isActivated {
-                Task {
-                    await license.verifySilently()
-                    app.licenseActivated = license.isValidAccess
-                }
+        .onOpenURL { url in
+            if app.ageConfirmed && app.onboardingCompleted && app.licenseActivated && app.passcodeChoiceCompleted && !app.isLocked {
+                handleUnlockedOpenURL(url)
+            } else {
+                pendingOpenURL = url
             }
         }
-        .onOpenURL { url in
-            Task {
-                if url.scheme?.lowercased() == "tinytiny",
-                   url.host?.lowercased() == "directig",
-                   let dropId = url.pathComponents.last(where: { $0 != "/" }),
-                   license.isAdmin,
-                   let payload = await DirectIGDropPayload.fetchFromWorker(dropId: dropId) {
-                    directIGPayload = payload
-                    return
-                }
-                _ = await ShareService.shared.handleIncomingShare(url.absoluteString)
+        .onChange(of: app.isLocked) { _, locked in
+            if !locked, let pending = pendingOpenURL,
+               app.ageConfirmed && app.onboardingCompleted && app.licenseActivated && app.passcodeChoiceCompleted {
+                pendingOpenURL = nil
+                handleUnlockedOpenURL(pending)
             }
         }
         .sheet(item: $directIGPayload) { payload in
@@ -158,21 +152,49 @@ struct RootView: View {
         .onChange(of: phase) { _, p in
             if p == .active {
                 license.startLiveAutoSync()
+                if license.status.isActivated {
+                    Task {
+                        await license.verifySilently()
+                        app.licenseActivated = license.isValidAccess
+                    }
+                }
             } else if p == .background {
                 license.stopLiveAutoSync()
                 app.lock()
+                directIGPayload = nil
                 store.saveNow()
                 SmartTasteEngine.shared.saveNow()
-                let bgId = UIApplication.shared.beginBackgroundTask(withName: "TinyTinyCloudSync") {}
-                Task {
+                var bgId: UIBackgroundTaskIdentifier = .invalid
+                bgId = UIApplication.shared.beginBackgroundTask(withName: "TinyTinyCloudSync") {
+                    if bgId != .invalid {
+                        UIApplication.shared.endBackgroundTask(bgId)
+                        bgId = .invalid
+                    }
+                }
+                Task { @MainActor in
                     if license.isValidAccess {
                         _ = await license.syncBidirectionalBackup()
                     }
                     if bgId != .invalid {
                         UIApplication.shared.endBackgroundTask(bgId)
+                        bgId = .invalid
                     }
                 }
             }
+        }
+    }
+
+    private func handleUnlockedOpenURL(_ url: URL) {
+        Task {
+            if url.scheme?.lowercased() == "tinytiny",
+               url.host?.lowercased() == "directig",
+               let dropId = url.pathComponents.last(where: { $0 != "/" }),
+               license.isAdmin,
+               let payload = await DirectIGDropPayload.fetchFromWorker(dropId: dropId) {
+                directIGPayload = payload
+                return
+            }
+            _ = await ShareService.shared.handleIncomingShare(url.absoluteString)
         }
     }
 }

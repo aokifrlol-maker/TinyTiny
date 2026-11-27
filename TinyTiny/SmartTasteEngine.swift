@@ -98,6 +98,14 @@ actor VisualTasteAnalyzer {
         negativeObs = negativeData.compactMap {
             try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: $0)
         }
+        postScoreCache.removeAll()
+    }
+
+    func reset() {
+        positiveObs.removeAll()
+        negativeObs.removeAll()
+        postScoreCache.removeAll()
+        inFlightPosts.removeAll()
     }
 
     func cachedScore(for postId: String) -> Double? {
@@ -235,18 +243,32 @@ final class SmartTasteEngine: ObservableObject {
         "boypussy", "bussy", "trans", "trans_woman", "tgirl", "shemale", "ladyboy", "mtf", "futanari", "futa"
     ]
 
+    private static let saveQueue = DispatchQueue(label: "tinytiny.taste.save", qos: .utility)
+    private var suppressSaveDueToDecryptError = false
+
     private static var fileURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("gooned_taste_v2.json")
     }
 
     private init() {
-        if let raw = try? Data(contentsOf: Self.fileURL),
-           let decoded = CryptoBox.openCodable(TasteV2Data.self, from: raw) {
-            self.state = decoded
+        var decryptFailed = false
+        if FileManager.default.fileExists(atPath: Self.fileURL.path),
+           let raw = try? Data(contentsOf: Self.fileURL), !raw.isEmpty {
+            if let decoded = CryptoBox.openCodable(TasteV2Data.self, from: raw) {
+                self.state = decoded
+            } else {
+                let bak = Self.fileURL.appendingPathExtension("bak")
+                if !FileManager.default.fileExists(atPath: bak.path) {
+                    try? raw.write(to: bak, options: [.atomic, .completeFileProtection])
+                }
+                decryptFailed = true
+                self.state = TasteV2Data()
+            }
         } else {
             self.state = TasteV2Data()
         }
+        self.suppressSaveDueToDecryptError = decryptFailed
         sanitizeStopTagsFromState()
         rebuildSets()
         let pos = state.positiveVisualPrints
@@ -289,9 +311,10 @@ final class SmartTasteEngine: ObservableObject {
     }
 
     func saveNow() {
+        guard !suppressSaveDueToDecryptError else { return }
         let snapshot = state
         let url = Self.fileURL
-        Task.detached(priority: .utility) {
+        Self.saveQueue.async {
             if let data = CryptoBox.sealCodable(snapshot) {
                 try? data.write(to: url, options: [.atomic, .completeFileProtection])
             }
@@ -871,18 +894,101 @@ final class SmartTasteEngine: ObservableObject {
     }
 
     func reset() {
+        suppressSaveDueToDecryptError = false
         state = TasteV2Data()
+        saveTask?.cancel()
+        saveTask = nil
         sessionContextTags.removeAll()
         visualScoreMirror.removeAll()
         rebuildSets()
-        try? FileManager.default.removeItem(at: Self.fileURL)
+        let url = Self.fileURL
+        Self.saveQueue.async {
+            try? FileManager.default.removeItem(at: url)
+        }
+        Task.detached(priority: .utility) {
+            await VisualTasteAnalyzer.shared.reset()
+        }
+    }
+
+    func mergeImportedBackup(_ imported: TasteV2Data, isLocalEmpty: Bool = false) {
+        suppressSaveDueToDecryptError = false
+        if isLocalEmpty {
+            state = imported
+        } else {
+            var merged = state
+            func unionArray(_ local: [String], _ remote: [String], maxCount: Int) -> [String] {
+                var seen = Set<String>()
+                var out: [String] = []
+                for item in local + remote where !item.isEmpty && seen.insert(item).inserted {
+                    out.append(item)
+                }
+                if out.count > maxCount { out = Array(out.suffix(maxCount)) }
+                return out
+            }
+            merged.dislikedIDs = unionArray(merged.dislikedIDs, imported.dislikedIDs, maxCount: 4000)
+            merged.dislikedMediaKeys = unionArray(merged.dislikedMediaKeys, imported.dislikedMediaKeys, maxCount: 4000)
+            merged.dislikedSimilarityKeys = unionArray(merged.dislikedSimilarityKeys, imported.dislikedSimilarityKeys, maxCount: 4000)
+            merged.seenSimilarityKeys = unionArray(merged.seenSimilarityKeys, imported.seenSimilarityKeys, maxCount: 6000)
+            merged.suppressedTags = unionArray(merged.suppressedTags, imported.suppressedTags, maxCount: 1000)
+            merged.suppressedCreators = unionArray(merged.suppressedCreators, imported.suppressedCreators, maxCount: 1000)
+            merged.hiddenOFGenders = unionArray(merged.hiddenOFGenders, imported.hiddenOFGenders, maxCount: 32)
+            for (k, v) in imported.tagPenalties {
+                if abs(v) > abs(merged.tagPenalties[k] ?? 0) { merged.tagPenalties[k] = v }
+            }
+            for (k, v) in imported.tagDislikeCounts {
+                merged.tagDislikeCounts[k] = max(merged.tagDislikeCounts[k] ?? 0, v)
+            }
+            for (k, v) in imported.creatorWatchStats {
+                let cur = merged.creatorWatchStats[k] ?? 0
+                if abs(v) > abs(cur) { merged.creatorWatchStats[k] = v }
+            }
+            for (k, v) in imported.creatorLatentClusters {
+                if merged.creatorLatentClusters[k] == nil {
+                    merged.creatorLatentClusters[k] = v
+                } else {
+                    for (tk, tv) in v {
+                        let cur = merged.creatorLatentClusters[k]?[tk] ?? 0
+                        if abs(tv) > abs(cur) { merged.creatorLatentClusters[k]?[tk] = tv }
+                    }
+                }
+            }
+            // Preserve local Apple Vision prints when syncing from Android (which sends empty visual print arrays)
+            if !imported.positiveVisualPrints.isEmpty {
+                var seen = Set(merged.positiveVisualPrints)
+                for p in imported.positiveVisualPrints where seen.insert(p).inserted {
+                    merged.positiveVisualPrints.append(p)
+                }
+                if merged.positiveVisualPrints.count > 24 {
+                    merged.positiveVisualPrints = Array(merged.positiveVisualPrints.suffix(24))
+                }
+            }
+            if !imported.negativeVisualPrints.isEmpty {
+                var seen = Set(merged.negativeVisualPrints)
+                for p in imported.negativeVisualPrints where seen.insert(p).inserted {
+                    merged.negativeVisualPrints.append(p)
+                }
+                if merged.negativeVisualPrints.count > 24 {
+                    merged.negativeVisualPrints = Array(merged.negativeVisualPrints.suffix(24))
+                }
+            }
+            for (k, v) in imported.sourceWeights {
+                if merged.sourceWeights[k] == nil { merged.sourceWeights[k] = v }
+            }
+            state = merged
+        }
+        visualScoreMirror.removeAll()
+        sanitizeStopTagsFromState()
+        rebuildSets()
+        let pos = state.positiveVisualPrints
+        let neg = state.negativeVisualPrints
+        Task.detached(priority: .utility) {
+            await VisualTasteAnalyzer.shared.hydrate(positiveData: pos, negativeData: neg)
+        }
+        saveNow()
     }
 
     func applyImportedBackup(_ imported: TasteV2Data) {
-        state = imported
-        sanitizeStopTagsFromState()
-        rebuildSets()
-        saveNow()
+        mergeImportedBackup(imported, isLocalEmpty: false)
     }
 
     // MARK: - Richer Tag & Semantic Detection (With Orthogonal Femboy / Trans / Futa / Gay Separation)

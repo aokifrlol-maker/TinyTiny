@@ -867,13 +867,27 @@ class FeedModel(
     private fun saveDiskCache(posts: List<Gif>, key: String) {
         scope.launch(Dispatchers.IO) {
             val dir = File(TinyTinyApplication.instance.cacheDir, "FeedDiskCache").apply { mkdirs() }
-            val f = File(dir, key.replace(Regex("[^A-Za-z0-9_-]"), "_").take(80) + ".json")
-            CryptoBox.sealCodable(posts)?.let { bytes ->
-                val tmp = File(dir, f.name + ".tmp")
-                tmp.writeBytes(bytes)
-                if (f.exists()) f.delete()
-                tmp.renameTo(f)
+            val safeName = key.replace(Regex("[^A-Za-z0-9_-]"), "_").take(80) + ".json"
+            val f = File(dir, safeName)
+            val lock = diskCacheLocks.computeIfAbsent(safeName) { Any() }
+            synchronized(lock) {
+                CryptoBox.sealCodable(posts)?.let { bytes ->
+                    val tmp = File(dir, "${f.name}.${java.util.UUID.randomUUID()}.tmp")
+                    try {
+                        tmp.writeBytes(bytes)
+                        if (!tmp.renameTo(f)) {
+                            tmp.copyTo(f, overwrite = true)
+                            tmp.delete()
+                        }
+                    } catch (_: Throwable) {
+                        tmp.delete()
+                    }
+                }
             }
         }
+    }
+
+    companion object {
+        private val diskCacheLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
     }
 }

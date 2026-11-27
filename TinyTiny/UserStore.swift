@@ -137,6 +137,7 @@ final class UserStore: ObservableObject {
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
+    private var suppressSaveDueToDecryptError = false
     private static let saveQueue = DispatchQueue(label: "tinytiny.userstore.save", qos: .utility)
 
     private static var fileURL: URL {
@@ -146,15 +147,27 @@ final class UserStore: ObservableObject {
 
     init() {
         let loaded: UserData
-        if let raw = try? Data(contentsOf: Self.fileURL),
-           let decoded = CryptoBox.openCodable(UserData.self, from: raw) {
-            loaded = decoded
+        var decryptFailed = false
+        if FileManager.default.fileExists(atPath: Self.fileURL.path),
+           let raw = try? Data(contentsOf: Self.fileURL), !raw.isEmpty {
+            if let decoded = CryptoBox.openCodable(UserData.self, from: raw) {
+                loaded = decoded
+            } else {
+                // Preserve unreadable vault file as backup and do not overwrite with empty state
+                let bak = Self.fileURL.appendingPathExtension("bak")
+                if !FileManager.default.fileExists(atPath: bak.path) {
+                    try? raw.write(to: bak, options: [.atomic, .completeFileProtection])
+                }
+                decryptFailed = true
+                loaded = UserData()
+            }
         } else {
             loaded = UserData()
         }
         self._seenIDs = loaded.seenIDs
         self.seenSet = Set(loaded.seenIDs)
         self._savedCursors = loaded.savedCursors
+        self.suppressSaveDueToDecryptError = decryptFailed
         self.data = loaded
         sanitizeLearnedProfile()
         Self.configureAudioSession(muted: loaded.settings.muted)
@@ -195,7 +208,16 @@ final class UserStore: ObservableObject {
         return snapshot
     }
 
+    func replaceAllData(_ newData: UserData) {
+        suppressSaveDueToDecryptError = false
+        _seenIDs = newData.seenIDs
+        seenSet = Set(newData.seenIDs)
+        _savedCursors = newData.savedCursors
+        data = newData
+    }
+
     func saveNow() {
+        guard !suppressSaveDueToDecryptError else { return }
         var snapshot = data
         snapshot.seenIDs = _seenIDs
         snapshot.savedCursors = _savedCursors
@@ -231,10 +253,17 @@ final class UserStore: ObservableObject {
     }
 
     func performSelectiveWipe(options: WipeOptions, app: AppState) async {
-        // 1. Preserve only chosen slices of UserData; everything else (seenIDs, cursors, history, settings) is wiped
+        // 1. Preserve only chosen slices of UserData; record tombstones for wiped slices so cloud sync doesn't resurrect them
+        let now = Date().timeIntervalSince1970
         var fresh = UserData()
+        fresh.removedLikedIDs = data.removedLikedIDs
+        fresh.removedDownloadedIDs = data.removedDownloadedIDs
+        fresh.removedFollows = data.removedFollows
         if options.keepLikes {
             fresh.liked = data.liked
+        } else {
+            for item in data.liked { fresh.removedLikedIDs[item.id] = now }
+            trimTombstones(&fresh.removedLikedIDs)
         }
         if options.keepFollowing {
             fresh.followedUsers = data.followedUsers
@@ -242,9 +271,19 @@ final class UserStore: ObservableObject {
             fresh.followedXUsers = data.followedXUsers
             fresh.followedIGUsers = data.followedIGUsers
             fresh.followedOFCreators = data.followedOFCreators
+        } else {
+            for u in data.followedUsers { fresh.removedFollows["u:\(u.lowercased())"] = now }
+            for s in data.followedSubreddits { fresh.removedFollows["sub:\(s.lowercased())"] = now }
+            for x in data.followedXUsers { fresh.removedFollows["x:\(x.lowercased())"] = now }
+            for ig in data.followedIGUsers { fresh.removedFollows["ig:\(ig.lowercased())"] = now }
+            for of in data.followedOFCreators { fresh.removedFollows["of:\(of.id.lowercased())"] = now }
+            trimTombstones(&fresh.removedFollows)
         }
         if options.keepOfflineVault {
             fresh.downloaded = data.downloaded
+        } else {
+            for item in data.downloaded { fresh.removedDownloadedIDs[item.id] = now }
+            trimTombstones(&fresh.removedDownloadedIDs)
         }
         if options.keepAccounts {
             fresh.xSession = data.xSession
@@ -257,6 +296,8 @@ final class UserStore: ObservableObject {
         }
 
         // 2. Clear seen history, cursors, and in-memory caches
+        suppressSaveDueToDecryptError = false
+        localAddedTimestamps.removeAll()
         _seenIDs = []
         seenSet = []
         _savedCursors = [:]
@@ -303,6 +344,7 @@ final class UserStore: ObservableObject {
         for key in UserDefaults.standard.dictionaryRepresentation().keys {
             if !preservedDefaults.contains(key) && (key.hasPrefix("tt.") || key.hasPrefix("tt_") || key.hasPrefix("tinytiny.") || key.hasPrefix("gooned")) {
                 if options.keepOfflineVault && key == "tt_saved_photo_asset_ids_v1" { continue }
+                if options.keepAlgorithm && key == "tinytiny.of.hidden_genders.v1" { continue }
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
@@ -570,9 +612,10 @@ final class UserStore: ObservableObject {
         let key = "of:\(cleanId.lowercased())"
         let now = Date().timeIntervalSince1970
         if let idx = data.followedOFCreators.firstIndex(where: { $0.id == cleanId || $0.name.caseInsensitiveCompare(cleanName) == .orderedSame }) {
-            data.followedOFCreators.remove(at: idx)
-            data.removedFollows[key] = now
-            localAddedTimestamps.removeValue(forKey: "follow:\(key)")
+            let removed = data.followedOFCreators.remove(at: idx)
+            let remKey = "of:\(removed.id.lowercased())"
+            data.removedFollows[remKey] = now
+            localAddedTimestamps.removeValue(forKey: "follow:\(remKey)")
             trimTombstones(&data.removedFollows)
         } else {
             data.followedOFCreators.insert(
@@ -978,7 +1021,8 @@ final class UserStore: ObservableObject {
     var seenCount: Int { seenSet.count }
 
     func eraseAll() {
-        saveTask?.cancel()
+        suppressSaveDueToDecryptError = false
+        localAddedTimestamps.removeAll()
         seenSet.removeAll()
         _seenIDs.removeAll()
         _savedCursors.removeAll()
@@ -987,7 +1031,13 @@ final class UserStore: ObservableObject {
         var fresh = UserData()
         fresh.r34Credentials.resetToDefault()
         data = fresh
-        try? FileManager.default.removeItem(at: Self.fileURL)
+        // Cancel the debounced save scheduled by `data = fresh` so the file isn't recreated
+        saveTask?.cancel()
+        saveTask = nil
+        let url = Self.fileURL
+        Self.saveQueue.async {
+            try? FileManager.default.removeItem(at: url)
+        }
         Task {
             await XWebEngine.shared.resetSession()
             await InstagramWebEngine.shared.resetSession()

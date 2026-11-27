@@ -143,6 +143,7 @@ final class LicenseManager: ObservableObject {
               !remoteVer.isEmpty else {
             return
         }
+        guard !isSyncingBackup else { return }
         if remoteVer != lastRemoteBackupVersion {
             isSyncingBackup = true
             defer { isSyncingBackup = false }
@@ -247,10 +248,13 @@ final class LicenseManager: ObservableObject {
     var isValidAccess: Bool {
         guard status.isActivated, !status.isExpiredOrRevoked else { return false }
         if status.isLifetime { return true }
-        if let exp = status.expiresAt {
-            return Date().timeIntervalSince1970 < exp
+        guard let exp = status.expiresAt else { return false }
+        let now = Date().timeIntervalSince1970
+        // Detect blatant clock rollback (> 24h behind lastVerifiedAt)
+        if status.lastVerifiedAt > 0 && now + 86_400 < status.lastVerifiedAt {
+            return false
         }
-        return true
+        return now < exp
     }
 
     var isAdmin: Bool {
@@ -361,7 +365,8 @@ final class LicenseManager: ObservableObject {
         ])
 
         guard let (data, resp) = try? await session.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let code = (resp as? HTTPURLResponse)?.statusCode,
+              (code == 200 || code == 401 || code == 403),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
@@ -385,8 +390,10 @@ final class LicenseManager: ObservableObject {
 
     func verifyPasscodeRecovery(rawKey: String) async -> Bool {
         let entered = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !entered.isEmpty else { return false }
-        return await activate(rawKey: entered)
+        let active = status.licenseKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !entered.isEmpty, !active.isEmpty, entered == active else { return false }
+        await verifySilently()
+        return isValidAccess
     }
 
     // MARK: - Zero-Knowledge Encrypted Profile Sync (Likes, Follows, Taste)
@@ -511,12 +518,13 @@ final class LicenseManager: ObservableObject {
         // Merge non-destructively so existing local likes/follows/sessions aren't overwritten if newer
         let local = UserStore.shared.data
         let isTrulyEmpty = local.liked.isEmpty && local.downloaded.isEmpty
-            && !local.xSession.isConnected && !local.igSession.isConnected
+            && !local.xSession.isConnected && !local.igSession.isConnected && !local.redditSession.isConnected
             && local.followedUsers.isEmpty && local.followedXUsers.isEmpty
             && local.followedIGUsers.isEmpty && local.followedSubreddits.isEmpty
             && local.followedOFCreators.isEmpty
+            && local.removedLikedIDs.isEmpty && local.removedDownloadedIDs.isEmpty && local.removedFollows.isEmpty
         let remoteHasData = !backup.userData.liked.isEmpty || !backup.userData.downloaded.isEmpty
-            || backup.userData.xSession.isConnected || backup.userData.igSession.isConnected
+            || backup.userData.xSession.isConnected || backup.userData.igSession.isConnected || backup.userData.redditSession.isConnected
             || !backup.userData.followedUsers.isEmpty || !backup.userData.followedXUsers.isEmpty
             || !backup.userData.followedIGUsers.isEmpty || !backup.userData.followedSubreddits.isEmpty
             || !backup.userData.followedOFCreators.isEmpty
@@ -526,7 +534,7 @@ final class LicenseManager: ObservableObject {
             deduped.liked = deduped.liked.filter { seenLikes.insert($0.id).inserted }
             var seenDl = Set<String>()
             deduped.downloaded = deduped.downloaded.filter { seenDl.insert($0.id).inserted }
-            UserStore.shared.data = deduped
+            UserStore.shared.replaceAllData(deduped)
         } else {
             // Merge unlike/unfollow/delete-download tombstones so deletions propagate live without undoing newer local re-adds!
             let localAdded = UserStore.shared.localAddedTimestamps
@@ -636,8 +644,8 @@ final class LicenseManager: ObservableObject {
             }
             UserStore.shared.markSeenBulk(backup.userData.seenIDs)
         }
-        SmartTasteEngine.shared.applyImportedBackup(backup.tasteV2)
-        CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey)
+        SmartTasteEngine.shared.mergeImportedBackup(backup.tasteV2, isLocalEmpty: isTrulyEmpty)
+        CryptoBox.restoreSeedrMasterKeyIfMissing(from: backup.seedrMasterKey, force: isTrulyEmpty && remoteHasData)
         UserStore.shared.saveNow()
         await injectRestoredSocialCookies()
         return true
@@ -725,11 +733,15 @@ final class LicenseManager: ObservableObject {
             || !d.downloaded.isEmpty
             || d.xSession.isConnected
             || d.igSession.isConnected
+            || d.redditSession.isConnected
             || !d.followedUsers.isEmpty
             || !d.followedXUsers.isEmpty
             || !d.followedIGUsers.isEmpty
             || !d.followedSubreddits.isEmpty
             || !d.followedOFCreators.isEmpty
+            || !d.removedLikedIDs.isEmpty
+            || !d.removedDownloadedIDs.isEmpty
+            || !d.removedFollows.isEmpty
         if hasAnyData {
             await syncEncryptedBackupNow()
             if let upErr = lastSyncError, !upErr.isEmpty {

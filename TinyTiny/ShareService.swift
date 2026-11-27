@@ -144,6 +144,7 @@ final class ShareService: ObservableObject {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: [
                 "key": LicenseManager.shared.status.licenseKey,
+                "deviceId": LicenseManager.shared.deviceId,
                 "cipher": sealed.base64EncodedString()
             ])
             if let (data, resp) = try? await session.data(for: req),

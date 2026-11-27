@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
@@ -372,17 +373,31 @@ class SmartTasteEngine private constructor() {
     private val suppressedCreatorSet = ConcurrentHashMap.newKeySet<String>()
     private val hiddenOFGenderSet = ConcurrentHashMap.newKeySet<String>()
 
+    @Volatile private var suppressSaveDueToDecryptError = false
+
     private val tasteFile: File
         get() = File(TinyTinyApplication.instance.filesDir, TASTE_FILENAME)
 
     init {
+        var decryptFailed = false
         val loaded = try {
-            if (tasteFile.exists()) {
-                CryptoBox.openCodable<TasteV2Data>(tasteFile.readBytes()) ?: TasteV2Data()
+            if (tasteFile.exists() && tasteFile.length() > 0L) {
+                val raw = tasteFile.readBytes()
+                val decoded = CryptoBox.openCodable<TasteV2Data>(raw)
+                if (decoded != null) {
+                    decoded
+                } else {
+                    val bak = File(tasteFile.parentFile, "$TASTE_FILENAME.bak")
+                    if (!bak.exists()) runCatching { bak.writeBytes(raw) }
+                    decryptFailed = true
+                    TasteV2Data()
+                }
             } else TasteV2Data()
         } catch (_: Throwable) {
+            if (tasteFile.exists() && tasteFile.length() > 0L) decryptFailed = true
             TasteV2Data()
         }
+        suppressSaveDueToDecryptError = decryptFailed
         state.value = sanitizeStopTags(loaded)
         rebuildSets()
         mirrorHiddenGendersToPrefs()
@@ -427,15 +442,23 @@ class SmartTasteEngine private constructor() {
     }
 
     fun saveNow() {
+        if (suppressSaveDueToDecryptError) return
         val f = tasteFile
         scope.launch {
             synchronized(saveFileLock) {
+                if (suppressSaveDueToDecryptError) return@synchronized
                 val snapshot = state.value
                 CryptoBox.sealCodable(snapshot)?.let { bytes ->
-                    val tmp = File(f.parentFile, f.name + ".tmp")
-                    tmp.writeBytes(bytes)
-                    if (f.exists()) f.delete()
-                    tmp.renameTo(f)
+                    val tmp = File(f.parentFile, "${f.name}.${java.util.UUID.randomUUID()}.tmp")
+                    try {
+                        tmp.writeBytes(bytes)
+                        if (!tmp.renameTo(f)) {
+                            tmp.copyTo(f, overwrite = true)
+                            tmp.delete()
+                        }
+                    } catch (_: Throwable) {
+                        tmp.delete()
+                    }
                 }
             }
         }
@@ -785,24 +808,102 @@ class SmartTasteEngine private constructor() {
     }
 
     fun updateForYouSources(transform: (ForYouSourceSettings) -> ForYouSourceSettings) {
-        val s = state.value
-        state.value = s.copy(sourceSettings = transform(s.sourceSettings))
+        state.update { s -> s.copy(sourceSettings = transform(s.sourceSettings)) }
         scheduleSave()
         LicenseManager.scheduleCloudSync()
     }
 
-    fun applyImportedBackup(imported: TasteV2Data) {
-        state.value = sanitizeStopTags(imported)
+    fun mergeImportedBackup(imported: TasteV2Data, isLocalEmpty: Boolean = false) {
+        suppressSaveDueToDecryptError = false
+        val cleanImported = sanitizeStopTags(imported)
+        if (isLocalEmpty) {
+            state.value = cleanImported
+        } else {
+            state.update { cur ->
+                fun unionList(a: List<String>, b: List<String>, cap: Int): List<String> =
+                    (a + b).filter { it.isNotEmpty() }.distinct().takeLast(cap)
+
+                val mergedPenalties = cur.tagPenalties.toMutableMap()
+                for ((k, v) in cleanImported.tagPenalties) {
+                    val existing = mergedPenalties[k] ?: 0.0
+                    if (kotlin.math.abs(v) > kotlin.math.abs(existing)) mergedPenalties[k] = v
+                }
+                val mergedDislikeCounts = cur.tagDislikeCounts.toMutableMap()
+                for ((k, v) in cleanImported.tagDislikeCounts) {
+                    mergedDislikeCounts[k] = maxOf(mergedDislikeCounts[k] ?: 0, v)
+                }
+                val mergedWatch = cur.creatorWatchStats.toMutableMap()
+                for ((k, v) in cleanImported.creatorWatchStats) {
+                    val ex = mergedWatch[k] ?: 0.0
+                    if (kotlin.math.abs(v) > kotlin.math.abs(ex)) mergedWatch[k] = v
+                }
+                val mergedClusters = cur.creatorLatentClusters.toMutableMap()
+                for ((k, v) in cleanImported.creatorLatentClusters) {
+                    val ex = mergedClusters[k]?.toMutableMap()
+                    if (ex == null) {
+                        mergedClusters[k] = v
+                    } else {
+                        for ((tk, tv) in v) {
+                            if (kotlin.math.abs(tv) > kotlin.math.abs(ex[tk] ?: 0.0)) ex[tk] = tv
+                        }
+                        mergedClusters[k] = ex
+                    }
+                }
+                // Preserve local Android visual vectors & Android-only For You toggles when syncing from iOS
+                val mergedPosVec = if (cleanImported.androidPosVisualVectors.isNotEmpty()) {
+                    (cur.androidPosVisualVectors + cleanImported.androidPosVisualVectors).takeLast(24)
+                } else cur.androidPosVisualVectors
+                val mergedNegVec = if (cleanImported.androidNegVisualVectors.isNotEmpty()) {
+                    (cur.androidNegVisualVectors + cleanImported.androidNegVisualVectors).takeLast(24)
+                } else cur.androidNegVisualVectors
+                val mergedSourceSettings = cur.sourceSettings.copy(
+                    includeReddit = cleanImported.sourceSettings.includeReddit,
+                    includeOnlyFans = cleanImported.sourceSettings.includeOnlyFans,
+                    includeX = cleanImported.sourceSettings.includeX,
+                    includeInstagram = cleanImported.sourceSettings.includeInstagram,
+                    includeRule34 = cur.sourceSettings.includeRule34 || cleanImported.sourceSettings.includeRule34,
+                    includeLongVideos = cur.sourceSettings.includeLongVideos || cleanImported.sourceSettings.includeLongVideos
+                )
+                cur.copy(
+                    dislikedIDs = unionList(cur.dislikedIDs, cleanImported.dislikedIDs, 4000),
+                    dislikedMediaKeys = unionList(cur.dislikedMediaKeys, cleanImported.dislikedMediaKeys, 4000),
+                    dislikedSimilarityKeys = unionList(cur.dislikedSimilarityKeys, cleanImported.dislikedSimilarityKeys, 4000),
+                    seenSimilarityKeys = unionList(cur.seenSimilarityKeys, cleanImported.seenSimilarityKeys, 6000),
+                    suppressedTags = unionList(cur.suppressedTags, cleanImported.suppressedTags, 1000),
+                    suppressedCreators = unionList(cur.suppressedCreators, cleanImported.suppressedCreators, 1000),
+                    hiddenOFGenders = unionList(cur.hiddenOFGenders, cleanImported.hiddenOFGenders, 32),
+                    tagPenalties = mergedPenalties,
+                    tagDislikeCounts = mergedDislikeCounts,
+                    creatorWatchStats = mergedWatch,
+                    creatorLatentClusters = mergedClusters,
+                    androidPosVisualVectors = mergedPosVec,
+                    androidNegVisualVectors = mergedNegVec,
+                    sourceSettings = mergedSourceSettings
+                )
+            }
+        }
+        visualScoreMirror.clear()
         rebuildSets()
         mirrorHiddenGendersToPrefs()
         saveNow()
     }
 
+    fun applyImportedBackup(imported: TasteV2Data) {
+        mergeImportedBackup(imported, isLocalEmpty = false)
+    }
+
     fun reset() {
+        suppressSaveDueToDecryptError = false
+        saveJob?.cancel()
+        saveJob = null
         sessionContextTags.clear()
+        visualScoreMirror.clear()
+        visualInFlight.clear()
         state.value = TasteV2Data()
         rebuildSets()
         mirrorHiddenGendersToPrefs()
-        tasteFile.delete()
+        synchronized(saveFileLock) {
+            tasteFile.delete()
+        }
     }
 }
