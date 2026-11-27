@@ -54,19 +54,19 @@ data class RedditAccountSession(
 object RedditPersonalAPI {
     private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
-    suspend fun homeFeed(after: String? = null): GoonedFeedResponse = fetchListing("/.json", after)
-    suspend fun popularFeed(after: String? = null): GoonedFeedResponse = fetchListing("/r/popular.json", after)
+    suspend fun homeFeed(after: String? = null): GoonedFeedResponse = fetchListing("/best", "/.json", after)
+    suspend fun popularFeed(after: String? = null): GoonedFeedResponse = fetchListing("/r/popular/hot", "/r/popular.json", after)
 
     suspend fun savedFeed(after: String? = null): GoonedFeedResponse {
         val uname = UserStore.shared.data.value.redditSession.username
         if (uname.isEmpty()) return GoonedFeedResponse()
-        return fetchListing("/user/$uname/saved.json", after)
+        return fetchListing("/user/$uname/saved", "/user/$uname/saved.json", after)
     }
 
     suspend fun upvotedFeed(after: String? = null): GoonedFeedResponse {
         val uname = UserStore.shared.data.value.redditSession.username
         if (uname.isEmpty()) return GoonedFeedResponse()
-        return fetchListing("/user/$uname/upvoted.json", after)
+        return fetchListing("/user/$uname/upvoted", "/user/$uname/upvoted.json", after)
     }
 
     fun clearCookies() {
@@ -101,18 +101,109 @@ object RedditPersonalAPI {
         }
     }
 
-    private suspend fun fetchListing(path: String, after: String?): GoonedFeedResponse = withContext(Dispatchers.IO) {
+    private fun fullWebCookieHeader(rd: RedditAccountSession): String {
+        val map = linkedMapOf("over18" to "1")
+        try {
+            val cm = CookieManager.getInstance()
+            val combined = listOfNotNull(cm.getCookie("https://www.reddit.com"), cm.getCookie("https://reddit.com")).joinToString("; ")
+            combined.split(";").forEach { part ->
+                val idx = part.indexOf('=')
+                if (idx > 0) {
+                    val k = part.substring(0, idx).trim()
+                    val v = part.substring(idx + 1).trim()
+                    if (k.isNotEmpty() && v.isNotEmpty()) map[k] = v
+                }
+            }
+        } catch (_: Throwable) {}
+        if (rd.redditSessionCookie.isNotEmpty()) map["reddit_session"] = rd.redditSessionCookie
+        if (rd.tokenV2.isNotEmpty() && !map.containsKey("token_v2")) map["token_v2"] = rd.tokenV2
+        return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
+    private fun refreshTokenV2(rd: RedditAccountSession): String? {
+        return try {
+            val req = Request.Builder()
+                .url("https://www.reddit.com/")
+                .header("User-Agent", MOBILE_UA)
+                .header("Accept", "text/html,application/xhtml+xml")
+                .header("Cookie", fullWebCookieHeader(rd))
+                .get()
+                .build()
+            TinyTinyApplication.sharedHttpClient.newCall(req).execute().use { resp ->
+                val setCookies = resp.headers("Set-Cookie").joinToString("; ")
+                val m = Regex("token_v2=([^;\\s]+)").find(setCookies)
+                val token = m?.groupValues?.getOrNull(1)?.trim()
+                if (!token.isNullOrEmpty()) {
+                    UserStore.shared.updateRedditSession(rd.copy(tokenV2 = token))
+                    token
+                } else null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun fetchOAuth(oauthPath: String, token: String, username: String, after: String?): Pair<Int, String?> {
+        val afterQ = if (!after.isNullOrEmpty()) "&after=${URLEncoder.encode(after, "UTF-8")}" else ""
+        val url = "https://oauth.reddit.com$oauthPath?raw_json=1&limit=50&include_over_18=on$afterQ"
+        val uaUser = username.ifEmpty { "tinytiny" }
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "android:com.bella.tinytiny:v1.6 (by /u/$uaUser)")
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "application/json")
+                .get()
+                .build()
+            TinyTinyApplication.sharedHttpClient.newCall(req).execute().use { resp ->
+                resp.code to (if (resp.isSuccessful) resp.body?.string() else null)
+            }
+        } catch (_: Throwable) {
+            0 to null
+        }
+    }
+
+    private suspend fun fetchListing(oauthPath: String, webPath: String, after: String?): GoonedFeedResponse = withContext(Dispatchers.IO) {
         val rd = UserStore.shared.data.value.redditSession
         if (!rd.isConnected) return@withContext GoonedFeedResponse()
+
+        // 1. Primary: oauth.reddit.com with Bearer token_v2 (bypasses www.reddit.com Fastly 403 WAF!)
+        var activeToken = rd.tokenV2
+        if (activeToken.isEmpty()) {
+            activeToken = refreshTokenV2(rd) ?: ""
+        }
+        if (activeToken.isNotEmpty()) {
+            var (code, raw) = fetchOAuth(oauthPath, activeToken, rd.username, after)
+            if (code == 401 || code == 403) {
+                val fresh = refreshTokenV2(rd)
+                if (!fresh.isNullOrEmpty()) {
+                    val retry = fetchOAuth(oauthPath, fresh, rd.username, after)
+                    code = retry.first
+                    raw = retry.second
+                }
+            }
+            if (code in 200..299 && !raw.isNullOrEmpty()) {
+                val parsed = parseListing(raw)
+                if (parsed.posts.isNotEmpty() || parsed.after != null) {
+                    return@withContext parsed
+                }
+            }
+        }
+
+        // 2. Fallback: www.reddit.com with full WebView cookie jar + CORS headers
         val afterQ = if (!after.isNullOrEmpty()) "&after=${URLEncoder.encode(after, "UTF-8")}" else ""
-        val url = "https://www.reddit.com$path?raw_json=1&limit=35$afterQ"
+        val url = "https://www.reddit.com$webPath?raw_json=1&limit=50&include_over_18=on$afterQ"
         try {
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", MOBILE_UA)
-                .header("Accept", "application/json")
-                .header("Cookie", rd.cookieHeader)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Cookie", fullWebCookieHeader(rd))
                 .header("Referer", "https://www.reddit.com/")
+                .header("Origin", "https://www.reddit.com")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Sec-Fetch-Mode", "cors")
+                .header("Sec-Fetch-Site", "same-origin")
                 .get()
                 .build()
             TinyTinyApplication.sharedHttpClient.newCall(req).execute().use { resp ->

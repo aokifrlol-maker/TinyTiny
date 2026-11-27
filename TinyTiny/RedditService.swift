@@ -43,33 +43,114 @@ final class RedditPersonalAPI {
     private nonisolated(unsafe) static let isoFormatter = ISO8601DateFormatter()
 
     func homeFeed(after: String?) async throws -> GoonedFeedResponse {
-        try await fetchListing(path: "/.json", after: after)
+        try await fetchListing(oauthPath: "/best", webPath: "/.json", after: after)
     }
 
     func popularFeed(after: String?) async throws -> GoonedFeedResponse {
-        try await fetchListing(path: "/r/popular.json", after: after)
+        try await fetchListing(oauthPath: "/r/popular/hot", webPath: "/r/popular.json", after: after)
     }
 
     func savedFeed(after: String?) async throws -> GoonedFeedResponse {
         let uname = await MainActor.run { UserStore.shared.data.redditSession.username }
         guard !uname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
-        return try await fetchListing(path: "/user/\(uname)/saved.json", after: after)
+        return try await fetchListing(oauthPath: "/user/\(uname)/saved", webPath: "/user/\(uname)/saved.json", after: after)
     }
 
     func upvotedFeed(after: String?) async throws -> GoonedFeedResponse {
         let uname = await MainActor.run { UserStore.shared.data.redditSession.username }
         guard !uname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
-        return try await fetchListing(path: "/user/\(uname)/upvoted.json", after: after)
+        return try await fetchListing(oauthPath: "/user/\(uname)/upvoted", webPath: "/user/\(uname)/upvoted.json", after: after)
     }
 
-    private func fetchListing(path: String, after: String?) async throws -> GoonedFeedResponse {
+    private func fullWebCookieHeader(fallback: RedditAccountSession) async -> String {
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let rd = cookies.filter { $0.domain.lowercased().contains("reddit.com") && !$0.value.isEmpty }
+        var map: [String: String] = ["over18": "1"]
+        for c in rd { map[c.name] = c.value }
+        if !fallback.redditSessionCookie.isEmpty { map["reddit_session"] = fallback.redditSessionCookie }
+        if !fallback.tokenV2.isEmpty && map["token_v2"] == nil { map["token_v2"] = fallback.tokenV2 }
+        return map.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    private func refreshTokenV2IfNeeded(session rd: RedditAccountSession) async -> String? {
+        guard let url = URL(string: "https://www.reddit.com/") else { return nil }
+        let cookieStr = await fullWebCookieHeader(fallback: rd)
+        var req = URLRequest(url: url)
+        req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
+        req.setValue(cookieStr, forHTTPHeaderField: "Cookie")
+        req.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        guard let (_, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse else { return nil }
+        let setCookies = (http.allHeaderFields["Set-Cookie"] as? String)
+            ?? (http.allHeaderFields["set-cookie"] as? String)
+            ?? ""
+        if let range = setCookies.range(of: #"token_v2=([^;\s]+)"#, options: .regularExpression) {
+            let token = String(setCookies[range]).replacingOccurrences(of: "token_v2=", with: "")
+            if !token.isEmpty {
+                await MainActor.run {
+                    var updated = UserStore.shared.data.redditSession
+                    updated.tokenV2 = token
+                    UserStore.shared.data.redditSession = updated
+                    UserStore.shared.saveNow()
+                }
+                return token
+            }
+        }
+        return nil
+    }
+
+    private func fetchOAuth(path: String, token: String, username: String, after: String?) async -> (status: Int, data: Data?) {
+        var comps = URLComponents(string: "https://oauth.reddit.com\(path)")!
+        var items = [
+            URLQueryItem(name: "raw_json", value: "1"),
+            URLQueryItem(name: "limit", value: "50"),
+            URLQueryItem(name: "include_over_18", value: "on")
+        ]
+        if let after, !after.isEmpty {
+            items.append(URLQueryItem(name: "after", value: after))
+        }
+        comps.queryItems = items
+        guard let url = comps.url else { return (0, nil) }
+        var req = URLRequest(url: url)
+        let uaUser = username.isEmpty ? "tinytiny" : username
+        req.setValue("ios:com.tinytiny.app:v1.6 (by /u/\(uaUser))", forHTTPHeaderField: "User-Agent")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse else { return (0, nil) }
+        return (http.statusCode, data)
+    }
+
+    private func fetchListing(oauthPath: String, webPath: String, after: String?) async throws -> GoonedFeedResponse {
         let rd = await MainActor.run { UserStore.shared.data.redditSession }
         guard rd.isConnected else { return GoonedFeedResponse(posts: [], after: nil) }
 
-        var comps = URLComponents(string: "https://www.reddit.com\(path)")!
+        // 1. Primary: oauth.reddit.com with Bearer token_v2 (bypasses www.reddit.com Fastly 403 WAF!)
+        var activeToken = rd.tokenV2
+        if activeToken.isEmpty {
+            activeToken = await refreshTokenV2IfNeeded(session: rd) ?? ""
+        }
+        if !activeToken.isEmpty {
+            var res = await fetchOAuth(path: oauthPath, token: activeToken, username: rd.username, after: after)
+            if res.status == 401 || res.status == 403 {
+                if let fresh = await refreshTokenV2IfNeeded(session: rd), !fresh.isEmpty {
+                    res = await fetchOAuth(path: oauthPath, token: fresh, username: rd.username, after: after)
+                }
+            }
+            if (200..<300).contains(res.status), let data = res.data {
+                let parsed = Self.parseListing(data)
+                if !parsed.posts.isEmpty || parsed.after != nil {
+                    return parsed
+                }
+            }
+        }
+
+        // 2. Fallback: www.reddit.com with full WebView cookie jar + CORS headers
+        var comps = URLComponents(string: "https://www.reddit.com\(webPath)")!
         var items = [
             URLQueryItem(name: "raw_json", value: "1"),
-            URLQueryItem(name: "limit", value: "35")
+            URLQueryItem(name: "limit", value: "50"),
+            URLQueryItem(name: "include_over_18", value: "on")
         ]
         if let after, !after.isEmpty {
             items.append(URLQueryItem(name: "after", value: after))
@@ -77,11 +158,16 @@ final class RedditPersonalAPI {
         comps.queryItems = items
         guard let url = comps.url else { return GoonedFeedResponse(posts: [], after: nil) }
 
+        let fullCookies = await fullWebCookieHeader(fallback: rd)
         var req = URLRequest(url: url)
         req.setValue(Self.mobileUA, forHTTPHeaderField: "User-Agent")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue(rd.cookieHeader, forHTTPHeaderField: "Cookie")
+        req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        req.setValue(fullCookies, forHTTPHeaderField: "Cookie")
         req.setValue("https://www.reddit.com/", forHTTPHeaderField: "Referer")
+        req.setValue("https://www.reddit.com", forHTTPHeaderField: "Origin")
+        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        req.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        req.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
 
         let (data, resp) = try await session.data(for: req)
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
