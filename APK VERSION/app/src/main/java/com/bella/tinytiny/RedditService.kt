@@ -336,11 +336,28 @@ fun RedditLoginSheet(
     onSuccess: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var statusText by remember { mutableStateOf("Sign in · Google account? Or tap 'Email me a one-time link'") }
+    var statusText by remember { mutableStateOf("Tap 'Email me a one-time link', copy link, then tap Paste Link") }
     var captured by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
+    var mainWebView by remember { mutableStateOf<WebView?>(null) }
+    var showPasteBar by remember { mutableStateOf(false) }
+    var pastedLink by remember { mutableStateOf("") }
+
+    fun loadMagicLink(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.startsWith("https://", ignoreCase = true) || trimmed.startsWith("http://", ignoreCase = true)) {
+            statusText = "Opening one-time login link..."
+            showPasteBar = false
+            pastedLink = ""
+            mainWebView?.loadUrl(trimmed)
+        } else {
+            statusText = "Copy the full https:// login link from your Reddit email first"
+            showPasteBar = true
+        }
+    }
 
     fun closePopup() {
         popupWebView?.let { pop ->
@@ -429,11 +446,47 @@ fun RedditLoginSheet(
                     Text("Connect Reddit", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     Text(statusText, color = Theme.textSecondary, fontSize = 11.5.sp, maxLines = 1)
                 }
+                TextButton(onClick = {
+                    val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    val clip = cm?.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString()?.trim()
+                    if (!clip.isNullOrEmpty() && clip.startsWith("http", ignoreCase = true)) {
+                        loadMagicLink(clip)
+                    } else {
+                        showPasteBar = !showPasteBar
+                    }
+                }) {
+                    Text("Paste Link", color = Theme.accentBright, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                }
                 TextButton(onClick = { checkCookiesNow() }) {
-                    Text("Done", color = Theme.accentBright, fontWeight = FontWeight.Bold)
+                    Text("Done", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.5.sp)
                 }
                 IconButton(onClick = { closePopup(); onDismiss() }) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                }
+            }
+
+            if (showPasteBar) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF14070E))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = pastedLink,
+                        onValueChange = { pastedLink = it },
+                        placeholder = { Text("Paste Reddit email login link (https://...)", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = { loadMagicLink(pastedLink) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)
+                    ) {
+                        Text("Open", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                    }
                 }
             }
 
@@ -442,6 +495,7 @@ fun RedditLoginSheet(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            mainWebView = this
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT

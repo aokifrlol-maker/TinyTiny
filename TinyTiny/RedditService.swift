@@ -341,40 +341,86 @@ struct RedditLoginSheet: View {
     @EnvironmentObject private var store: UserStore
     var onSuccess: () -> Void
 
-    @State private var statusText = "Sign in · Google account? Or tap 'Email me a one-time link'"
+    @State private var statusText = "Tap 'Email me a one-time link', copy from Gmail, then tap Paste Link"
+    @State private var webViewRef: WKWebView? = nil
+    @State private var showPasteBar = false
+    @State private var pastedLink = ""
+
+    private func loadMagicLink(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "https" || scheme == "http") else {
+            statusText = "Copy the full https:// login link from your Reddit email first"
+            showPasteBar = true
+            return
+        }
+        statusText = "Opening one-time login link..."
+        showPasteBar = false
+        pastedLink = ""
+        webViewRef?.load(URLRequest(url: url))
+    }
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                RedditLoginWebView { sessionCookie, tokenV2, username in
-                    Task { @MainActor in
-                        let keepMix = store.data.redditSession.mixIntoForYou
-                        store.data.redditSession = RedditAccountSession(
-                            redditSessionCookie: sessionCookie,
-                            tokenV2: tokenV2,
-                            username: username,
-                            mixIntoForYou: keepMix
-                        )
-                        store.saveNow()
-                        onSuccess()
-                        dismiss()
+            VStack(spacing: 0) {
+                if showPasteBar {
+                    HStack(spacing: 8) {
+                        TextField("Paste Reddit email login link (https://...)", text: $pastedLink)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .font(.system(size: 13))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                            .foregroundStyle(.white)
+                        Button("Open") {
+                            loadMagicLink(pastedLink)
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Theme.accent, in: Capsule())
                     }
-                } onStatus: { msg in
-                    statusText = msg
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 0.12, green: 0.04, blue: 0.08))
                 }
 
-                HStack(spacing: 8) {
-                    Image(systemName: "lock.shield.fill")
-                        .foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.0))
-                    Text(statusText)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
+                ZStack(alignment: .bottom) {
+                    RedditLoginWebView(webViewRef: $webViewRef) { sessionCookie, tokenV2, username in
+                        Task { @MainActor in
+                            let keepMix = store.data.redditSession.mixIntoForYou
+                            store.data.redditSession = RedditAccountSession(
+                                redditSessionCookie: sessionCookie,
+                                tokenV2: tokenV2,
+                                username: username,
+                                mixIntoForYou: keepMix
+                            )
+                            store.saveNow()
+                            onSuccess()
+                            dismiss()
+                        }
+                    } onStatus: { msg in
+                        statusText = msg
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.0))
+                        Text(statusText)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 16)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: Capsule())
-                .padding(.bottom, 16)
             }
             .navigationTitle("Connect Reddit")
             .navigationBarTitleDisplayMode(.inline)
@@ -382,12 +428,23 @@ struct RedditLoginSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Paste Link") {
+                        if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           clip.lowercased().hasPrefix("http") {
+                            loadMagicLink(clip)
+                        } else {
+                            withAnimation { showPasteBar.toggle() }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 private struct RedditLoginWebView: UIViewRepresentable {
+    @Binding var webViewRef: WKWebView?
     var onCaptured: (String, String, String) -> Void
     var onStatus: (String) -> Void
 
@@ -412,6 +469,9 @@ private struct RedditLoginWebView: UIViewRepresentable {
 
         wv.load(URLRequest(url: URL(string: "https://www.reddit.com/login")!))
         context.coordinator.startPolling(webView: wv)
+        DispatchQueue.main.async {
+            self.webViewRef = wv
+        }
         return wv
     }
 
