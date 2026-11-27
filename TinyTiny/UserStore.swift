@@ -706,7 +706,7 @@ final class UserStore: ObservableObject {
             }
         }
 
-        let target: Double = post.isImage ? 0.0 : 1.0
+        let target: Double = post.isImage ? (weight > 0 ? 0.0 : 1.0) : (weight > 0 ? 1.0 : 0.0)
         let alpha = weight > 0 ? 0.06 : 0.02
         next.algorithm.videoPreference = min(max(next.algorithm.videoPreference + (target - next.algorithm.videoPreference) * alpha, 0.1), 0.95)
         data = next
@@ -1316,9 +1316,9 @@ enum AdultContentClassifier {
     @MainActor
     static func isEligible(_ post: Gif, source: FeedSource, categories: [GoonedCategory], store: UserStore) -> Bool {
         guard post.hasPlayableMedia else { return false }
-        // User's own personal Reddit feeds (Home / Popular / Saved / Upvoted) show all playable media
-        if source.isRedditPersonalFeed { return true }
+        if source == .redditSaved || source == .redditUpvoted { return true }
         guard !store.isBlockedByAlgorithm(post) else { return false }
+        if source.isRedditPersonalFeed { return true }
 
         if let sub = post.subreddit?.lowercased(), !sub.isEmpty {
             if sfwBlockedSubreddits.contains(sub) { return false }

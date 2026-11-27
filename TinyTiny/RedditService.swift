@@ -46,8 +46,13 @@ final class RedditPersonalAPI {
         try await fetchListing(oauthPath: "/best", webPath: "/.json", after: after)
     }
 
+    /// Strictly shows posts from subreddits the user has joined on Reddit.
+    func followingFeed(after: String?) async throws -> GoonedFeedResponse {
+        try await fetchListing(oauthPath: "/best", webPath: "/.json", after: after)
+    }
+
     func popularFeed(after: String?) async throws -> GoonedFeedResponse {
-        try await fetchListing(oauthPath: "/r/popular/hot", webPath: "/r/popular.json", after: after)
+        try await followingFeed(after: after)
     }
 
     func savedFeed(after: String?) async throws -> GoonedFeedResponse {
@@ -81,20 +86,18 @@ final class RedditPersonalAPI {
         req.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
         guard let (_, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse else { return nil }
-        let setCookies = (http.allHeaderFields["Set-Cookie"] as? String)
-            ?? (http.allHeaderFields["set-cookie"] as? String)
-            ?? ""
-        if let range = setCookies.range(of: #"token_v2=([^;\s]+)"#, options: .regularExpression) {
-            let token = String(setCookies[range]).replacingOccurrences(of: "token_v2=", with: "")
-            if !token.isEmpty {
-                await MainActor.run {
-                    var updated = UserStore.shared.data.redditSession
-                    updated.tokenV2 = token
-                    UserStore.shared.data.redditSession = updated
-                    UserStore.shared.saveNow()
-                }
-                return token
+        let headerFields = http.allHeaderFields.reduce(into: [String: String]()) { acc, pair in
+            if let k = pair.key as? String, let v = pair.value as? String { acc[k] = v }
+        }
+        let parsedCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+        if let token = parsedCookies.first(where: { $0.name == "token_v2" && !$0.value.isEmpty })?.value {
+            await MainActor.run {
+                var updated = UserStore.shared.data.redditSession
+                updated.tokenV2 = token
+                UserStore.shared.data.redditSession = updated
+                UserStore.shared.saveNow()
             }
+            return token
         }
         return nil
     }
@@ -346,22 +349,30 @@ final class RedditPersonalAPI {
             var firstH: Int? = nil
             for (idx, mid) in orderedIds.enumerated() {
                 guard let item = gallery[mid] as? [String: Any],
-                      let s = item["s"] as? [String: Any],
-                      let u = (s["u"] as? String ?? s["gif"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
-                      u.hasPrefix("http"),
-                      let urlObj = URL(string: u) else { continue }
-                if firstW == nil { firstW = s["x"] as? Int }
-                if firstH == nil { firstH = s["y"] as? Int }
-                slides.append(AlbumMediaItem(id: "rdg_\(mid)_\(idx)", url: urlObj, posterURL: urlObj, isVideo: false))
+                      let s = item["s"] as? [String: Any] else { continue }
+                if let mp4Str = (s["mp4"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
+                   mp4Str.hasPrefix("http"),
+                   let mp4Obj = URL(string: mp4Str) {
+                    if firstW == nil { firstW = s["x"] as? Int }
+                    if firstH == nil { firstH = s["y"] as? Int }
+                    let posterObj = ((s["gif"] as? String) ?? (s["u"] as? String))?.replacingOccurrences(of: "&amp;", with: "&").flatMap { URL(string: $0) }
+                    slides.append(AlbumMediaItem(id: "rdg_\(mid)_\(idx)", url: mp4Obj, posterURL: posterObj, isVideo: true))
+                } else if let u = (s["u"] as? String ?? s["gif"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
+                          u.hasPrefix("http"),
+                          let urlObj = URL(string: u) {
+                    if firstW == nil { firstW = s["x"] as? Int }
+                    if firstH == nil { firstH = s["y"] as? Int }
+                    slides.append(AlbumMediaItem(id: "rdg_\(mid)_\(idx)", url: urlObj, posterURL: urlObj, isVideo: false))
+                }
             }
             if let first = slides.first {
                 return ExtractedMedia(
-                    isImage: true,
+                    isImage: !first.isVideo,
                     primaryURL: first.url.absoluteString,
-                    sdURL: nil,
-                    hdURL: nil,
+                    sdURL: first.isVideo ? first.url.absoluteString : nil,
+                    hdURL: first.isVideo ? first.url.absoluteString : nil,
                     hlsURL: nil,
-                    extraVideos: [],
+                    extraVideos: first.isVideo ? [first.url.absoluteString] : [],
                     galleryItems: slides,
                     width: firstW,
                     height: firstH,
@@ -374,13 +385,14 @@ final class RedditPersonalAPI {
         let rawURL = ((node["url_overridden_by_dest"] as? String) ?? (node["url"] as? String) ?? "")
             .replacingOccurrences(of: "&amp;", with: "&")
         let lower = rawURL.lowercased()
-        let pathOnly = lower.split(separator: "?", maxSplits: 1).first.map(String.init) ?? lower
+        let baseNoQuery = String(rawURL.split(separator: "?", maxSplits: 1).first ?? Substring(rawURL))
+        let pathOnly = baseNoQuery.lowercased()
         if lower.hasPrefix("http") {
             if pathOnly.hasSuffix(".mp4") || pathOnly.hasSuffix(".mov") || lower.contains(".mp4?") {
                 return ExtractedMedia(isImage: false, primaryURL: rawURL, sdURL: rawURL, hdURL: rawURL, hlsURL: nil, extraVideos: [rawURL], galleryItems: [], width: nil, height: nil, duration: nil)
             }
             if pathOnly.hasSuffix(".gifv") {
-                let mp4 = String(rawURL.dropLast(5)) + ".mp4"
+                let mp4 = String(baseNoQuery.dropLast(5)) + ".mp4"
                 return ExtractedMedia(isImage: false, primaryURL: mp4, sdURL: mp4, hdURL: mp4, hlsURL: nil, extraVideos: [mp4], galleryItems: [], width: nil, height: nil, duration: nil)
             }
             if lower.contains("i.redd.it/") || lower.contains("preview.redd.it/") ||
@@ -388,6 +400,14 @@ final class RedditPersonalAPI {
                 pathOnly.hasSuffix(".png") || pathOnly.hasSuffix(".webp") || pathOnly.hasSuffix(".gif") {
                 return ExtractedMedia(isImage: true, primaryURL: rawURL, sdURL: nil, hdURL: nil, hlsURL: nil, extraVideos: [], galleryItems: [], width: nil, height: nil, duration: nil)
             }
+        }
+
+        // 5. Fallback for extensionless image posts & RedGIFs/Imgur preview images so no playable post is dropped
+        let postHint = (node["post_hint"] as? String)?.lowercased() ?? ""
+        let isSelf = (node["is_self"] as? Bool) ?? false
+        if !isSelf && (postHint == "image" || lower.contains("imgur.com/") || lower.contains("redgifs.com/") || lower.contains("reddit.com/media")),
+           let previewImg = extractThumb(from: node) {
+            return ExtractedMedia(isImage: true, primaryURL: previewImg, sdURL: nil, hdURL: nil, hlsURL: nil, extraVideos: [], galleryItems: [], width: nil, height: nil, duration: nil)
         }
 
         return nil

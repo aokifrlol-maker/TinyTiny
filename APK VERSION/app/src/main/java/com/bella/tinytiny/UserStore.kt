@@ -378,13 +378,16 @@ class UserStore private constructor() {
         val nextRem = cur.removedFollows.toMutableMap()
         val key = "x:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        val now = System.currentTimeMillis() / 1000.0
         val nowFollowing = if (idx >= 0) {
             next.removeAt(idx)
-            nextRem[key] = System.currentTimeMillis() / 1000.0
+            nextRem[key] = now
+            localAddedTimestamps.remove("follow:$key")
             false
         } else {
             next.add(0, clean)
             nextRem.remove(key)
+            localAddedTimestamps["follow:$key"] = now
             true
         }
         data.value = cur.copy(followedXUsers = next, removedFollows = trimTombstones(nextRem))
@@ -408,13 +411,16 @@ class UserStore private constructor() {
         val nextRem = cur.removedFollows.toMutableMap()
         val key = "ig:${clean.lowercase()}"
         val idx = next.indexOfFirst { it.equals(clean, ignoreCase = true) }
+        val now = System.currentTimeMillis() / 1000.0
         val nowFollowing = if (idx >= 0) {
             next.removeAt(idx)
-            nextRem[key] = System.currentTimeMillis() / 1000.0
+            nextRem[key] = now
+            localAddedTimestamps.remove("follow:$key")
             false
         } else {
             next.add(0, clean)
             nextRem.remove(key)
+            localAddedTimestamps["follow:$key"] = now
             true
         }
         data.value = cur.copy(followedIGUsers = next, removedFollows = trimTombstones(nextRem))
@@ -440,12 +446,15 @@ class UserStore private constructor() {
         val nextRem = cur.removedFollows.toMutableMap()
         val key = "of:${id.ifEmpty { cleanName }.lowercase()}"
         val idx = next.indexOfFirst { (id.isNotEmpty() && it.id == id) || it.handle.equals(cleanName, ignoreCase = true) }
+        val now = System.currentTimeMillis() / 1000.0
         if (idx >= 0) {
             next.removeAt(idx)
-            nextRem[key] = System.currentTimeMillis() / 1000.0
+            nextRem[key] = now
+            localAddedTimestamps.remove("follow:$key")
         } else {
             next.add(0, FollowedOFCreator(id, cleanName, displayName, avatarURL))
             nextRem.remove(key)
+            localAddedTimestamps["follow:$key"] = now
         }
         data.value = cur.copy(followedOFCreators = next, removedFollows = trimTombstones(nextRem))
         scheduleSave()
@@ -607,11 +616,14 @@ class UserStore private constructor() {
 
     fun dislike(post: Gif): SmartTasteEngine.DislikeOutcome {
         markSeen(post)
+        val outcome = SmartTasteEngine.shared.recordDislike(post, categories.value)
         recordAlgorithmSignal(post, -8.0)
-        return SmartTasteEngine.shared.recordDislike(post, categories.value)
+        return outcome
     }
 
     fun isBlockedByAlgorithm(post: Gif): Boolean {
+        if (SmartTasteEngine.shared.isDisliked(post)) return true
+        if (!data.value.settings.algorithmEnabled) return false
         val algo = data.value.algorithm
         val cats = categories.value
         if (SmartTasteEngine.shared.isSuppressedInDiscovery(post, cats)) return true

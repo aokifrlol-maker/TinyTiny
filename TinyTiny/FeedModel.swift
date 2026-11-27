@@ -50,7 +50,7 @@ enum FeedSource: Hashable {
         case .igSaved: return "IG Saved"
         case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
         case .redditHome: return "Reddit Home"
-        case .redditPopular: return "Reddit Popular"
+        case .redditPopular: return "Reddit Following"
         case .redditSaved: return "Reddit Saved"
         case .redditUpvoted: return "Reddit Upvoted"
         case .rule34(let tag):
@@ -556,7 +556,7 @@ final class FeedModel: ObservableObject {
 
                 let isDiscoverySource: Bool = {
                     switch source {
-                    case .forYou, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
+                    case .forYou, .redditHome, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
                         return true
                     default:
                         return false
@@ -607,7 +607,11 @@ final class FeedModel: ObservableObject {
                 }
 
                 switch source {
-                case .forYou, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
+                case .forYou:
+                    // fetchBalancedForYou already ranks per-bucket before DRR interleaving; preserve DRR balance!
+                    SmartTasteEngine.shared.ingestPostsIntoCreatorGraph(batchUnseen, categories: store.categories)
+                    SmartTasteEngine.shared.precomputeVisualSimilarity(for: batchUnseen)
+                case .redditHome, .xForYou, .igReels, .category, .rule34, .ofForYou, .ofTrending, .ofLatest, .ofDMs, .longVideos:
                     batchUnseen = store.rankWithAlgorithm(batchUnseen)
                 default:
                     break
@@ -839,9 +843,9 @@ final class FeedModel: ObservableObject {
         case .igUser(let handle):
             return await InstagramAPI.userReels(handle, after: cursor)
         case .redditHome:
-            return try await RedditPersonalAPI.shared.homeFeed(after: cursor)
+            return await fetchTailoredRedditHome(api: api, store: store, cursor: cursor)
         case .redditPopular:
-            return try await RedditPersonalAPI.shared.popularFeed(after: cursor)
+            return try await RedditPersonalAPI.shared.followingFeed(after: cursor)
         case .redditSaved:
             return try await RedditPersonalAPI.shared.savedFeed(after: cursor)
         case .redditUpvoted:
@@ -897,6 +901,65 @@ final class FeedModel: ObservableObject {
         case .list:
             return GoonedFeedResponse(posts: [], after: nil)
         }
+    }
+
+    /// Tailored Reddit Home: blends General NSFW Reddit discovery, taste-matched subreddits/categories,
+    /// and the user's personal Reddit home feed — ranked & personalized by UserStore + SmartTasteEngine.
+    private func fetchTailoredRedditHome(
+        api: GoonedAPI,
+        store: UserStore,
+        cursor: String?
+    ) async -> GoonedFeedResponse {
+        let algo = store.data.algorithm
+        let activeTasteTags = SmartTasteEngine.shared.activeQueryTags(
+            pinned: algo.boostedTags,
+            blocked: algo.blockedTags,
+            count: 6
+        )
+        let topSubs = Array(store.topAlgorithmSubreddits.prefix(4))
+        let rot = self.ofMixOffset
+        self.ofMixOffset += 1
+
+        async let personalTask: GoonedFeedResponse? = store.data.redditSession.isConnected
+            ? (try? await RedditPersonalAPI.shared.homeFeed(after: self.igMixAfterCursor))
+            : nil
+        async let generalNsfwTask: GoonedFeedResponse? = try? await api.forYou(sort: self.sort.rawValue, after: cursor, limit: 24)
+        async let tasteTask: [Gif] = {
+            var batch: [Gif] = []
+            if !activeTasteTags.isEmpty {
+                let pinned = algo.boostedTags.filter { !MediaMetaRegistry.isStopTag($0) }
+                let pool = !pinned.isEmpty ? pinned : activeTasteTags
+                let pick = pool[rot % pool.count].replacingOccurrences(of: "_", with: "")
+                if let cat = try? await api.category(pick, sort: self.sort.rawValue, after: nil, limit: 16), !cat.posts.isEmpty {
+                    batch.append(contentsOf: cat.posts)
+                } else if let sub = try? await api.subreddit(pick, sort: self.sort.rawValue, after: nil, limit: 16) {
+                    batch.append(contentsOf: sub.posts)
+                }
+            }
+            if !topSubs.isEmpty {
+                let subPick = topSubs[rot % topSubs.count]
+                if let subResp = try? await api.subreddit(subPick, sort: self.sort.rawValue, after: nil, limit: 14) {
+                    batch.append(contentsOf: subResp.posts)
+                }
+            }
+            return batch
+        }()
+
+        let (pResp, gResp, tPosts) = await (personalTask, generalNsfwTask, tasteTask)
+        if let pa = pResp?.after { self.igMixAfterCursor = pa }
+
+        var combined: [Gif] = []
+        var seen = Set<String>()
+        let buckets = [pResp?.posts ?? [], tPosts, gResp?.posts ?? []]
+        let maxLen = buckets.map(\.count).max() ?? 0
+        for i in 0..<maxLen {
+            for b in buckets where i < b.count {
+                let g = b[i]
+                if seen.insert(g.id).inserted { combined.append(g) }
+            }
+        }
+        let nextCursor = gResp?.after ?? GoonedAPI.randomForYouCursor(offset: Int.random(in: 1...10) * 25)
+        return GoonedFeedResponse(posts: combined, after: nextCursor)
     }
 
     // MARK: - Balanced Multi-Source General For You

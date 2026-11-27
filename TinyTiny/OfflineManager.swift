@@ -136,9 +136,14 @@ final class OfflineManager: ObservableObject {
         ensureIndexReady()
         let stem = safeFileStem(for: id)
         indexLock.lock()
-        let found = thumbIndex[stem] ?? mediaIndex[stem]
+        let thumb = thumbIndex[stem]
+        let media = mediaIndex[stem]
         indexLock.unlock()
-        return found
+        if let thumb { return thumb }
+        if let media, ["jpg", "jpeg", "png", "webp", "gif"].contains(media.pathExtension.lowercased()) {
+            return media
+        }
+        return nil
     }
 
     func localMediaURL(for gif: Gif) -> URL? {

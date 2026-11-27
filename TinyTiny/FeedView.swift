@@ -769,6 +769,10 @@ final class PlayerModel: ObservableObject {
         sizeObservation = nil
         loadItemTask?.cancel()
         loadItemTask = nil
+        previewGenerator?.cancelAllCGImageGeneration()
+        previewGenerator = nil
+        lastPreviewAssetURL = nil
+        scrubPreviewImage = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         teardownGeneration += 1
         let gen = teardownGeneration
@@ -818,6 +822,7 @@ struct FeedView: View {
                         GoonedReelCell(
                             gif: gif,
                             isActive: onScreen && isVisible && shareTarget == nil && currentID == gif.id,
+                            isCurrentPage: currentID == gif.id,
                             sort: model.sort,
                             onSelectSort: { model.setSort($0) },
                             onOpenCategories: onOpenCategories,
@@ -1265,6 +1270,7 @@ struct FeedStateView: View {
 struct GoonedReelCell: View {
     let gif: Gif
     let isActive: Bool
+    var isCurrentPage: Bool = true
     let sort: FeedSort
     var onSelectSort: (FeedSort) -> Void
     var onOpenCategories: () -> Void
@@ -1706,7 +1712,7 @@ struct GoonedReelCell: View {
             if !preloadedAlbum.isEmpty {
                 albumItems = preloadedAlbum
             }
-            if isActive {
+            if isCurrentPage {
                 scheduleActivePrepare()
             }
         }
@@ -1721,14 +1727,22 @@ struct GoonedReelCell: View {
             albumItems = []
             albumIndex = 0
         }
-        .onChange(of: isActive) { _, nowActive in
-            if nowActive {
+        .onChange(of: isCurrentPage) { _, nowCurrent in
+            if nowCurrent {
                 scheduleActivePrepare()
             } else {
                 activateTask?.cancel()
                 activateTask = nil
                 speedLocked2x = false
                 player.teardown()
+            }
+        }
+        .onChange(of: isActive) { _, nowActive in
+            if nowActive && !player.isReady && activateTask == nil {
+                scheduleActivePrepare()
+            } else if !nowActive {
+                speedLocked2x = false
+                player.pause()
             }
         }
         .onChange(of: shouldPlay) { _, _ in

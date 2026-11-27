@@ -55,7 +55,8 @@ object RedditPersonalAPI {
     private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
     suspend fun homeFeed(after: String? = null): GoonedFeedResponse = fetchListing("/best", "/.json", after)
-    suspend fun popularFeed(after: String? = null): GoonedFeedResponse = fetchListing("/r/popular/hot", "/r/popular.json", after)
+    suspend fun followingFeed(after: String? = null): GoonedFeedResponse = fetchListing("/best", "/.json", after)
+    suspend fun popularFeed(after: String? = null): GoonedFeedResponse = followingFeed(after)
 
     suspend fun savedFeed(after: String? = null): GoonedFeedResponse {
         val uname = UserStore.shared.data.value.redditSession.username
@@ -374,21 +375,30 @@ object RedditPersonalAPI {
             var firstH: Int? = null
             for ((idx, mid) in orderedIds.withIndex()) {
                 val s = gallery.optJSONObject(mid)?.optJSONObject("s") ?: continue
-                val u = (s.optString("u").ifEmpty { s.optString("gif") }).replace("&amp;", "&")
-                if (u.startsWith("http")) {
+                val mp4 = s.optString("mp4").replace("&amp;", "&").takeIf { it.startsWith("http") }
+                if (mp4 != null) {
                     if (firstW == null) firstW = s.optInt("x", 0).takeIf { it > 0 }
                     if (firstH == null) firstH = s.optInt("y", 0).takeIf { it > 0 }
-                    slides.add(AlbumMediaItem(id = "rdg_${mid}_$idx", url = u, posterUrl = u, isVideo = false))
+                    val poster = (s.optString("gif").ifEmpty { s.optString("u") }).replace("&amp;", "&").takeIf { it.startsWith("http") }
+                    slides.add(AlbumMediaItem(id = "rdg_${mid}_$idx", url = mp4, posterUrl = poster, isVideo = true))
+                } else {
+                    val u = (s.optString("u").ifEmpty { s.optString("gif") }).replace("&amp;", "&")
+                    if (u.startsWith("http")) {
+                        if (firstW == null) firstW = s.optInt("x", 0).takeIf { it > 0 }
+                        if (firstH == null) firstH = s.optInt("y", 0).takeIf { it > 0 }
+                        slides.add(AlbumMediaItem(id = "rdg_${mid}_$idx", url = u, posterUrl = u, isVideo = false))
+                    }
                 }
             }
             if (slides.isNotEmpty()) {
+                val first = slides.first()
                 return ExtractedMedia(
-                    isImage = true,
-                    primaryUrl = slides.first().url,
-                    sdUrl = null,
-                    hdUrl = null,
+                    isImage = !first.isVideo,
+                    primaryUrl = first.url,
+                    sdUrl = if (first.isVideo) first.url else null,
+                    hdUrl = if (first.isVideo) first.url else null,
                     hlsUrl = null,
-                    extraVideos = emptyList(),
+                    extraVideos = if (first.isVideo) listOf(first.url) else emptyList(),
                     galleryItems = slides,
                     width = firstW,
                     height = firstH,
@@ -400,13 +410,14 @@ object RedditPersonalAPI {
         // 4. Direct URL (strip ?query before extension check)
         val rawUrl = (node.optString("url_overridden_by_dest").ifEmpty { node.optString("url") }).replace("&amp;", "&")
         val lower = rawUrl.lowercase()
-        val pathOnly = lower.substringBefore("?")
+        val baseNoQuery = rawUrl.substringBefore("?")
+        val pathOnly = baseNoQuery.lowercase()
         if (lower.startsWith("http")) {
             if (pathOnly.endsWith(".mp4") || pathOnly.endsWith(".mov") || lower.contains(".mp4?")) {
                 return ExtractedMedia(false, rawUrl, rawUrl, rawUrl, null, listOf(rawUrl), emptyList(), null, null, null)
             }
             if (pathOnly.endsWith(".gifv")) {
-                val mp4 = rawUrl.dropLast(5) + ".mp4"
+                val mp4 = baseNoQuery.dropLast(5) + ".mp4"
                 return ExtractedMedia(false, mp4, mp4, mp4, null, listOf(mp4), emptyList(), null, null, null)
             }
             if (lower.contains("i.redd.it/") || lower.contains("preview.redd.it/") ||
@@ -414,6 +425,16 @@ object RedditPersonalAPI {
                 pathOnly.endsWith(".png") || pathOnly.endsWith(".webp") || pathOnly.endsWith(".gif")
             ) {
                 return ExtractedMedia(true, rawUrl, null, null, null, emptyList(), emptyList(), null, null, null)
+            }
+        }
+
+        // 5. Fallback for extensionless image posts & RedGIFs/Imgur previews so no playable post is dropped
+        val postHint = node.optString("post_hint").lowercase()
+        val isSelf = node.optBoolean("is_self", false)
+        if (!isSelf && (postHint == "image" || lower.contains("imgur.com/") || lower.contains("redgifs.com/") || lower.contains("reddit.com/media"))) {
+            val previewImg = extractThumb(node)
+            if (previewImg != null) {
+                return ExtractedMedia(true, previewImg, null, null, null, emptyList(), emptyList(), null, null, null)
             }
         }
 
@@ -535,7 +556,7 @@ fun RedditLoginSheet(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text("Connect Reddit", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text(statusText, color = Theme.textSecondary, fontSize = 11.5.sp, maxLines = 1)
+                    Text(statusText, color = Theme.textSecondary, fontSize = 11.5.sp, maxLines = 2)
                 }
                 TextButton(onClick = {
                     val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager

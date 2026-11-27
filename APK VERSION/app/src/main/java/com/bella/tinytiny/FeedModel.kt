@@ -65,12 +65,12 @@ sealed class FeedSource {
     val isLongVideoFeed: Boolean get() = this is LongVideos || this is LongSearch
 
     val isInfiniteSource: Boolean
-        get() = this is ForYou || this is Rule34 || this is LongVideos || this is OFForYou ||
+        get() = this is ForYou || this is RedditHome || this is Rule34 || this is LongVideos || this is OFForYou ||
             this is OFTrending || this is OFLatest || this is OFDMs || this is XForYou || this is IGReels
 
     val isDiscoverySource: Boolean
         get() = when (this) {
-            is ForYou, is XForYou, is IGReels, is Category, is Rule34, is OFForYou,
+            is ForYou, is RedditHome, is XForYou, is IGReels, is Category, is Rule34, is OFForYou,
             is OFTrending, is OFLatest, is OFDMs, is LongVideos -> true
             else -> false
         }
@@ -93,7 +93,7 @@ sealed class FeedSource {
             is IGSaved -> "IG Saved"
             is IGUser -> "IG @${handle.replace("@", "")}"
             is RedditHome -> "Reddit Home"
-            is RedditPopular -> "Reddit Popular"
+            is RedditPopular -> "Reddit Following"
             is RedditSaved -> "Reddit Saved"
             is RedditUpvoted -> "Reddit Upvoted"
             is Rule34 -> {
@@ -482,10 +482,18 @@ class FeedModel(
                             batch.add(post)
                         }
                     }
-                    val out = if (src.isDiscoverySource) {
-                        SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
-                        UserStore.shared.rankWithAlgorithm(batch)
-                    } else batch
+                    val out = when {
+                        src is FeedSource.ForYou -> {
+                            // fetchBalancedForYou already ranks per-bucket before DRR interleaving; preserve DRR balance!
+                            SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
+                            batch
+                        }
+                        src.isDiscoverySource -> {
+                            SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
+                            UserStore.shared.rankWithAlgorithm(batch)
+                        }
+                        else -> batch
+                    }
                     out to seenLocal
                 }
                 if (gen != loadGen || source.value != src) return
@@ -588,8 +596,8 @@ class FeedModel(
         is FeedSource.IGFollowing -> InstagramAPI.followingFeed(cursor)
         is FeedSource.IGSaved -> InstagramAPI.savedFeed(cursor)
         is FeedSource.IGUser -> InstagramAPI.userReels(src.handle, cursor)
-        is FeedSource.RedditHome -> RedditPersonalAPI.homeFeed(cursor)
-        is FeedSource.RedditPopular -> RedditPersonalAPI.popularFeed(cursor)
+        is FeedSource.RedditHome -> fetchTailoredRedditHome(s, cursor)
+        is FeedSource.RedditPopular -> RedditPersonalAPI.followingFeed(cursor)
         is FeedSource.RedditSaved -> RedditPersonalAPI.savedFeed(cursor)
         is FeedSource.RedditUpvoted -> RedditPersonalAPI.upvotedFeed(cursor)
         is FeedSource.Rule34 -> Rule34API.fetchFeed(src.tag, s.rawValue, cursor, UserStore.shared.data.value.r34Credentials)
@@ -610,41 +618,84 @@ class FeedModel(
         is FeedSource.CustomList -> GoonedFeedResponse()
     }
 
-    // Multi-source Following feed matching iOS (Reddit + X + IG + OnlyFans)
+    // Tailored Reddit Home: blends General NSFW Reddit discovery, taste-matched subreddits/categories,
+    // and the user's personal Reddit home feed — ranked & personalized by UserStore + SmartTasteEngine.
+    private suspend fun fetchTailoredRedditHome(s: FeedSort, cursor: String?): GoonedFeedResponse = coroutineScope {
+        val d = UserStore.shared.data.value
+        val algo = d.algorithm
+        val tasteTags = SmartTasteEngine.shared.activeQueryTags(algo.boostedTags, algo.blockedTags, 6)
+        val topSubs = UserStore.shared.topAlgorithmSubreddits(4)
+
+        val personalDef = if (d.redditSession.isConnected) async {
+            try { RedditPersonalAPI.homeFeed(mixPersonalRedditCursor) } catch (_: Throwable) { null }
+        } else null
+        val generalDef = async {
+            try { GoonedAPI.forYou(s.rawValue, after = cursor) } catch (_: Throwable) { null }
+        }
+        val tasteDef = async {
+            val out = mutableListOf<Gif>()
+            val pickTag = (algo.boostedTags.ifEmpty { tasteTags }).randomOrNull()?.replace("_", "")
+            if (!pickTag.isNullOrEmpty()) {
+                val cat = try { GoonedAPI.category(pickTag, s.rawValue, limit = 16).posts } catch (_: Throwable) { emptyList() }
+                if (cat.isNotEmpty()) out.addAll(cat)
+                else out.addAll(try { GoonedAPI.subreddit(pickTag, s.rawValue, limit = 16).posts } catch (_: Throwable) { emptyList() })
+            }
+            val pickSub = topSubs.randomOrNull()
+            if (!pickSub.isNullOrEmpty()) {
+                out.addAll(try { GoonedAPI.subreddit(pickSub, s.rawValue, limit = 14).posts } catch (_: Throwable) { emptyList() })
+            }
+            out
+        }
+
+        val pResp = personalDef?.await()
+        val gResp = generalDef.await()
+        val tPosts = tasteDef.await()
+        pResp?.after?.let { mixPersonalRedditCursor = it }
+
+        val buckets = listOf(pResp?.posts ?: emptyList(), tPosts, gResp?.posts ?: emptyList())
+        val maxLen = buckets.maxOfOrNull { it.size } ?: 0
+        val mixed = mutableListOf<Gif>()
+        val seen = mutableSetOf<String>()
+        for (i in 0 until maxLen) {
+            for (b in buckets) {
+                if (i < b.size && seen.add(b[i].id)) mixed.add(b[i])
+            }
+        }
+        val nextCursor = gResp?.after ?: GoonedAPI.randomForYouCursor(Random.nextInt(1, 10) * 25)
+        GoonedFeedResponse(mixed, nextCursor)
+    }
+
+    // Multi-source Following feed matching iOS (Reddit + X + IG + OnlyFans) — per-creator cursor keys!
     private suspend fun fetchMultiFollowing(): GoonedFeedResponse = coroutineScope {
         val d = UserStore.shared.data.value
         val pools = mutableListOf<String>()
         if (d.followedSubreddits.isNotEmpty() || d.followedUsers.isNotEmpty()) pools.add("reddit")
+        if (d.redditSession.isConnected) pools.add("reddit_personal")
         if (d.xSession.isConnected) pools.add("x_following")
         if (d.igSession.isConnected) pools.add("ig_following")
-        if (d.followedOFCreators.isNotEmpty()) pools.add("of")
-        if (d.followedXUsers.isNotEmpty() && d.xSession.isConnected) pools.add("x_users")
-        if (d.followedIGUsers.isNotEmpty() && d.igSession.isConnected) pools.add("ig_users")
+        for (c in d.followedOFCreators) pools.add("of:${c.id}|${c.handle}")
+        if (d.xSession.isConnected) for (u in d.followedXUsers) pools.add("x_user:$u")
+        if (d.igSession.isConnected) for (u in d.followedIGUsers) pools.add("ig_user:$u")
         if (pools.isEmpty()) return@coroutineScope GoonedFeedResponse()
 
         val picks = (0 until minOf(2, pools.size)).map { i -> pools[(followingRoundRobin + i) % pools.size] }
-        followingRoundRobin = (followingRoundRobin + picks.size) % pools.size
+        followingRoundRobin += picks.size
 
         val tasks = picks.map { pool ->
             async {
                 val cur = followingCursors[pool]
                 try {
-                    val resp = when (pool) {
-                        "reddit" -> GoonedAPI.following(d.followedSubreddits, d.followedUsers, cur)
-                        "x_following" -> XAPI.following(cur)
-                        "ig_following" -> InstagramAPI.followingFeed(cur)
-                        "of" -> {
-                            val c = d.followedOFCreators[followingRoundRobin % d.followedOFCreators.size]
-                            OnlyFansAPI.fetchCreatorPosts(c.id, c.handle, "hot", cur)
+                    val resp = when {
+                        pool == "reddit" -> GoonedAPI.following(d.followedSubreddits, d.followedUsers, cur)
+                        pool == "reddit_personal" -> RedditPersonalAPI.followingFeed(cur)
+                        pool == "x_following" -> XAPI.following(cur)
+                        pool == "ig_following" -> InstagramAPI.followingFeed(cur)
+                        pool.startsWith("of:") -> {
+                            val parts = pool.removePrefix("of:").split("|", limit = 2)
+                            OnlyFansAPI.fetchCreatorPosts(parts[0], parts.getOrElse(1) { parts[0] }, "hot", cur)
                         }
-                        "x_users" -> {
-                            val u = d.followedXUsers[followingRoundRobin % d.followedXUsers.size]
-                            XAPI.userTweets(u, cur)
-                        }
-                        "ig_users" -> {
-                            val u = d.followedIGUsers[followingRoundRobin % d.followedIGUsers.size]
-                            InstagramAPI.userReels(u, cur)
-                        }
+                        pool.startsWith("x_user:") -> XAPI.userTweets(pool.removePrefix("x_user:"), cur)
+                        pool.startsWith("ig_user:") -> InstagramAPI.userReels(pool.removePrefix("ig_user:"), cur)
                         else -> GoonedFeedResponse()
                     }
                     resp.after?.let { followingCursors[pool] = it }

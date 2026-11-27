@@ -197,10 +197,12 @@ fun FeedView(
                 )
             } else {
                 val gif = items[pageIdx]
-                val isActive = isVisible && pagerState.currentPage == pageIdx && shareTarget == null
+                val isCurrentPage = pagerState.currentPage == pageIdx
+                val isActive = isVisible && isCurrentPage && shareTarget == null
                 GoonedReelCell(
                     gif = gif,
                     isActive = isActive,
+                    isCurrentPage = isCurrentPage,
                     sort = sort,
                     tinted = userData.settings.tintedGlass,
                     onSelectSort = { model.setSort(it) },
@@ -309,6 +311,7 @@ fun FeedView(
 fun GoonedReelCell(
     gif: Gif,
     isActive: Boolean,
+    isCurrentPage: Boolean = isActive,
     sort: FeedSort,
     tinted: Boolean,
     onSelectSort: (FeedSort) -> Unit,
@@ -416,9 +419,9 @@ fun GoonedReelCell(
         }
     }
 
-    // Build ExoPlayer with reused OkHttp clients + fast-start LoadControl + AudioFocus + SimpleCache + HLS MIME
-    val exoPlayer = remember(gif.id, activeVideoUrl, isActive, useReferer, retryToken) {
-        if (!isActive || activeVideoUrl == null || isShowingImage) null
+    // Build ExoPlayer keyed on isCurrentPage so Share/Settings/Tab switches pause instead of destroying & resetting to 0:00!
+    val exoPlayer = remember(gif.id, activeVideoUrl, isCurrentPage, useReferer, retryToken) {
+        if (!isCurrentPage || activeVideoUrl == null || isShowingImage) null
         else {
             playbackFailed = false
             isFirstFrameRendered = false
@@ -520,11 +523,11 @@ fun GoonedReelCell(
         }
     }
 
-    LaunchedEffect(exoPlayer, isActive, userPaused, isScrubbing, userData.settings.autoScroll, userData.settings.playVideosToEnd) {
+    LaunchedEffect(exoPlayer, isActive, userPaused, isScrubbing, showMoreSheet, userData.settings.autoScroll, userData.settings.playVideosToEnd) {
         if (exoPlayer != null) {
             exoPlayer.repeatMode = if (userData.settings.autoScroll && userData.settings.playVideosToEnd) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
             exoPlayer.volume = if (userData.settings.muted) 0f else 1f
-            exoPlayer.playWhenReady = isActive && !userPaused && !isScrubbing
+            exoPlayer.playWhenReady = isActive && !userPaused && !isScrubbing && !showMoreSheet
             exoPlayer.setPlaybackSpeed(if (isHolding || speedLocked2x) 2.0f else 1.0f)
         }
     }
@@ -1654,7 +1657,8 @@ fun PostMoreSheet(
                                 gif.isXPost -> onSelectXUser(u)
                                 gif.isIGPost -> onSelectIGUser(u)
                                 gif.isRule34Post -> onSelectRule34Tag(if (!u.equals("rule34", true)) "user:$u" else "")
-                                else -> onSelectUser(u)
+                                !gif.isLongVideoPost -> onSelectUser(u)
+                                else -> {}
                             }
                         }
                         .padding(14.dp)

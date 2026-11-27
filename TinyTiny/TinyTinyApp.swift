@@ -557,6 +557,7 @@ struct GoonedMainShell: View {
                     switch activeChannel {
                     case .longErome: return .erome
                     case .xForYou, .xFollowing, .xBookmarks: return .x
+                    case .redditHome, .redditPopular, .redditSaved, .redditUpvoted: return .reddit
                     case .igReels, .igFollowing, .igSaved: return .ig
                     case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return .of
                     case .rule34: return .rule34
@@ -1166,7 +1167,7 @@ struct GoonedMainShell: View {
             } else if isRedditChannel {
                 subChannelBar([
                     (.redditHome, "Home", .redditHome),
-                    (.redditPopular, "Popular", .redditPopular),
+                    (.redditPopular, "Following", .redditPopular),
                     (.redditSaved, "Saved", .redditSaved),
                     (.redditUpvoted, "Upvoted", .redditUpvoted)
                 ]) { selectRedditFeedOrLogin($0) }

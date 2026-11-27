@@ -766,7 +766,7 @@ fun GoonedMainShell() {
                     )
                     isRedditGroup -> listOf(
                         Triple("Home", activeChannel == HomeChannel.REDDIT_HOME, { selectRedditOrLogin(FeedSource.RedditHome) }),
-                        Triple("Popular", activeChannel == HomeChannel.REDDIT_POPULAR, { selectRedditOrLogin(FeedSource.RedditPopular) }),
+                        Triple("Following", activeChannel == HomeChannel.REDDIT_POPULAR, { selectRedditOrLogin(FeedSource.RedditPopular) }),
                         Triple("Saved", activeChannel == HomeChannel.REDDIT_SAVED, { selectRedditOrLogin(FeedSource.RedditSaved) }),
                         Triple("Upvoted", activeChannel == HomeChannel.REDDIT_UPVOTED, { selectRedditOrLogin(FeedSource.RedditUpvoted) })
                     )
@@ -889,6 +889,7 @@ fun GoonedMainShell() {
                     isOFGroup -> BrowseScope.ONLYFANS
                     activeChannel == HomeChannel.RULE34 -> BrowseScope.RULE34
                     isXGroup -> BrowseScope.X
+                    isRedditGroup -> BrowseScope.REDDIT
                     isIGGroup -> BrowseScope.IG
                     activeChannel == HomeChannel.LONG_EROME -> BrowseScope.EROME
                     isLongGroup -> BrowseScope.LONG_VIDEOS
@@ -1003,9 +1004,9 @@ fun GoonedMainShell() {
         if (showSettingsModal) {
             GoonedSettingsModal(
                 onDismiss = { showSettingsModal = false },
-                onConnectX = { showSettingsModal = false; showXLogin = true },
-                onConnectIG = { showSettingsModal = false; showIGLogin = true },
-                onConnectReddit = { showSettingsModal = false; showRedditLogin = true },
+                onConnectX = { showSettingsModal = false; pendingFeedAfterLogin = null; showXLogin = true },
+                onConnectIG = { showSettingsModal = false; pendingFeedAfterLogin = null; showIGLogin = true },
+                onConnectReddit = { showSettingsModal = false; pendingFeedAfterLogin = null; showRedditLogin = true },
                 onSetupR34Key = { showSettingsModal = false; showR34Key = true }
             )
         }
