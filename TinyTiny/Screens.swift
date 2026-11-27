@@ -2136,6 +2136,7 @@ struct GoonedSettingsModal: View {
     @Binding var isPresented: Bool
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
+    var onConnectReddit: () -> Void = {}
     var onSetupR34Key: () -> Void
     @EnvironmentObject var store: UserStore
     @EnvironmentObject var app: AppState
@@ -2335,6 +2336,53 @@ struct GoonedSettingsModal: View {
                                         .font(.system(size: 14, weight: .semibold))
                                     Spacer()
                                     Toggle("", isOn: $store.data.igSession.mixIntoForYou)
+                                        .labelsHidden()
+                                        .tint(Theme.accent)
+                                }
+                            }
+
+                            Divider().overlay(Color.white.opacity(0.14))
+
+                            // Personal Reddit Account (Dedicated Tab — Isolated from Regular For You unless opted in)
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle().fill(Color(red: 1.0, green: 0.27, blue: 0.0)).frame(width: 38, height: 38)
+                                    Text("r/").font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Personal Reddit")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text(store.data.redditSession.isConnected ? "Connected as u/\(store.data.redditSession.username)" : "Sign in for your personal Home, Saved & Upvoted")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                }
+                                Spacer()
+                                Button {
+                                    if store.data.redditSession.isConnected {
+                                        store.disconnectReddit()
+                                    } else {
+                                        onConnectReddit()
+                                    }
+                                } label: {
+                                    Text(store.data.redditSession.isConnected ? "Disconnect" : "Connect")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 13)
+                                        .padding(.vertical, 8)
+                                        .liquidGlassCapsule(active: !store.data.redditSession.isConnected)
+                                }
+                            }
+
+                            if store.data.redditSession.isConnected {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Mix Personal Reddit into For You")
+                                            .font(.system(size: 14, weight: .semibold))
+                                        Text("Off by default — keeps regular For You untouched")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.white.opacity(0.55))
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: $store.data.redditSession.mixIntoForYou)
                                         .labelsHidden()
                                         .tint(Theme.accent)
                                 }

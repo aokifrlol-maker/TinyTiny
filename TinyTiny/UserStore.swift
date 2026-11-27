@@ -86,6 +86,7 @@ struct UserData: Codable {
     var settings = AppSettings()
     var xSession = XAccountSession()
     var igSession = InstagramAccountSession()
+    var redditSession = RedditAccountSession()
     var r34Credentials = Rule34Credentials()
     var algorithm = AlgorithmProfile()
     var removedLikedIDs: [String: Double] = [:]
@@ -94,7 +95,7 @@ struct UserData: Codable {
 
     enum CodingKeys: String, CodingKey {
         case liked, downloaded, followedSubreddits, followedUsers, followedXUsers, followedIGUsers, followedOFCreators
-        case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, r34Credentials, algorithm
+        case recentFeeds, seenIDs, savedCursors, swipedTotal, settings, xSession, igSession, redditSession, r34Credentials, algorithm
         case removedLikedIDs, removedDownloadedIDs, removedFollows
     }
 
@@ -116,6 +117,7 @@ struct UserData: Codable {
         settings = (try? c.decode(AppSettings.self, forKey: .settings)) ?? AppSettings()
         xSession = (try? c.decode(XAccountSession.self, forKey: .xSession)) ?? XAccountSession()
         igSession = (try? c.decode(InstagramAccountSession.self, forKey: .igSession)) ?? InstagramAccountSession()
+        redditSession = (try? c.decode(RedditAccountSession.self, forKey: .redditSession)) ?? RedditAccountSession()
         r34Credentials = (try? c.decode(Rule34Credentials.self, forKey: .r34Credentials)) ?? Rule34Credentials()
         algorithm = (try? c.decode(AlgorithmProfile.self, forKey: .algorithm)) ?? AlgorithmProfile()
         removedLikedIDs = (try? c.decode([String: Double].self, forKey: .removedLikedIDs)) ?? [:]
@@ -130,6 +132,7 @@ final class UserStore: ObservableObject {
 
     private(set) var seenSet: Set<String>
     private var _seenIDs: [String]
+    private var _savedCursors: [String: String]
     var localAddedTimestamps: [String: Double] = [:]
     @Published var data: UserData { didSet { scheduleSave() } }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
@@ -151,6 +154,7 @@ final class UserStore: ObservableObject {
         }
         self._seenIDs = loaded.seenIDs
         self.seenSet = Set(loaded.seenIDs)
+        self._savedCursors = loaded.savedCursors
         self.data = loaded
         sanitizeLearnedProfile()
         Self.configureAudioSession(muted: loaded.settings.muted)
@@ -187,12 +191,14 @@ final class UserStore: ObservableObject {
     func exportSnapshotForBackup() -> UserData {
         var snapshot = data
         snapshot.seenIDs = _seenIDs
+        snapshot.savedCursors = _savedCursors
         return snapshot
     }
 
     func saveNow() {
         var snapshot = data
         snapshot.seenIDs = _seenIDs
+        snapshot.savedCursors = _savedCursors
         let url = Self.fileURL
         Self.saveQueue.async {
             if let raw = CryptoBox.sealCodable(snapshot) {
@@ -243,6 +249,7 @@ final class UserStore: ObservableObject {
         if options.keepAccounts {
             fresh.xSession = data.xSession
             fresh.igSession = data.igSession
+            fresh.redditSession = data.redditSession
             fresh.r34Credentials = data.r34Credentials
         }
         if options.keepAlgorithm {
@@ -357,20 +364,22 @@ final class UserStore: ObservableObject {
     }
 
     func savedCursor(for key: String) -> String? {
-        data.savedCursors[key]
+        _savedCursors[key]
     }
 
     func setSavedCursor(_ cursor: String?, for key: String) {
         if let cursor, !cursor.isEmpty {
-            data.savedCursors[key] = cursor
+            _savedCursors[key] = cursor
         } else {
-            data.savedCursors.removeValue(forKey: key)
+            _savedCursors.removeValue(forKey: key)
         }
+        scheduleSave()
     }
 
     func clearSeenHistory() {
         seenSet.removeAll()
         _seenIDs.removeAll()
+        _savedCursors.removeAll()
         data.seenIDs.removeAll()
         data.savedCursors.removeAll()
         saveNow()
@@ -606,23 +615,30 @@ final class UserStore: ObservableObject {
         Task { await InstagramWebEngine.shared.resetSession() }
     }
 
+    func disconnectReddit() {
+        data.redditSession = RedditAccountSession()
+        Task { await RedditPersonalAPI.clearCookies() }
+    }
+
     // MARK: - Pick Up Where You Left Off (Swipe Tracking)
 
     func recordSwipe(kind: String, name: String, displayTitle: String, postID: String? = nil) {
         if let postID { markSeen(postID) }
-        data.swipedTotal += 1
-        if let idx = data.recentFeeds.firstIndex(where: { $0.kind == kind && $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            var entry = data.recentFeeds.remove(at: idx)
+        var next = data
+        next.swipedTotal += 1
+        if let idx = next.recentFeeds.firstIndex(where: { $0.kind == kind && $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            var entry = next.recentFeeds.remove(at: idx)
             entry.swipedCount += 1
             entry.updatedAt = Date()
-            data.recentFeeds.insert(entry, at: 0)
+            next.recentFeeds.insert(entry, at: 0)
         } else {
             let entry = RecentFeedEntry(kind: kind, name: name, displayTitle: displayTitle, swipedCount: 1, updatedAt: Date())
-            data.recentFeeds.insert(entry, at: 0)
+            next.recentFeeds.insert(entry, at: 0)
         }
-        if data.recentFeeds.count > 8 {
-            data.recentFeeds = Array(data.recentFeeds.prefix(8))
+        if next.recentFeeds.count > 8 {
+            next.recentFeeds = Array(next.recentFeeds.prefix(8))
         }
+        data = next
     }
 
     // MARK: - Porn-Specific Preference Learning & Content Filtering
@@ -646,33 +662,32 @@ final class UserStore: ObservableObject {
 
         SmartTasteEngine.shared.ingestPostIntoCreatorGraph(post, categories: categories)
 
-        // Time decay so recent preferences outweigh stale ones
-        data.algorithm.totalSignals += 1
-        if data.algorithm.totalSignals % 35 == 0 {
-            data.algorithm.subredditWeights = data.algorithm.subredditWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
-            data.algorithm.creatorWeights = data.algorithm.creatorWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
-            data.algorithm.tagWeights = data.algorithm.tagWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
+        // Batch all algorithm mutations into a single UserData assignment to avoid SwiftUI re-render storms
+        var next = data
+        next.algorithm.totalSignals += 1
+        if next.algorithm.totalSignals % 35 == 0 {
+            next.algorithm.subredditWeights = next.algorithm.subredditWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
+            next.algorithm.creatorWeights = next.algorithm.creatorWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
+            next.algorithm.tagWeights = next.algorithm.tagWeights.mapValues { $0 * 0.92 }.filter { abs($0.value) > 0.2 }
         }
 
         if let sub = post.subreddit?.lowercased(), !sub.isEmpty,
            !AdultContentClassifier.sfwBlockedSubreddits.contains(sub),
            !MediaMetaRegistry.isStopTag(sub) {
-            let cur = data.algorithm.subredditWeights[sub] ?? 0
-            data.algorithm.subredditWeights[sub] = min(max(cur + weight, -12), 45)
+            let cur = next.algorithm.subredditWeights[sub] ?? 0
+            next.algorithm.subredditWeights[sub] = min(max(cur + weight, -12), 45)
         }
         if let author = post.author?.lowercased(), !author.isEmpty,
            !["instagram", "x_user", "rule34", "eporner", "pornhub", "xhamster", "spankbang", "xvideos"].contains(author) {
-            let cur = data.algorithm.creatorWeights[author] ?? 0
-            data.algorithm.creatorWeights[author] = min(max(cur + weight * 1.15, -12), 45)
+            let cur = next.algorithm.creatorWeights[author] ?? 0
+            next.algorithm.creatorWeights[author] = min(max(cur + weight * 1.15, -12), 45)
         }
 
-        // Extract both direct and creator-cluster inherited tags (so tagless IG/X/OF videos still train & reinforce clusters)
         let recognized = SmartTasteEngine.extractExtendedTags(from: post, categories: categories)
         for tag in recognized where !MediaMetaRegistry.isStopTag(tag) {
-            let cur = data.algorithm.tagWeights[tag] ?? 0
-            // Contrastive Protection: when weight < 0 (dislike / fast skip), do NOT nuke tags the user already loves or pinned!
+            let cur = next.algorithm.tagWeights[tag] ?? 0
             if weight < 0 {
-                let isPinned = data.algorithm.boostedTags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+                let isPinned = next.algorithm.boostedTags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
                 if isPinned || cur >= 3.0 {
                     continue
                 }
@@ -682,15 +697,16 @@ final class UserStore: ObservableObject {
             }
             let updated = min(max(cur + weight * 0.85, -12), 45)
             if abs(updated) < 0.15 {
-                data.algorithm.tagWeights.removeValue(forKey: tag)
+                next.algorithm.tagWeights.removeValue(forKey: tag)
             } else {
-                data.algorithm.tagWeights[tag] = updated
+                next.algorithm.tagWeights[tag] = updated
             }
         }
 
         let target: Double = post.isImage ? 0.0 : 1.0
         let alpha = weight > 0 ? 0.06 : 0.02
-        data.algorithm.videoPreference = min(max(data.algorithm.videoPreference + (target - data.algorithm.videoPreference) * alpha, 0.1), 0.95)
+        next.algorithm.videoPreference = min(max(next.algorithm.videoPreference + (target - next.algorithm.videoPreference) * alpha, 0.1), 0.95)
+        data = next
         if weight > 0 {
             SmartTasteEngine.shared.recordPositiveEngagement(for: post, intensity: weight, categories: categories)
         }
@@ -870,9 +886,7 @@ final class UserStore: ObservableObject {
 
     /// Ranks posts using an 80/20 Exploit-Explore mix so For You feels personalized yet never repetitive.
     func rankWithAlgorithm(_ posts: [Gif]) -> [Gif] {
-        for p in posts {
-            SmartTasteEngine.shared.ingestPostIntoCreatorGraph(p, categories: categories)
-        }
+        SmartTasteEngine.shared.ingestPostsIntoCreatorGraph(posts, categories: categories)
         SmartTasteEngine.shared.precomputeVisualSimilarity(for: posts)
         guard data.settings.algorithmEnabled, posts.count > 3 else {
             return posts.shuffled()

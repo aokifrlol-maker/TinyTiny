@@ -355,17 +355,7 @@ final class VideoPreloader {
                     cachedAssets.removeValue(forKey: oldest)
                 }
             }
-            // Pre-buffer only the next 2 upcoming videos to avoid exhausting hardware decoders
-            if idx < 2, preloadedItems[key] == nil {
-                let item = AVPlayerItem(asset: asset)
-                item.preferredForwardBufferDuration = 1.5
-                preloadedItems[key] = item
-                itemOrder.append(key)
-                if itemOrder.count > 2, let oldestItemKey = itemOrder.first {
-                    itemOrder.removeFirst()
-                    preloadedItems.removeValue(forKey: oldestItemKey)
-                }
-            }
+            // Warm asset metadata off the main thread only (avoid synchronous AVPlayerItem creation on MainActor)
             if idx < 2 {
                 Task.detached(priority: .utility) {
                     _ = try? await asset.load(.isPlayable)
@@ -419,6 +409,7 @@ final class PlayerModel: ObservableObject {
     private var previewGenerator: AVAssetImageGenerator?
     private var lastPreviewAssetURL: URL?
     private var lastPreviewRequestAt: Date = .distantPast
+    private var lastSeekRequestAt: Date = .distantPast
 
     private var looper: AVPlayerLooper?
     private var endObserver: NSObjectProtocol?
@@ -460,9 +451,11 @@ final class PlayerModel: ObservableObject {
                 if ratio >= 0.97 && self.progressState.progress < 0.97 {
                     self.onClipEnded?()
                 }
-                self.progressState.currentSeconds = cur
-                self.progressState.durationSeconds = d
-                self.progressState.progress = ratio
+                if abs(self.progressState.progress - ratio) >= 0.004 || abs(self.progressState.currentSeconds - cur) >= 0.24 {
+                    self.progressState.currentSeconds = cur
+                    self.progressState.durationSeconds = d
+                    self.progressState.progress = ratio
+                }
                 if abs(self.durationSeconds - d) > 0.25 {
                     self.durationSeconds = d
                 }
@@ -699,11 +692,18 @@ final class PlayerModel: ObservableObject {
         let dur = item.duration.seconds
         guard dur.isFinite, dur > 0 else { return }
         let clamped = min(max(ratio, 0), 0.995)
-        let target = CMTime(seconds: dur * clamped, preferredTimescale: 600)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         progressState.progress = clamped
         progressState.currentSeconds = dur * clamped
         progressState.durationSeconds = dur
+        let now = Date()
+        guard now.timeIntervalSince(lastSeekRequestAt) >= 0.075 else { return }
+        lastSeekRequestAt = now
+        let target = CMTime(seconds: dur * clamped, preferredTimescale: 600)
+        player.seek(
+            to: target,
+            toleranceBefore: CMTime(seconds: 0.15, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.15, preferredTimescale: 600)
+        )
     }
 
     func generateScrubPreview(atSeconds seconds: Double) {
@@ -754,7 +754,10 @@ final class PlayerModel: ObservableObject {
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         looper?.disableLooping()
         looper = nil
-        player.removeAllItems()
+        let p = player
+        DispatchQueue.main.async {
+            p.removeAllItems()
+        }
         prepared = false
         progressState.progress = 0
         progressState.currentSeconds = 0
@@ -778,6 +781,7 @@ struct FeedView: View {
     var onSelectOFCreator: (String, String) -> Void
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
+    var onConnectReddit: () -> Void = {}
 
     @EnvironmentObject var store: UserStore
     @State private var onScreen = false
@@ -832,7 +836,8 @@ struct FeedView: View {
                             model: model,
                             onOpenCategories: onOpenCategories,
                             onConnectX: onConnectX,
-                            onConnectIG: onConnectIG
+                            onConnectIG: onConnectIG,
+                            onConnectReddit: onConnectReddit
                         )
                         .containerRelativeFrame([.horizontal, .vertical])
                     }
@@ -875,7 +880,7 @@ struct FeedView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
                 .liquidGlassCapsule(tinted: store.data.settings.tintedGlass)
-                .padding(.top, 114)
+                .padding(.top, 128)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
@@ -1091,6 +1096,7 @@ struct FeedStateView: View {
     var onOpenCategories: () -> Void
     var onConnectX: () -> Void
     var onConnectIG: () -> Void
+    var onConnectReddit: () -> Void = {}
     @EnvironmentObject var store: UserStore
 
     var body: some View {
@@ -1145,6 +1151,29 @@ struct FeedStateView: View {
                     .padding(.horizontal, 36)
                 Button(action: onConnectIG) {
                     Text("Sign in with Instagram")
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 12)
+                        .liquidGlassCapsule(tinted: true, active: true)
+                }
+            } else if model.source.isRedditPersonalFeed && !store.data.redditSession.isConnected {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 1.0, green: 0.27, blue: 0.0))
+                        .frame(width: 68, height: 68)
+                    Text("r/")
+                        .font(.system(size: 28, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                Text("Connect Personal Reddit")
+                    .font(.title3.bold())
+                Text("Sign in once to browse your personal Reddit Home, Popular, Saved & Upvoted feeds without affecting your regular For You.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+                Button(action: onConnectReddit) {
+                    Text("Sign in with Reddit")
                         .font(.subheadline.bold())
                         .padding(.horizontal, 26)
                         .padding(.vertical, 12)
@@ -1393,7 +1422,7 @@ struct GoonedReelCell: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
                         .liquidGlassCapsule(tinted: true, active: true)
-                        .padding(.top, 112)
+                        .padding(.top, 124)
                         Spacer()
                     }
                     .allowsHitTesting(false)
@@ -2039,7 +2068,7 @@ struct GoonedReelCell: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .liquidGlassCapsule(tinted: true, active: true)
-            .padding(.top, 58)
+            .padding(.top, 124)
 
             Spacer()
 

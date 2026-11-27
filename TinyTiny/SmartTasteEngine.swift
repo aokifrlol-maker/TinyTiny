@@ -331,20 +331,34 @@ final class SmartTasteEngine: ObservableObject {
     /// Observes a post's metadata and updates its creator's latent cluster vector so future tagless posts
     /// from the same creator or co-engaged cluster automatically inherit those taste dimensions.
     func ingestPostIntoCreatorGraph(_ post: Gif, categories: [GoonedCategory]) {
-        guard let cKey = Self.creatorClusterKey(for: post) else { return }
-        let directTags = Self.extractDirectTagsOnly(from: post, categories: categories)
-        guard !directTags.isEmpty else { return }
-        var cluster = state.creatorLatentClusters[cKey] ?? [:]
-        for tag in directTags where !MediaMetaRegistry.isStopTag(tag) {
-            cluster[tag] = min(25.0, (cluster[tag] ?? 0) + 1.0)
+        ingestPostsIntoCreatorGraph([post], categories: categories)
+    }
+
+    /// Batched creator-graph ingestion: updates all posts in a single state assignment so SwiftUI
+    /// does not re-render once per post during feed pagination.
+    func ingestPostsIntoCreatorGraph(_ posts: [Gif], categories: [GoonedCategory]) {
+        var nextClusters = state.creatorLatentClusters
+        var changed = false
+        for post in posts {
+            guard let cKey = Self.creatorClusterKey(for: post) else { continue }
+            let directTags = Self.extractDirectTagsOnly(from: post, categories: categories)
+            guard !directTags.isEmpty else { continue }
+            var cluster = nextClusters[cKey] ?? [:]
+            for tag in directTags where !MediaMetaRegistry.isStopTag(tag) {
+                cluster[tag] = min(25.0, (cluster[tag] ?? 0) + 1.0)
+            }
+            if cluster.count > 16 {
+                let top = cluster.sorted { $0.value > $1.value }.prefix(16)
+                cluster = Dictionary(uniqueKeysWithValues: top.map { ($0.key, $0.value) })
+            }
+            nextClusters[cKey] = cluster
+            if nextClusters.count > 800, let oldest = nextClusters.keys.first {
+                nextClusters.removeValue(forKey: oldest)
+            }
+            changed = true
         }
-        if cluster.count > 16 {
-            let top = cluster.sorted { $0.value > $1.value }.prefix(16)
-            cluster = Dictionary(uniqueKeysWithValues: top.map { ($0.key, $0.value) })
-        }
-        state.creatorLatentClusters[cKey] = cluster
-        if state.creatorLatentClusters.count > 800, let oldest = state.creatorLatentClusters.keys.first {
-            state.creatorLatentClusters.removeValue(forKey: oldest)
+        if changed {
+            state.creatorLatentClusters = nextClusters
         }
     }
 

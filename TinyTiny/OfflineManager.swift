@@ -20,7 +20,25 @@ final class OfflineManager: ObservableObject {
         return URLSession(configuration: cfg)
     }()
 
+    private static let indexLock = NSLock()
+    private nonisolated(unsafe) static var cachedVaultDir: URL? = nil
+    private nonisolated(unsafe) static var mediaIndex: [String: URL] = [:]
+    private nonisolated(unsafe) static var thumbIndex: [String: URL] = [:]
+    private nonisolated(unsafe) static var indexReady: Bool = false
+
+    private init() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            Self.ensureIndexReady()
+        }
+    }
+
     nonisolated static var vaultDirectory: URL {
+        indexLock.lock()
+        if let cached = cachedVaultDir {
+            indexLock.unlock()
+            return cached
+        }
+        indexLock.unlock()
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("OfflineVault", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
@@ -34,7 +52,68 @@ final class OfflineManager: ObservableObject {
             var mutableDir = dir
             try? mutableDir.setResourceValues(rv)
         }
+        indexLock.lock()
+        cachedVaultDir = dir
+        indexLock.unlock()
         return dir
+    }
+
+    nonisolated private static func ensureIndexReady() {
+        indexLock.lock()
+        if indexReady {
+            indexLock.unlock()
+            return
+        }
+        indexLock.unlock()
+
+        let dir = vaultDirectory
+        var mMap: [String: URL] = [:]
+        var tMap: [String: URL] = [:]
+        let validExts: Set<String> = ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"]
+        if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for f in files {
+                let name = f.lastPathComponent
+                if name.hasSuffix("_thumb.jpg") {
+                    let stem = String(name.dropLast("_thumb.jpg".count))
+                    tMap[stem] = f
+                } else {
+                    let ext = f.pathExtension.lowercased()
+                    if validExts.contains(ext) {
+                        let stem = f.deletingPathExtension().lastPathComponent
+                        mMap[stem] = f
+                    }
+                }
+            }
+        }
+        indexLock.lock()
+        if !indexReady {
+            mediaIndex = mMap
+            thumbIndex = tMap
+            indexReady = true
+        }
+        indexLock.unlock()
+    }
+
+    nonisolated static func registerIndexedFile(stem: String, mediaURL: URL? = nil, thumbURL: URL? = nil) {
+        indexLock.lock()
+        if let m = mediaURL { mediaIndex[stem] = m }
+        if let t = thumbURL { thumbIndex[stem] = t }
+        indexLock.unlock()
+    }
+
+    nonisolated static func removeIndexedFile(stem: String) {
+        indexLock.lock()
+        mediaIndex.removeValue(forKey: stem)
+        thumbIndex.removeValue(forKey: stem)
+        indexLock.unlock()
+    }
+
+    nonisolated static func clearIndexedFiles() {
+        indexLock.lock()
+        mediaIndex.removeAll()
+        thumbIndex.removeAll()
+        indexReady = true
+        indexLock.unlock()
     }
 
     nonisolated static func safeFileStem(for id: String) -> String {
@@ -45,24 +124,21 @@ final class OfflineManager: ObservableObject {
     }
 
     nonisolated static func localMediaURL(forId id: String) -> URL? {
+        ensureIndexReady()
         let stem = safeFileStem(for: id)
-        let dir = vaultDirectory
-        for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
-            let candidate = dir.appendingPathComponent("\(stem).\(ext)")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
+        indexLock.lock()
+        let found = mediaIndex[stem]
+        indexLock.unlock()
+        return found
     }
 
     nonisolated static func localThumbURL(forId id: String) -> URL? {
+        ensureIndexReady()
         let stem = safeFileStem(for: id)
-        let thumb = vaultDirectory.appendingPathComponent("\(stem)_thumb.jpg")
-        if FileManager.default.fileExists(atPath: thumb.path) {
-            return thumb
-        }
-        return localMediaURL(forId: id)
+        indexLock.lock()
+        let found = thumbIndex[stem] ?? mediaIndex[stem]
+        indexLock.unlock()
+        return found
     }
 
     func localMediaURL(for gif: Gif) -> URL? {
@@ -199,6 +275,12 @@ final class OfflineManager: ObservableObject {
                         await generateVideoThumbnail(from: destURL, to: thumbDest)
                     }
 
+                    Self.registerIndexedFile(
+                        stem: stem,
+                        mediaURL: destURL,
+                        thumbURL: FileManager.default.fileExists(atPath: thumbDest.path) ? thumbDest : nil
+                    )
+
                     activeDownloads[gif.id] = 1.0
                     UserStore.shared.recordDownload(gif)
                     UserStore.shared.saveNow()
@@ -261,11 +343,14 @@ final class OfflineManager: ObservableObject {
 
     func removeDownload(_ gif: Gif, deleteFromPhotos: Bool = true) {
         let stem = Self.safeFileStem(for: gif.id)
+        Self.removeIndexedFile(stem: stem)
         let dir = Self.vaultDirectory
-        for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem).\(ext)"))
+        DispatchQueue.global(qos: .utility).async {
+            for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem).\(ext)"))
+            }
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem)_thumb.jpg"))
         }
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem)_thumb.jpg"))
         if deleteFromPhotos {
             deleteSavedPhotos(forIds: [gif.id])
         }
@@ -275,11 +360,14 @@ final class OfflineManager: ObservableObject {
 
     func clearAllDownloads() {
         let allIds = UserStore.shared.data.downloaded.map(\.id)
+        Self.clearIndexedFiles()
         deleteSavedPhotos(forIds: allIds)
         let dir = Self.vaultDirectory
-        if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            for f in files {
-                try? FileManager.default.removeItem(at: f)
+        DispatchQueue.global(qos: .utility).async {
+            if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                for f in files {
+                    try? FileManager.default.removeItem(at: f)
+                }
             }
         }
         UserStore.shared.clearAllDownloadedRecords()

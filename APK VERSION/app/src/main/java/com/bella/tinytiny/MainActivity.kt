@@ -58,6 +58,7 @@ enum class GoonedDockTab { HOME, LIKES, BROWSE, PROFILE }
 enum class HomeChannel {
     FOLLOWING, FOR_YOU,
     X_FOR_YOU, X_FOLLOWING, X_BOOKMARKS, X_LIKES,
+    REDDIT_HOME, REDDIT_POPULAR, REDDIT_SAVED, REDDIT_UPVOTED,
     RULE34,
     IG_REELS, IG_FOLLOWING, IG_SAVED,
     OF_FOR_YOU, OF_TRENDING, OF_LATEST, OF_DMS,
@@ -182,37 +183,6 @@ fun RootView() {
                 if (hasUnlockedOnce || !requirePasscodeOnOpen) {
                     GoonedMainShell()
                 }
-                val ann = remember(remoteConfig, dismissedAnn) { LicenseManager.activeAnnouncement }
-                AnimatedVisibility(
-                    visible = ann != null,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
-                    modifier = Modifier.align(Alignment.TopCenter)
-                ) {
-                    if (ann != null) {
-                        Row(
-                            modifier = Modifier
-                                .statusBarsPadding()
-                                .padding(top = 104.dp, start = 14.dp, end = 14.dp)
-                                .fillMaxWidth()
-                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                                .background(Color(0xEB290A17))
-                                .border(1.dp, Theme.accentBright.copy(alpha = 0.45f), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Campaign, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(ann.second, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, modifier = Modifier.weight(1f))
-                            IconButton(
-                                onClick = { LicenseManager.dismissAnnouncement(ann.first) },
-                                modifier = Modifier.size(26.dp).liquidGlassCircle(true)
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(13.dp))
-                            }
-                        }
-                    }
-                }
                 val maint = remoteConfig?.maintenance?.takeIf { it.isNotEmpty() }
                 if (!LicenseManager.isAdmin && maint != null) {
                     RemoteGateOverlay("Maintenance", maint, Icons.Default.Build, userData.settings.tintedGlass) { LicenseManager.verifySilently() }
@@ -294,6 +264,10 @@ fun GoonedMainShell() {
     val xFollowingModel = remember { FeedModel(FeedSource.XFollowing) }
     val xBookmarksModel = remember { FeedModel(FeedSource.XBookmarks) }
     val xLikesModel = remember { FeedModel(FeedSource.XLikes) }
+    val redditHomeModel = remember { FeedModel(FeedSource.RedditHome) }
+    val redditPopularModel = remember { FeedModel(FeedSource.RedditPopular) }
+    val redditSavedModel = remember { FeedModel(FeedSource.RedditSaved) }
+    val redditUpvotedModel = remember { FeedModel(FeedSource.RedditUpvoted) }
     val r34Model = remember { FeedModel(FeedSource.Rule34("")) }
     val igReelsModel = remember { FeedModel(FeedSource.IGReels) }
     val igFollowingModel = remember { FeedModel(FeedSource.IGFollowing) }
@@ -314,6 +288,7 @@ fun GoonedMainShell() {
 
     var activeChannel by remember { mutableStateOf(HomeChannel.FOR_YOU) }
     var lastXChannel by remember { mutableStateOf(HomeChannel.X_FOR_YOU) }
+    var lastRedditChannel by remember { mutableStateOf(HomeChannel.REDDIT_HOME) }
     var lastIGChannel by remember { mutableStateOf(HomeChannel.IG_REELS) }
     var lastOFChannel by remember { mutableStateOf(HomeChannel.OF_FOR_YOU) }
     var lastLongChannel by remember { mutableStateOf(HomeChannel.LONG_ALL) }
@@ -325,6 +300,7 @@ fun GoonedMainShell() {
     var showSettingsModal by remember { mutableStateOf(false) }
     var showXLogin by remember { mutableStateOf(false) }
     var showIGLogin by remember { mutableStateOf(false) }
+    var showRedditLogin by remember { mutableStateOf(false) }
     var showR34Key by remember { mutableStateOf(false) }
     var pendingFeedAfterLogin by remember { mutableStateOf<FeedSource?>(null) }
 
@@ -357,6 +333,10 @@ fun GoonedMainShell() {
         HomeChannel.X_FOLLOWING -> xFollowingModel
         HomeChannel.X_BOOKMARKS -> xBookmarksModel
         HomeChannel.X_LIKES -> xLikesModel
+        HomeChannel.REDDIT_HOME -> redditHomeModel
+        HomeChannel.REDDIT_POPULAR -> redditPopularModel
+        HomeChannel.REDDIT_SAVED -> redditSavedModel
+        HomeChannel.REDDIT_UPVOTED -> redditUpvotedModel
         HomeChannel.RULE34 -> r34Model
         HomeChannel.IG_REELS -> igReelsModel
         HomeChannel.IG_FOLLOWING -> igFollowingModel
@@ -415,13 +395,14 @@ fun GoonedMainShell() {
         }
     }
 
-    val hasAnyOverlayOrBack = showSettingsModal || showXLogin || showIGLogin || showR34Key ||
+    val hasAnyOverlayOrBack = showSettingsModal || showXLogin || showIGLogin || showRedditLogin || showR34Key ||
         creatorGridSource != null || activeTab != GoonedDockTab.HOME || activeChannel == HomeChannel.CUSTOM
 
     BackHandler(enabled = hasAnyOverlayOrBack) {
         when {
             showXLogin -> showXLogin = false
             showIGLogin -> showIGLogin = false
+            showRedditLogin -> showRedditLogin = false
             showR34Key -> showR34Key = false
             showSettingsModal -> showSettingsModal = false
             creatorGridSource != null -> creatorGridSource = null
@@ -465,6 +446,10 @@ fun GoonedMainShell() {
             FeedSource.XFollowing -> switchToChannel(HomeChannel.X_FOLLOWING, xFollowingModel, forceReload)
             FeedSource.XBookmarks -> switchToChannel(HomeChannel.X_BOOKMARKS, xBookmarksModel, forceReload)
             FeedSource.XLikes -> switchToChannel(HomeChannel.X_LIKES, xLikesModel, forceReload)
+            FeedSource.RedditHome -> { lastRedditChannel = HomeChannel.REDDIT_HOME; switchToChannel(HomeChannel.REDDIT_HOME, redditHomeModel, forceReload) }
+            FeedSource.RedditPopular -> { lastRedditChannel = HomeChannel.REDDIT_POPULAR; switchToChannel(HomeChannel.REDDIT_POPULAR, redditPopularModel, forceReload) }
+            FeedSource.RedditSaved -> { lastRedditChannel = HomeChannel.REDDIT_SAVED; switchToChannel(HomeChannel.REDDIT_SAVED, redditSavedModel, forceReload) }
+            FeedSource.RedditUpvoted -> { lastRedditChannel = HomeChannel.REDDIT_UPVOTED; switchToChannel(HomeChannel.REDDIT_UPVOTED, redditUpvotedModel, forceReload) }
             FeedSource.IGReels -> switchToChannel(HomeChannel.IG_REELS, igReelsModel, forceReload)
             FeedSource.IGFollowing -> switchToChannel(HomeChannel.IG_FOLLOWING, igFollowingModel, forceReload)
             FeedSource.IGSaved -> switchToChannel(HomeChannel.IG_SAVED, igSavedModel, forceReload)
@@ -512,6 +497,11 @@ fun GoonedMainShell() {
         else { pendingFeedAfterLogin = src; showIGLogin = true }
     }
 
+    fun selectRedditOrLogin(src: FeedSource) {
+        if (userData.redditSession.isConnected) selectFeed(src)
+        else { pendingFeedAfterLogin = src; showRedditLogin = true }
+    }
+
     LaunchedEffect(receivedPost) {
         receivedPost?.let { p ->
             pushBack(activeTab)
@@ -552,6 +542,7 @@ fun GoonedMainShell() {
     }
 
     val isXGroup = activeChannel in setOf(HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES)
+    val isRedditGroup = activeChannel in setOf(HomeChannel.REDDIT_HOME, HomeChannel.REDDIT_POPULAR, HomeChannel.REDDIT_SAVED, HomeChannel.REDDIT_UPVOTED)
     val isIGGroup = activeChannel in setOf(HomeChannel.IG_REELS, HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED)
     val isOFGroup = activeChannel in setOf(HomeChannel.OF_FOR_YOU, HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS)
     val isLongGroup = activeChannel in setOf(HomeChannel.LONG_ALL, HomeChannel.LONG_EPORNER, HomeChannel.LONG_XVIDEOS, HomeChannel.LONG_PORNHUB, HomeChannel.LONG_XHAMSTER, HomeChannel.LONG_SPANKBANG)
@@ -572,6 +563,7 @@ fun GoonedMainShell() {
             HomeChannel.FOLLOWING,
             HomeChannel.FOR_YOU,
             HomeChannel.X_FOR_YOU,
+            HomeChannel.REDDIT_HOME,
             HomeChannel.RULE34,
             HomeChannel.IG_REELS,
             HomeChannel.OF_FOR_YOU,
@@ -602,6 +594,7 @@ fun GoonedMainShell() {
                                 }
                                 val curBase = when {
                                     isXGroup -> HomeChannel.X_FOR_YOU
+                                    isRedditGroup -> HomeChannel.REDDIT_HOME
                                     isIGGroup -> HomeChannel.IG_REELS
                                     isOFGroup -> HomeChannel.OF_FOR_YOU
                                     isLongGroup -> HomeChannel.LONG_ALL
@@ -615,6 +608,7 @@ fun GoonedMainShell() {
                                             HomeChannel.FOLLOWING -> selectFeed(FeedSource.Following)
                                             HomeChannel.FOR_YOU -> selectFeed(FeedSource.ForYou)
                                             HomeChannel.X_FOR_YOU -> selectXOrLogin(FeedSource.XForYou)
+                                            HomeChannel.REDDIT_HOME -> selectRedditOrLogin(FeedSource.RedditHome)
                                             HomeChannel.RULE34 -> selectFeed(FeedSource.Rule34(""))
                                             HomeChannel.IG_REELS -> selectIGOrLogin(FeedSource.IGReels)
                                             HomeChannel.OF_FOR_YOU -> selectFeed(FeedSource.OFForYou)
@@ -634,7 +628,7 @@ fun GoonedMainShell() {
             key(activeChannel) {
                 FeedView(
                     model = activeModel,
-                    isVisible = isAppForeground && activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showR34Key && creatorGridSource == null,
+                    isVisible = isAppForeground && activeTab == GoonedDockTab.HOME && !showSettingsModal && !showXLogin && !showIGLogin && !showRedditLogin && !showR34Key && creatorGridSource == null,
                     targetPostId = slotPostIDs[activeChannel],
                     onCurrentPostChanged = { slotPostIDs[activeChannel] = it },
                     onOpenCategories = { activeTab = GoonedDockTab.BROWSE },
@@ -645,7 +639,8 @@ fun GoonedMainShell() {
                     onSelectRule34Tag = { selectFeed(FeedSource.Rule34(it)) },
                     onSelectOFCreator = { id, h -> selectFeed(FeedSource.OFCreator(id, h, null)) },
                     onConnectX = { pendingFeedAfterLogin = if (activeModel.source.value.isXFeed) activeModel.source.value else FeedSource.XForYou; showXLogin = true },
-                    onConnectIG = { pendingFeedAfterLogin = if (activeModel.source.value.isIGFeed) activeModel.source.value else FeedSource.IGReels; showIGLogin = true }
+                    onConnectIG = { pendingFeedAfterLogin = if (activeModel.source.value.isIGFeed) activeModel.source.value else FeedSource.IGReels; showIGLogin = true },
+                    onConnectReddit = { pendingFeedAfterLogin = if (activeModel.source.value.isRedditPersonalFeed) activeModel.source.value else FeedSource.RedditHome; showRedditLogin = true }
                 )
             }
         }
@@ -700,6 +695,17 @@ fun GoonedMainShell() {
                                 selectXOrLogin(target)
                             }) {
                                 BrandLogoX(26.dp, active = isXGroup, connected = userData.xSession.isConnected)
+                            }
+                            ChannelIconTab(active = isRedditGroup, onClick = {
+                                val target = when (lastRedditChannel) {
+                                    HomeChannel.REDDIT_POPULAR -> FeedSource.RedditPopular
+                                    HomeChannel.REDDIT_SAVED -> FeedSource.RedditSaved
+                                    HomeChannel.REDDIT_UPVOTED -> FeedSource.RedditUpvoted
+                                    else -> FeedSource.RedditHome
+                                }
+                                selectRedditOrLogin(target)
+                            }) {
+                                BrandLogoReddit(26.dp, active = isRedditGroup, connected = userData.redditSession.isConnected)
                             }
                             ChannelIconTab(active = activeChannel == HomeChannel.RULE34, onClick = { selectFeed(FeedSource.Rule34("")) }) {
                                 BrandLogoRule34(26.dp, active = activeChannel == HomeChannel.RULE34)
@@ -757,6 +763,12 @@ fun GoonedMainShell() {
                         Triple("Bookmarks", activeChannel == HomeChannel.X_BOOKMARKS, { selectXOrLogin(FeedSource.XBookmarks) }),
                         Triple("Likes", activeChannel == HomeChannel.X_LIKES, { selectXOrLogin(FeedSource.XLikes) })
                     )
+                    isRedditGroup -> listOf(
+                        Triple("Home", activeChannel == HomeChannel.REDDIT_HOME, { selectRedditOrLogin(FeedSource.RedditHome) }),
+                        Triple("Popular", activeChannel == HomeChannel.REDDIT_POPULAR, { selectRedditOrLogin(FeedSource.RedditPopular) }),
+                        Triple("Saved", activeChannel == HomeChannel.REDDIT_SAVED, { selectRedditOrLogin(FeedSource.RedditSaved) }),
+                        Triple("Upvoted", activeChannel == HomeChannel.REDDIT_UPVOTED, { selectRedditOrLogin(FeedSource.RedditUpvoted) })
+                    )
                     isIGGroup -> listOf(
                         Triple("Reels", activeChannel == HomeChannel.IG_REELS, { selectIGOrLogin(FeedSource.IGReels) }),
                         Triple("Following", activeChannel == HomeChannel.IG_FOLLOWING, { selectIGOrLogin(FeedSource.IGFollowing) }),
@@ -803,6 +815,49 @@ fun GoonedMainShell() {
                                     fontWeight = if (isAct) FontWeight.Bold else FontWeight.Medium
                                 )
                             }
+                        }
+                    }
+                }
+
+                // Polished Announcement Pill — ONLY visible on General "For You"
+                val remoteCfg by LicenseManager.remoteConfig.collectAsState()
+                val dismissedAnnId by LicenseManager.dismissedAnnouncementId.collectAsState()
+                val activeAnn = remember(remoteCfg, dismissedAnnId) { LicenseManager.activeAnnouncement }
+                if (activeChannel == HomeChannel.FOR_YOU && !hasAnyOverlayOrBack && activeAnn != null) {
+                    Row(
+                        modifier = Modifier
+                            .padding(top = 6.dp, start = 14.dp, end = 14.dp)
+                            .fillMaxWidth()
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                            .background(Color(0xEB240A17))
+                            .border(1.dp, Theme.accentBright.copy(alpha = 0.48f), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(Theme.accent.copy(alpha = 0.24f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Campaign, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(14.dp))
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            activeAnn.second,
+                            color = Color.White,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        IconButton(
+                            onClick = { LicenseManager.dismissAnnouncement(activeAnn.first) },
+                            modifier = Modifier.size(24.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.12f))
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(12.dp))
                         }
                     }
                 }
@@ -947,6 +1002,7 @@ fun GoonedMainShell() {
                 onDismiss = { showSettingsModal = false },
                 onConnectX = { showSettingsModal = false; showXLogin = true },
                 onConnectIG = { showSettingsModal = false; showIGLogin = true },
+                onConnectReddit = { showSettingsModal = false; showRedditLogin = true },
                 onSetupR34Key = { showSettingsModal = false; showR34Key = true }
             )
         }
@@ -968,6 +1024,16 @@ fun GoonedMainShell() {
                     pendingFeedAfterLogin = null
                 },
                 onDismiss = { showIGLogin = false }
+            )
+        }
+        if (showRedditLogin) {
+            RedditLoginSheet(
+                onSuccess = {
+                    showRedditLogin = false
+                    selectFeed(pendingFeedAfterLogin ?: FeedSource.RedditHome, forceReload = true)
+                    pendingFeedAfterLogin = null
+                },
+                onDismiss = { showRedditLogin = false }
             )
         }
         if (showR34Key) {

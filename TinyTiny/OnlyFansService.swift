@@ -316,11 +316,17 @@ actor OnlyFansAPI {
         _ rows: [OFPostRow],
         fallbackCreatorId: String? = nil,
         fallbackCreatorName: String? = nil,
-        videosOnly: Bool = true
+        videosOnly: Bool = true,
+        strictCreatorId: String? = nil,
+        ignoreGenderFilter: Bool = false
     ) -> [Gif] {
-        let hiddenGenders = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
+        let hiddenGenders = ignoreGenderFilter ? Set<String>() : Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         var out: [Gif] = []
         for row in rows {
+            if let expected = strictCreatorId, !expected.isEmpty,
+               let actual = row.creatorId, !actual.isEmpty, actual != expected {
+                continue
+            }
             let cid = row.creatorId ?? fallbackCreatorId ?? "0"
             let cname = row.creatorName ?? fallbackCreatorName ?? "creator"
             let cachedCreator = creatorById[cid] ?? creatorByName[cname.lowercased()]
@@ -369,11 +375,17 @@ actor OnlyFansAPI {
         _ rows: [OFDmRow],
         fallbackCreatorId: String? = nil,
         fallbackCreatorName: String? = nil,
-        videosOnly: Bool = true
+        videosOnly: Bool = true,
+        strictCreatorId: String? = nil,
+        ignoreGenderFilter: Bool = false
     ) -> [Gif] {
-        let hiddenGenders = Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
+        let hiddenGenders = ignoreGenderFilter ? Set<String>() : Set(SmartTasteEngine.currentHiddenOFGenders.map { $0.lowercased() })
         var out: [Gif] = []
         for row in rows {
+            if let expected = strictCreatorId, !expected.isEmpty,
+               let actual = row.creatorId, !actual.isEmpty, actual != expected {
+                continue
+            }
             let cid = row.creatorId ?? fallbackCreatorId ?? "0"
             let cname = row.creatorName ?? fallbackCreatorName ?? "creator"
             let cachedCreator = creatorById[cid] ?? creatorByName[cname.lowercased()]
@@ -681,7 +693,14 @@ actor OnlyFansAPI {
                 "o": "\(o)",
                 "n": "40"
             ]) {
-                let gifs = mapPosts(resp.posts, fallbackCreatorId: creatorId, fallbackCreatorName: handle, videosOnly: true)
+                let gifs = mapPosts(
+                    resp.posts,
+                    fallbackCreatorId: creatorId,
+                    fallbackCreatorName: handle,
+                    videosOnly: true,
+                    strictCreatorId: creatorId,
+                    ignoreGenderFilter: true
+                )
                 let nextOffset = o + resp.posts.count
                 let total = resp.total ?? 0
                 if !resp.posts.isEmpty && nextOffset < total {
@@ -705,7 +724,14 @@ actor OnlyFansAPI {
                 "o": "\(o)",
                 "n": "40"
             ]) {
-                let gifs = mapDms(resp.dms, fallbackCreatorId: creatorId, fallbackCreatorName: handle, videosOnly: true)
+                let gifs = mapDms(
+                    resp.dms,
+                    fallbackCreatorId: creatorId,
+                    fallbackCreatorName: handle,
+                    videosOnly: true,
+                    strictCreatorId: creatorId,
+                    ignoreGenderFilter: true
+                )
                 let nextOffset = o + resp.dms.count
                 let total = resp.total ?? 0
                 if !resp.dms.isEmpty && nextOffset < total {
@@ -714,43 +740,14 @@ actor OnlyFansAPI {
                         after: encodeCursor(["stage": "dms", "o": nextOffset])
                     )
                 }
-                if let sim: OFSimilarCreatorsResponse = try? await get("/onlyfans/user/\(creatorId)/similar"),
-                   !sim.creators.isEmpty {
-                    let simIds = sim.creators.map { "\($0.id)|\($0.name)" }
-                    return GoonedFeedResponse(
-                        posts: gifs,
-                        after: encodeCursor(["stage": "similar", "simIdx": 0, "o": 0, "simIds": simIds])
-                    )
-                }
-                return GoonedFeedResponse(posts: gifs, after: encodeCursor(["stage": "fallback", "o": 0]))
+                // Strictly stop after this creator's own posts & DMs — never leak similar/trending creators
+                return GoonedFeedResponse(posts: gifs, after: nil)
             }
-            return GoonedFeedResponse(posts: [], after: encodeCursor(["stage": "fallback", "o": 0]))
+            return GoonedFeedResponse(posts: [], after: nil)
         }
 
-        if stage == "similar", let simList = cur?["simIds"] as? [String], !simList.isEmpty {
-            let simIdx = (cur?["simIdx"] as? Int) ?? 0
-            if simIdx < simList.count {
-                let parts = simList[simIdx].split(separator: "|", maxSplits: 1).map(String.init)
-                let simId = parts.first ?? ""
-                let simHandle = parts.count > 1 ? parts[1] : simId
-                if let resp: OFPostsResponse = try? await get("/onlyfans/user/\(simId)/posts", [
-                    "type": "videos",
-                    "sort": "popular",
-                    "o": "\(o)",
-                    "n": "30"
-                ]) {
-                    let gifs = mapPosts(resp.posts, fallbackCreatorId: simId, fallbackCreatorName: simHandle, videosOnly: true)
-                    return GoonedFeedResponse(
-                        posts: gifs,
-                        after: encodeCursor(["stage": "similar", "simIdx": simIdx + 1, "o": 0, "simIds": simList])
-                    )
-                }
-            }
-        }
-
-        // After exhausting creator + similar creators, keep scroll endless with trending OF videos
-        let fallbackOffset = (cur?["o"] as? Int) ?? 0
-        return await trending(after: fallbackOffset > 0 ? encodeCursor(["mode": "pop", "period": "week", "daysAgo": 0, "o": fallbackOffset]) : nil)
+        // Ignore any stale "similar" / "fallback" cursors from older versions
+        return GoonedFeedResponse(posts: [], after: nil)
     }
 
     // MARK: - Search (Creators + Posts)

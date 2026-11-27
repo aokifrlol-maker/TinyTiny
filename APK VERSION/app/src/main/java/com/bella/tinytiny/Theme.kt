@@ -114,6 +114,43 @@ fun Modifier.liquidGlassBackground(tinted: Boolean = false): Modifier {
 }
 
 @Composable
+fun BrandLogoReddit(size: Dp = 26.dp, active: Boolean = false, connected: Boolean = false) {
+    Box(modifier = Modifier.size(size)) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(Brush.linearGradient(listOf(Color(0xFFFF5714), Color(0xFFEA3300))))
+                .border(
+                    width = if (active) 1.5.dp else 0.8.dp,
+                    color = if (active) Color.White else Color.White.copy(alpha = 0.28f),
+                    shape = CircleShape
+                )
+                .alpha(if (active) 1f else 0.90f),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "r/",
+                color = Color.White,
+                fontSize = (size.value * 0.48f).sp,
+                fontWeight = FontWeight.Black
+            )
+        }
+        if (connected) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .align(Alignment.TopEnd)
+                    .offset(x = 1.dp, y = (-1).dp)
+                    .clip(CircleShape)
+                    .background(Theme.accentBright)
+                    .border(1.dp, Color.Black, CircleShape)
+            )
+        }
+    }
+}
+
+@Composable
 fun BrandLogoX(size: Dp = 26.dp, active: Boolean = false, connected: Boolean = false) {
     Box(modifier = Modifier.size(size)) {
         Box(

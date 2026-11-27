@@ -870,7 +870,8 @@ fun GoonedLikesView(
             .fillMaxSize()
             .liquidGlassBackground(tinted)
             .statusBarsPadding()
-            .padding(bottom = 84.dp)
+            .navigationBarsPadding()
+            .padding(bottom = 68.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Header with Liked / Offline pills directly in top bar (matches iOS)
@@ -1106,8 +1107,12 @@ fun GoonedLikesView(
                         TextButton(onClick = {
                             contextTarget = null
                             OfflineManager.localMediaURL(target.id)?.removePrefix("file://")?.let { path ->
-                                val ok = OfflineManager.saveToMediaStoreGallery(File(path))
-                                showBulkToast(if (ok) "Saved to Photos" else "Save failed")
+                                scope.launch {
+                                    val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        OfflineManager.saveToMediaStoreGallery(File(path))
+                                    }
+                                    showBulkToast(if (ok) "Saved to Photos" else "Save failed")
+                                }
                             }
                         }, modifier = Modifier.fillMaxWidth()) {
                             Text("Save to Photos")
@@ -1263,7 +1268,8 @@ fun GoonedFollowsView(
             .fillMaxSize()
             .liquidGlassBackground(tinted)
             .statusBarsPadding()
-            .padding(bottom = 84.dp)
+            .navigationBarsPadding()
+            .padding(bottom = 68.dp)
     ) {
         LazyColumn(
             contentPadding = PaddingValues(16.dp),
@@ -1513,6 +1519,9 @@ fun CreatorProfileGridView(
     val tinted = userData.settings.tintedGlass
     val scope = rememberCoroutineScope()
     val model = remember(source) { FeedModel(source) }
+    DisposableEffect(model) {
+        onDispose { model.close() }
+    }
     val items by model.items.collectAsState()
     val isLoading by model.isLoading.collectAsState()
     var r34Filter by remember(source) { mutableStateOf("") }
@@ -1662,6 +1671,7 @@ fun GoonedSettingsModal(
     onDismiss: () -> Unit,
     onConnectX: () -> Unit,
     onConnectIG: () -> Unit,
+    onConnectReddit: () -> Unit = {},
     onSetupR34Key: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -1750,6 +1760,25 @@ fun GoonedSettingsModal(
                 if (userData.igSession.isConnected) {
                     SettingSwitch("Mix IG Reels into For You", userData.igSession.mixIntoForYou) { v ->
                         UserStore.shared.updateIGSession(userData.igSession.copy(mixIntoForYou = v))
+                    }
+                }
+                HorizontalDivider(color = Theme.borderSubtle)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    BrandLogoReddit(24.dp, connected = userData.redditSession.isConnected)
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(if (userData.redditSession.isConnected) "Reddit (u/${userData.redditSession.username})" else "Personal Reddit", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(if (userData.redditSession.isConnected) "Connected · Dedicated tab" else "Not connected", color = Theme.textSecondary, fontSize = 11.5.sp)
+                    }
+                    if (userData.redditSession.isConnected) {
+                        TextButton(onClick = { UserStore.shared.disconnectReddit() }) { Text("Disconnect", color = Color(0xFFFF6B6B)) }
+                    } else {
+                        TextButton(onClick = onConnectReddit) { Text("Connect", color = Theme.accentBright) }
+                    }
+                }
+                if (userData.redditSession.isConnected) {
+                    SettingSwitch("Mix Personal Reddit into For You", userData.redditSession.mixIntoForYou) { v ->
+                        UserStore.shared.updateRedditSession(userData.redditSession.copy(mixIntoForYou = v))
                     }
                 }
                 HorizontalDivider(color = Theme.borderSubtle)

@@ -16,6 +16,10 @@ enum FeedSource: Hashable {
     case igFollowing
     case igSaved
     case igUser(String)
+    case redditHome
+    case redditPopular
+    case redditSaved
+    case redditUpvoted
     case rule34(String) // "" for general Rule34.xxx feed, or tag name
     case ofForYou
     case ofTrending
@@ -45,6 +49,10 @@ enum FeedSource: Hashable {
         case .igFollowing: return "IG Following"
         case .igSaved: return "IG Saved"
         case .igUser(let u): return "IG @\(u.replacingOccurrences(of: "@", with: ""))"
+        case .redditHome: return "Reddit Home"
+        case .redditPopular: return "Reddit Popular"
+        case .redditSaved: return "Reddit Saved"
+        case .redditUpvoted: return "Reddit Upvoted"
         case .rule34(let tag):
             let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { return "Rule34.xxx" }
@@ -82,6 +90,15 @@ enum FeedSource: Hashable {
     var isIGFeed: Bool {
         switch self {
         case .igReels, .igFollowing, .igSaved, .igUser:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var isRedditPersonalFeed: Bool {
+        switch self {
+        case .redditHome, .redditPopular, .redditSaved, .redditUpvoted:
             return true
         default:
             return false
@@ -133,6 +150,10 @@ enum FeedSource: Hashable {
         case .igFollowing: return ("igfollowing", "igfollowing")
         case .igSaved: return ("igsaved", "igsaved")
         case .igUser(let u): return ("iguser", u)
+        case .redditHome: return ("reddithome", "reddithome")
+        case .redditPopular: return ("redditpopular", "redditpopular")
+        case .redditSaved: return ("redditsaved", "redditsaved")
+        case .redditUpvoted: return ("redditupvoted", "redditupvoted")
         case .rule34(let tag): return ("rule34", tag.isEmpty ? "all" : tag)
         case .ofForYou: return ("offoryou", "offoryou")
         case .ofTrending: return ("oftrending", "oftrending")
@@ -685,6 +706,8 @@ final class FeedModel: ObservableObject {
                 errorText = "X rate limit reached — wait ~30s and tap Retry."
             } else if items.isEmpty && source.isIGFeed && !store.data.igSession.isConnected {
                 errorText = "Connect your personal Instagram account to load Instagram Reels."
+            } else if items.isEmpty && source.isRedditPersonalFeed && !store.data.redditSession.isConnected {
+                errorText = "Connect your personal Reddit account to load your Reddit feeds."
             } else if items.isEmpty && (source == .xFollowing || source == .igFollowing || source == .following) {
                 errorText = "No recent videos from accounts you follow yet. Follow creators in For You / Reels or tap Retry."
             } else if items.isEmpty {
@@ -815,6 +838,14 @@ final class FeedModel: ObservableObject {
             return await InstagramAPI.saved(after: cursor)
         case .igUser(let handle):
             return await InstagramAPI.userReels(handle, after: cursor)
+        case .redditHome:
+            return try await RedditPersonalAPI.shared.homeFeed(after: cursor)
+        case .redditPopular:
+            return try await RedditPersonalAPI.shared.popularFeed(after: cursor)
+        case .redditSaved:
+            return try await RedditPersonalAPI.shared.savedFeed(after: cursor)
+        case .redditUpvoted:
+            return try await RedditPersonalAPI.shared.upvotedFeed(after: cursor)
         case .rule34(let tag):
             return await Rule34API.shared.fetchFeed(
                 tag: tag,
@@ -881,8 +912,9 @@ final class FeedModel: ObservableObject {
 
         let wantReddit = settings.includeReddit
         let wantOF = settings.includeOnlyFans
-        let wantX = settings.includeX && store.data.xSession.isConnected
-        let wantIG = settings.includeInstagram && store.data.igSession.isConnected
+        let wantX = settings.includeX && store.data.xSession.isConnected && store.data.xSession.mixIntoForYou
+        let wantIG = settings.includeInstagram && store.data.igSession.isConnected && store.data.igSession.mixIntoForYou
+        let wantPersonalReddit = store.data.redditSession.isConnected && store.data.redditSession.mixIntoForYou
 
         let curX = self.xMixAfterCursor
         let curIG = self.igMixAfterCursor
@@ -944,8 +976,11 @@ final class FeedModel: ObservableObject {
         async let igTask: GoonedFeedResponse? = wantIG
             ? await InstagramAPI.reels(after: curIG)
             : nil
+        async let personalRedditTask: GoonedFeedResponse? = wantPersonalReddit
+            ? (try? await RedditPersonalAPI.shared.homeFeed(after: nil))
+            : nil
 
-        let (rResp, rTastePosts, ofResp, xResp, igResp) = await (redditTask, redditTasteTask, ofTask, xTask, igTask)
+        let (rResp, rTastePosts, ofResp, xResp, igResp, prResp) = await (redditTask, redditTasteTask, ofTask, xTask, igTask, personalRedditTask)
 
         if let xa = xResp?.after { self.xMixAfterCursor = xa }
         if let ia = igResp?.after { self.igMixAfterCursor = ia }
@@ -963,12 +998,14 @@ final class FeedModel: ObservableObject {
         let ofPosts = prep(ofResp?.posts)
         let xPosts = prep(xResp?.posts)
         let igPosts = prep(igResp?.posts)
+        let prPosts = prep(prResp?.posts)
 
         var rawActive: [(key: String, weight: Double, posts: [Gif])] = []
         if !rPosts.isEmpty { rawActive.append(("reddit", max(0.20, rawWeights["reddit"] ?? 1.0), rPosts)) }
         if !ofPosts.isEmpty { rawActive.append(("onlyfans", max(0.20, rawWeights["onlyfans"] ?? 1.0), ofPosts)) }
         if !xPosts.isEmpty { rawActive.append(("x", max(0.20, rawWeights["x"] ?? 1.0), xPosts)) }
         if !igPosts.isEmpty { rawActive.append(("instagram", max(0.15, rawWeights["instagram"] ?? 0.65), igPosts)) }
+        if !prPosts.isEmpty { rawActive.append(("reddit_personal", 0.55, prPosts)) }
 
         let totalW = max(0.1, rawActive.reduce(0.0) { $0 + $1.weight })
         var buckets = rawActive.map { (key: $0.key, weight: $0.weight / totalW, posts: $0.posts, index: 0) }

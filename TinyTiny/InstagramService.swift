@@ -543,18 +543,21 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
 
         if type == "inbox",
            let jsonText = body["body"] as? String,
-           let data = jsonText.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) {
-            var found: [IGDirectThread] = []
-            var seen = Set<String>()
-            Self.extractThreadsRecursively(from: json, into: &found, seen: &seen)
-            if !found.isEmpty {
-                var merged = cachedDirectThreads
-                var existing = Set(merged.map(\.id))
-                for t in found where existing.insert(t.id).inserted {
-                    merged.append(t)
+           let data = jsonText.data(using: .utf8) {
+            Task.detached(priority: .utility) {
+                guard let json = try? JSONSerialization.jsonObject(with: data) else { return }
+                var found: [IGDirectThread] = []
+                var seen = Set<String>()
+                Self.extractThreadsRecursively(from: json, into: &found, seen: &seen)
+                guard !found.isEmpty else { return }
+                await MainActor.run {
+                    var merged = InstagramWebEngine.shared.cachedDirectThreads
+                    var existing = Set(merged.map(\.id))
+                    for t in found where existing.insert(t.id).inserted {
+                        merged.append(t)
+                    }
+                    InstagramWebEngine.shared.cachedDirectThreads = merged
                 }
-                cachedDirectThreads = merged
             }
             return
         }

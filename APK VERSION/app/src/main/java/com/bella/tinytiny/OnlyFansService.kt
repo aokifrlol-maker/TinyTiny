@@ -224,7 +224,8 @@ object OnlyFansAPI {
         published: Long?,
         postTags: List<String>,
         prefix: String,
-        videosOnly: Boolean = true
+        videosOnly: Boolean = true,
+        ignoreGenderFilter: Boolean = false
     ): Gif? {
         val kind = att.kind.lowercase()
         if (videosOnly && kind != "video") return null
@@ -240,7 +241,7 @@ object OnlyFansAPI {
 
         val creator = creatorById[creatorId] ?: creatorByName[creatorName.lowercase()]
         val mergedTags = (postTags + (creator?.creatorTags ?: emptyList())).distinct()
-        if (isCreatorHiddenLocally(creator?.gender, mergedTags, cleanTitle)) return null
+        if (!ignoreGenderFilter && isCreatorHiddenLocally(creator?.gender, mergedTags, cleanTitle)) return null
 
         val postIdFull = "${prefix}_${postId}_$pos"
         MediaMetaRegistry.register(
@@ -316,10 +317,15 @@ object OnlyFansAPI {
         prefix: String = "of",
         fallbackCreatorId: String? = null,
         fallbackCreatorName: String? = null,
-        videosOnly: Boolean = true
+        videosOnly: Boolean = true,
+        strictCreatorId: String? = null,
+        ignoreGenderFilter: Boolean = false
     ): List<Gif> {
         val out = mutableListOf<Gif>()
         for (p in posts) {
+            if (!strictCreatorId.isNullOrEmpty() && !p.creatorId.isNullOrEmpty() && p.creatorId != strictCreatorId) {
+                continue
+            }
             val cid = p.creatorId?.takeIf { it.isNotEmpty() } ?: fallbackCreatorId ?: "0"
             val cname = p.creatorName?.takeIf { it.isNotEmpty() } ?: fallbackCreatorName ?: cid
             val combinedTags = ((p.tags ?: emptyList()) + (p.creatorTags ?: emptyList())).distinct()
@@ -334,7 +340,8 @@ object OnlyFansAPI {
                     published = p.published ?: p.added,
                     postTags = combinedTags,
                     prefix = prefix,
-                    videosOnly = videosOnly
+                    videosOnly = videosOnly,
+                    ignoreGenderFilter = ignoreGenderFilter
                 )?.let { out.add(it) }
             }
         }
@@ -490,7 +497,14 @@ object OnlyFansAPI {
                         "/onlyfans/user/$creatorId/posts",
                         mapOf("type" to "videos", "sort" to sortParam, "o" to "$offset", "n" to "40")
                     )
-                    val gifs = mapPosts(resp.posts, fallbackCreatorId = creatorId, fallbackCreatorName = cleanHandle, videosOnly = true)
+                    val gifs = mapPosts(
+                        resp.posts,
+                        fallbackCreatorId = creatorId,
+                        fallbackCreatorName = cleanHandle,
+                        videosOnly = true,
+                        strictCreatorId = creatorId,
+                        ignoreGenderFilter = true
+                    )
                     if (gifs.isNotEmpty()) {
                         GoonedFeedResponse(gifs, "posts:${offset + 40}")
                     } else {
@@ -503,32 +517,26 @@ object OnlyFansAPI {
                         mapOf("type" to "videos", "sort" to sortParam, "o" to "$offset", "n" to "40")
                     )
                     val rows = if (resp.dms.isNotEmpty()) resp.dms else resp.posts
-                    val gifs = mapPosts(rows, prefix = "of_dm", fallbackCreatorId = creatorId, fallbackCreatorName = cleanHandle, videosOnly = true)
+                    val gifs = mapPosts(
+                        rows,
+                        prefix = "of_dm",
+                        fallbackCreatorId = creatorId,
+                        fallbackCreatorName = cleanHandle,
+                        videosOnly = true,
+                        strictCreatorId = creatorId,
+                        ignoreGenderFilter = true
+                    )
                     if (gifs.isNotEmpty()) {
                         GoonedFeedResponse(gifs, "dms:${offset + 40}")
                     } else {
-                        fetchCreatorPosts(creatorId, cleanHandle, sort, "similar:0")
+                        // Strictly stop after this creator's own posts & DMs — never leak similar/trending creators
+                        GoonedFeedResponse(emptyList(), null)
                     }
                 }
-                "similar" -> {
-                    val simResp: OFSimilarCreatorsResponse = get("/onlyfans/user/$creatorId/similar")
-                    val sims = (simResp.similar + simResp.creators).distinctBy { it.id }
-                    cacheCreators(sims)
-                    val pick = sims.getOrNull(offset)
-                    if (pick != null) {
-                        val pr: OFFeedResponse = get(
-                            "/onlyfans/user/${pick.id}/posts",
-                            mapOf("type" to "videos", "sort" to "popular", "o" to "0", "n" to "24")
-                        )
-                        val gifs = mapPosts(pr.posts, fallbackCreatorId = pick.id, fallbackCreatorName = pick.cleanHandle, videosOnly = true)
-                        if (gifs.isNotEmpty()) return GoonedFeedResponse(gifs, "similar:${offset + 1}")
-                    }
-                    fetchTrending("$offset")
-                }
-                else -> fetchTrending("$offset")
+                else -> GoonedFeedResponse(emptyList(), null)
             }
         } catch (_: Throwable) {
-            GoonedFeedResponse()
+            GoonedFeedResponse(emptyList(), null)
         }
     }
 

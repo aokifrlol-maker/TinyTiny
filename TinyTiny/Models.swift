@@ -309,11 +309,19 @@ struct Gif: Codable, Identifiable, Hashable {
         return URL(string: "https://gooned.app")!
     }
 
+    private static let isoFmtLock = NSLock()
+    private nonisolated(unsafe) static let isoFmtFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private nonisolated(unsafe) static let isoFmtPlain = ISO8601DateFormatter()
+
     var relativeTime: String {
         guard let createdUtc else { return "" }
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = fmt.date(from: createdUtc) ?? ISO8601DateFormatter().date(from: createdUtc)
+        Self.isoFmtLock.lock()
+        let date = Self.isoFmtFractional.date(from: createdUtc) ?? Self.isoFmtPlain.date(from: createdUtc)
+        Self.isoFmtLock.unlock()
         guard let date else { return "" }
         let delta = max(0, Int(Date().timeIntervalSince(date)))
         if delta < 3600 { return "\(max(1, delta / 60))m" }

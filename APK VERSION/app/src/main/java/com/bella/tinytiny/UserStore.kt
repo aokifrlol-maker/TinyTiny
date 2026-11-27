@@ -100,6 +100,7 @@ data class UserData(
     var settings: AppSettings = AppSettings(),
     var xSession: XAccountSession = XAccountSession(),
     var igSession: InstagramAccountSession = InstagramAccountSession(),
+    var redditSession: RedditAccountSession = RedditAccountSession(),
     var r34Credentials: Rule34Credentials = Rule34Credentials(),
     var algorithm: AlgorithmProfile = AlgorithmProfile(),
     var removedLikedIDs: Map<String, Double> = emptyMap(),
@@ -483,6 +484,19 @@ class UserStore private constructor() {
         LicenseManager.scheduleCloudSync()
     }
 
+    fun updateRedditSession(session: RedditAccountSession) {
+        data.value = data.value.copy(redditSession = session)
+        saveNow()
+        LicenseManager.scheduleCloudSync()
+    }
+
+    fun disconnectReddit() {
+        data.value = data.value.copy(redditSession = RedditAccountSession())
+        RedditPersonalAPI.clearCookies()
+        saveNow()
+        LicenseManager.scheduleCloudSync()
+    }
+
     fun updateR34Credentials(creds: Rule34Credentials) {
         data.value = data.value.copy(r34Credentials = creds)
         saveNow()
@@ -801,6 +815,7 @@ class UserStore private constructor() {
             followedOFCreators = if (options.keepFollowing) cur.followedOFCreators else emptyList(),
             xSession = if (options.keepAccounts) cur.xSession else XAccountSession(),
             igSession = if (options.keepAccounts) cur.igSession else InstagramAccountSession(),
+            redditSession = if (options.keepAccounts) cur.redditSession else RedditAccountSession(),
             r34Credentials = if (options.keepAccounts) cur.r34Credentials else Rule34Credentials(),
             algorithm = if (options.keepAlgorithm) cur.algorithm else AlgorithmProfile(),
             settings = AppSettings()
@@ -823,6 +838,7 @@ class UserStore private constructor() {
             withContext(Dispatchers.Main) {
                 XWebEngine.resetSession()
                 InstagramWebEngine.resetSession()
+                RedditPersonalAPI.clearCookies()
                 android.webkit.CookieManager.getInstance().removeAllCookies(null)
                 android.webkit.CookieManager.getInstance().flush()
                 WebStorage.getInstance().deleteAllData()

@@ -40,6 +40,10 @@ sealed class FeedSource {
     data object IGFollowing : FeedSource()
     data object IGSaved : FeedSource()
     data class IGUser(val handle: String) : FeedSource()
+    data object RedditHome : FeedSource()
+    data object RedditPopular : FeedSource()
+    data object RedditSaved : FeedSource()
+    data object RedditUpvoted : FeedSource()
     data class Rule34(val tag: String = "") : FeedSource()
     data object OFForYou : FeedSource()
     data object OFTrending : FeedSource()
@@ -55,6 +59,7 @@ sealed class FeedSource {
     val isList: Boolean get() = this is CustomList
     val isXFeed: Boolean get() = this is XForYou || this is XFollowing || this is XBookmarks || this is XLikes || this is XSearch || this is XUser
     val isIGFeed: Boolean get() = this is IGReels || this is IGFollowing || this is IGSaved || this is IGUser
+    val isRedditPersonalFeed: Boolean get() = this is RedditHome || this is RedditPopular || this is RedditSaved || this is RedditUpvoted
     val isRule34Feed: Boolean get() = this is Rule34
     val isOFFeed: Boolean get() = this is OFForYou || this is OFTrending || this is OFLatest || this is OFDMs || this is OFCreator || this is OFSearch
     val isLongVideoFeed: Boolean get() = this is LongVideos || this is LongSearch
@@ -87,6 +92,10 @@ sealed class FeedSource {
             is IGFollowing -> "IG Following"
             is IGSaved -> "IG Saved"
             is IGUser -> "IG @${handle.replace("@", "")}"
+            is RedditHome -> "Reddit Home"
+            is RedditPopular -> "Reddit Popular"
+            is RedditSaved -> "Reddit Saved"
+            is RedditUpvoted -> "Reddit Upvoted"
             is Rule34 -> {
                 val trimmed = tag.trim()
                 if (trimmed.isEmpty()) "Rule34.xxx"
@@ -135,6 +144,10 @@ sealed class FeedSource {
             is IGFollowing -> "igfollowing" to "igfollowing"
             is IGSaved -> "igsaved" to "igsaved"
             is IGUser -> "iguser" to handle
+            is RedditHome -> "reddithome" to "reddithome"
+            is RedditPopular -> "redditpopular" to "redditpopular"
+            is RedditSaved -> "redditsaved" to "redditsaved"
+            is RedditUpvoted -> "redditupvoted" to "redditupvoted"
             is Rule34 -> "rule34" to tag.ifEmpty { "all" }
             is OFForYou -> "offoryou" to "offoryou"
             is OFTrending -> "oftrending" to "oftrending"
@@ -154,6 +167,14 @@ class FeedModel(
     initialItems: List<Gif> = emptyList()
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    @Volatile private var loadGen: Int = 0
+    private var mixPersonalRedditCursor: String? = null
+
+    fun close() {
+        loadGen++
+        activeJob?.cancel()
+        scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+    }
 
     val source = MutableStateFlow(initialSource)
     val sort = MutableStateFlow(FeedSort.HOT)
@@ -260,6 +281,7 @@ class FeedModel(
             activeJob = scope.launch { refresh(rotateCursor = true, keepSavedCursor = false) }
             return
         }
+        loadGen++
         activeJob?.cancel()
         isLoading.value = false // CRITICAL FIX: prevent stale isLoading=true from aborting refresh()
         isSwitching.value = true
@@ -272,6 +294,7 @@ class FeedModel(
         mixR34Cursor = null
         mixXCursor = null
         mixIGCursor = null
+        mixPersonalRedditCursor = null
         errorText.value = null
         if (initialItems.isNotEmpty()) {
             items.value = initialItems
@@ -282,10 +305,10 @@ class FeedModel(
         } else {
             items.value = emptyList()
             hasMore = newSource !is FeedSource.CustomList
-            afterCursor = UserStore.shared.savedCursor(cursorKey(newSource, sort.value))
+            afterCursor = if (isProfileOrSearch(newSource)) null else UserStore.shared.savedCursor(cursorKey(newSource, sort.value))
             activeJob = scope.launch {
                 try {
-                    refresh(keepSavedCursor = true)
+                    refresh(keepSavedCursor = !isProfileOrSearch(newSource))
                 } finally {
                     isSwitching.value = false
                 }
@@ -414,6 +437,7 @@ class FeedModel(
         errorText.value = null
         val src = source.value
         val curSort = sort.value
+        val gen = loadGen
         val profileOrSearch = isProfileOrSearch(src)
         val maxAttempts = if (profileOrSearch || src is FeedSource.Following) 2 else 3
 
@@ -423,38 +447,47 @@ class FeedModel(
             val fallbackSeen = mutableListOf<Gif>()
             while (added < 8 && attempts < maxAttempts && hasMore) {
                 coroutineContext.ensureActive()
+                if (gen != loadGen || source.value != src) return
                 if (src.isXFeed && XWebEngine.isRateLimitedNow) break
                 attempts++
 
                 val resp = fetchPage(src, curSort, afterCursor)
                 coroutineContext.ensureActive()
+                if (gen != loadGen || source.value != src) return
                 afterCursor = resp.after
-                UserStore.shared.saveCursor(resp.after, cursorKey(src, curSort))
-
-                val playable = resp.posts.filter { post ->
-                    post.hasPlayableMedia &&
-                        !SmartTasteEngine.shared.isDisliked(post) &&
-                        !(src.isDiscoverySource && UserStore.shared.isBlockedByAlgorithm(post)) &&
-                        (profileOrSearch || UserStore.shared.isEligibleAdultPost(post, src))
+                if (!profileOrSearch) {
+                    UserStore.shared.saveCursor(resp.after, cursorKey(src, curSort))
                 }
 
-                val batch = mutableListOf<Gif>()
-                for (post in playable) {
-                    if (!ids.add(post.id)) continue
-                    if (!mediaKeys.add(post.canonicalDedupeKey)) continue
-                    val sim = post.contentSimilarityKey
-                    if (sim != null && !seenSimKeys.add(sim)) continue
-                    if (!profileOrSearch && UserStore.shared.isSeen(post)) {
-                        fallbackSeen.add(post)
-                    } else {
-                        batch.add(post)
+                // Offload filtering, deduping, and taste ranking off the Main thread so VerticalPager never hitches
+                val (ranked, seenBatch) = withContext(Dispatchers.Default) {
+                    val playable = resp.posts.filter { post ->
+                        post.hasPlayableMedia &&
+                            !SmartTasteEngine.shared.isDisliked(post) &&
+                            !(src.isDiscoverySource && UserStore.shared.isBlockedByAlgorithm(post)) &&
+                            (profileOrSearch || UserStore.shared.isEligibleAdultPost(post, src))
                     }
+                    val batch = mutableListOf<Gif>()
+                    val seenLocal = mutableListOf<Gif>()
+                    for (post in playable) {
+                        if (!ids.add(post.id)) continue
+                        if (!mediaKeys.add(post.canonicalDedupeKey)) continue
+                        val sim = post.contentSimilarityKey
+                        if (sim != null && !seenSimKeys.add(sim)) continue
+                        if (!profileOrSearch && UserStore.shared.isSeen(post)) {
+                            seenLocal.add(post)
+                        } else {
+                            batch.add(post)
+                        }
+                    }
+                    val out = if (src.isDiscoverySource) {
+                        SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
+                        UserStore.shared.rankWithAlgorithm(batch)
+                    } else batch
+                    out to seenLocal
                 }
-
-                val ranked = if (src.isDiscoverySource) {
-                    SmartTasteEngine.shared.precomputeVisualSimilarity(batch)
-                    UserStore.shared.rankWithAlgorithm(batch)
-                } else batch
+                if (gen != loadGen || source.value != src) return
+                fallbackSeen.addAll(seenBatch)
                 if (ranked.isNotEmpty()) {
                     emptyPageStreak = 0
                     items.value = items.value + ranked
@@ -503,6 +536,7 @@ class FeedModel(
                     src.isXFeed && !UserStore.shared.data.value.xSession.isConnected -> "Connect your personal 𝕏 account to load 𝕏 videos."
                     src.isXFeed && XWebEngine.isRateLimitedNow -> "𝕏 temporarily rate-limited. Wait ~45 seconds and tap Retry."
                     src.isIGFeed && !UserStore.shared.data.value.igSession.isConnected -> "Connect your personal Instagram account to load IG Reels."
+                    src.isRedditPersonalFeed && !UserStore.shared.data.value.redditSession.isConnected -> "Connect your personal Reddit account to load your Reddit feeds."
                     src is FeedSource.Following -> "Follow creators, subreddits, or connect 𝕏/IG to build your Following feed."
                     else -> {
                         LicenseManager.reportError(src.displayTitle, "Empty feed load")
@@ -552,6 +586,10 @@ class FeedModel(
         is FeedSource.IGFollowing -> InstagramAPI.followingFeed(cursor)
         is FeedSource.IGSaved -> InstagramAPI.savedFeed(cursor)
         is FeedSource.IGUser -> InstagramAPI.userReels(src.handle, cursor)
+        is FeedSource.RedditHome -> RedditPersonalAPI.homeFeed(cursor)
+        is FeedSource.RedditPopular -> RedditPersonalAPI.popularFeed(cursor)
+        is FeedSource.RedditSaved -> RedditPersonalAPI.savedFeed(cursor)
+        is FeedSource.RedditUpvoted -> RedditPersonalAPI.upvotedFeed(cursor)
         is FeedSource.Rule34 -> Rule34API.fetchFeed(src.tag, s.rawValue, cursor, UserStore.shared.data.value.r34Credentials)
         is FeedSource.OFForYou -> {
             val algo = UserStore.shared.data.value.algorithm
@@ -706,6 +744,9 @@ class FeedModel(
         val igDef: kotlinx.coroutines.Deferred<GoonedFeedResponse?>? = if (fy.includeInstagram && d.igSession.isConnected && d.igSession.mixIntoForYou) async {
             try { InstagramAPI.reelsFeed(mixIGCursor) } catch (_: Throwable) { null }
         } else null
+        val personalRedditDef: kotlinx.coroutines.Deferred<GoonedFeedResponse?>? = if (d.redditSession.isConnected && d.redditSession.mixIntoForYou) async {
+            try { RedditPersonalAPI.homeFeed(mixPersonalRedditCursor) } catch (_: Throwable) { null }
+        } else null
 
         val rResp = rDef?.await()
         val rTaste = rTasteDef?.await() ?: emptyList()
@@ -713,11 +754,13 @@ class FeedModel(
         val r34Resp = r34Def?.await()
         val xResp = xDef?.await()
         val igResp = igDef?.await()
+        val prResp = personalRedditDef?.await()
 
         ofResp?.after?.let { mixOfCursor = it }
         r34Resp?.after?.let { mixR34Cursor = it }
         xResp?.after?.let { mixXCursor = it }
         igResp?.after?.let { mixIGCursor = it }
+        prResp?.after?.let { mixPersonalRedditCursor = it }
 
         fun prepBucket(list: List<Gif>?): MutableList<Gif> =
             (list ?: emptyList())
@@ -730,6 +773,7 @@ class FeedModel(
         val r34Bucket = prepBucket(r34Resp?.posts)
         val xBucket = prepBucket(xResp?.posts)
         val igBucket = prepBucket(igResp?.posts)
+        val prBucket = prepBucket(prResp?.posts)
 
         data class DRRBucket(val key: String, val queue: MutableList<Gif>, val weight: Double, var credit: Double = 0.0)
         val sw = tasteState.sourceWeights
@@ -738,7 +782,8 @@ class FeedModel(
             DRRBucket("onlyfans", ofBucket, maxOf(0.20, sw["onlyfans"] ?: 1.0)),
             DRRBucket("x", xBucket, maxOf(0.20, sw["x"] ?: 1.0)),
             DRRBucket("instagram", igBucket, maxOf(0.15, sw["instagram"] ?: 0.65)),
-            DRRBucket("rule34", r34Bucket, maxOf(0.20, sw["rule34"] ?: 0.90))
+            DRRBucket("rule34", r34Bucket, maxOf(0.20, sw["rule34"] ?: 0.90)),
+            DRRBucket("reddit_personal", prBucket, 0.55)
         ).filter { it.queue.isNotEmpty() }
 
         val totalW = active.sumOf { it.weight }.coerceAtLeast(0.01)

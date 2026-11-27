@@ -93,7 +93,8 @@ fun FeedView(
     onSelectRule34Tag: (String) -> Unit,
     onSelectOFCreator: (String, String) -> Unit,
     onConnectX: () -> Unit,
-    onConnectIG: () -> Unit
+    onConnectIG: () -> Unit,
+    onConnectReddit: () -> Unit = {}
 ) {
     val items by model.items.collectAsState()
     val isLoading by model.isLoading.collectAsState()
@@ -119,7 +120,8 @@ fun FeedView(
             model = model,
             onOpenCategories = onOpenCategories,
             onConnectX = onConnectX,
-            onConnectIG = onConnectIG
+            onConnectIG = onConnectIG,
+            onConnectReddit = onConnectReddit
         )
         return
     }
@@ -190,7 +192,8 @@ fun FeedView(
                     isEndOfFeed = true,
                     onOpenCategories = onOpenCategories,
                     onConnectX = onConnectX,
-                    onConnectIG = onConnectIG
+                    onConnectIG = onConnectIG,
+                    onConnectReddit = onConnectReddit
                 )
             } else {
                 val gif = items[pageIdx]
@@ -260,7 +263,7 @@ fun FeedView(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 64.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 98.dp, start = 16.dp, end = 16.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1499,7 +1502,8 @@ fun FeedStateView(
     isEndOfFeed: Boolean = false,
     onOpenCategories: () -> Unit,
     onConnectX: () -> Unit,
-    onConnectIG: () -> Unit
+    onConnectIG: () -> Unit,
+    onConnectReddit: () -> Unit = {}
 ) {
     val isLoading by model.isLoading.collectAsState()
     val errorText by model.errorText.collectAsState()
@@ -1543,6 +1547,13 @@ fun FeedStateView(
                 Text("Sign in once to stream IG Reels, Following, and Saved clips.", color = Theme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
                 Button(onClick = onConnectIG, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), shape = RoundedCornerShape(999.dp)) {
                     Text("Sign in with Instagram", fontWeight = FontWeight.Bold)
+                }
+            } else if (src.isRedditPersonalFeed && !UserStore.shared.data.value.redditSession.isConnected) {
+                BrandLogoReddit(44.dp)
+                Text("Connect Personal Reddit", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("Sign in once to browse your personal Reddit Home, Popular, Saved & Upvoted feeds without affecting your regular For You.", color = Theme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+                Button(onClick = onConnectReddit, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), shape = RoundedCornerShape(999.dp)) {
+                    Text("Sign in with Reddit", fontWeight = FontWeight.Bold)
                 }
             } else {
                 Icon(Icons.Default.WifiOff, contentDescription = null, tint = Theme.textSecondary, modifier = Modifier.size(36.dp))
@@ -1639,7 +1650,7 @@ fun PostMoreSheet(
                         .liquidGlassCard(16.dp, tinted)
                         .clickable {
                             when {
-                                gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { onSelectOFCreator(it, u) }
+                                gif.isOnlyFansPost -> (gif.onlyFansCreatorId ?: u).let { onSelectOFCreator(it, u) }
                                 gif.isXPost -> onSelectXUser(u)
                                 gif.isIGPost -> onSelectIGUser(u)
                                 gif.isRule34Post -> onSelectRule34Tag(if (!u.equals("rule34", true)) "user:$u" else "")
@@ -1657,7 +1668,7 @@ fun PostMoreSheet(
                             .liquidGlassCapsule(tinted, active = isFollowed)
                             .clickable {
                                 when {
-                                    gif.isOnlyFansPost -> gif.onlyFansCreatorId?.let { UserStore.shared.toggleFollowOFCreator(it, u, null) }
+                                    gif.isOnlyFansPost -> (gif.onlyFansCreatorId ?: u).let { UserStore.shared.toggleFollowOFCreator(it, u, null) }
                                     gif.isXPost -> UserStore.shared.toggleFollowXUser(u)
                                     gif.isIGPost -> UserStore.shared.toggleFollowIGUser(u)
                                     else -> UserStore.shared.toggleFollowUser(u)
@@ -1779,12 +1790,19 @@ private fun formatTime(sec: Double): String {
     return "${s / 60}:${(s % 60).toString().padStart(2, '0')}"
 }
 
-private fun fetchFramePreview(url: String, seconds: Double): Bitmap? {
+private val framePreviewLock = Any()
+
+private fun fetchFramePreview(url: String, seconds: Double): Bitmap? = synchronized(framePreviewLock) {
     val mmr = MediaMetadataRetriever()
     return try {
         if (url.startsWith("file://")) mmr.setDataSource(url.removePrefix("file://"))
         else mmr.setDataSource(url, MediaHeaders.headers(url))
-        mmr.getFrameAtTime((seconds * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        val timeUs = (seconds * 1_000_000).toLong()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            mmr.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 224, 312)
+        } else {
+            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        }
     } catch (_: Throwable) {
         null
     } finally {

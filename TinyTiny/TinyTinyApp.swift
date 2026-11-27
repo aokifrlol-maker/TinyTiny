@@ -89,39 +89,6 @@ struct RootView: View {
                     GoonedMainShell()
                         .transition(.opacity)
                 }
-                if let ann = license.activeAnnouncement {
-                    VStack {
-                        HStack(spacing: 10) {
-                            Image(systemName: "megaphone.fill")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(Theme.accentBright)
-                            Text(ann.text)
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(3)
-                            Spacer(minLength: 4)
-                            Button {
-                                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                                    license.dismissAnnouncement(ann.id)
-                                }
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.white.opacity(0.75))
-                                    .frame(width: 24, height: 24)
-                                    .liquidGlassCircle()
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .liquidGlassCard(cornerRadius: 18, tinted: store.data.settings.tintedGlass)
-                        .padding(.horizontal, 14)
-                        .padding(.top, 54)
-                        Spacer()
-                    }
-                    .zIndex(8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
                 if !license.isAdmin, let maint = license.remoteConfig?.maintenance, !maint.isEmpty {
                     RemoteGateOverlay(
                         icon: "wrench.and.screwdriver.fill",
@@ -222,6 +189,7 @@ enum GoonedDockTab: Int, CaseIterable {
 enum HomeChannel: Hashable {
     case following, forYou
     case xForYou, xFollowing, xBookmarks
+    case redditHome, redditPopular, redditSaved, redditUpvoted
     case rule34
     case igReels, igFollowing, igSaved
     case ofForYou, ofTrending, ofLatest, ofDMs
@@ -281,11 +249,16 @@ private struct RemoteGateOverlay: View {
 struct GoonedMainShell: View {
     @EnvironmentObject var store: UserStore
     @ObservedObject private var shareService = ShareService.shared
+    @ObservedObject private var license = LicenseManager.shared
     @StateObject private var followingModel = FeedModel(source: .following)
     @StateObject private var forYouModel = FeedModel(source: .forYou)
     @StateObject private var xForYouModel = FeedModel(source: .xForYou)
     @StateObject private var xFollowingModel = FeedModel(source: .xFollowing)
     @StateObject private var xBookmarksModel = FeedModel(source: .xBookmarks)
+    @StateObject private var redditHomeModel = FeedModel(source: .redditHome)
+    @StateObject private var redditPopularModel = FeedModel(source: .redditPopular)
+    @StateObject private var redditSavedModel = FeedModel(source: .redditSaved)
+    @StateObject private var redditUpvotedModel = FeedModel(source: .redditUpvoted)
     @StateObject private var r34Model = FeedModel(source: .rule34(""))
     @StateObject private var igReelsModel = FeedModel(source: .igReels)
     @StateObject private var igFollowingModel = FeedModel(source: .igFollowing)
@@ -316,6 +289,7 @@ struct GoonedMainShell: View {
 
     @State private var activeChannel: HomeChannel = .forYou
     @State private var lastXChannel: HomeChannel = .xForYou
+    @State private var lastRedditChannel: HomeChannel = .redditHome
     @State private var lastIGChannel: HomeChannel = .igReels
     @State private var lastOFChannel: HomeChannel = .ofForYou
     @State private var lastLongChannel: HomeChannel = .longAll
@@ -325,6 +299,7 @@ struct GoonedMainShell: View {
     @State private var showSettingsModal = false
     @State private var showXLoginSheet = false
     @State private var showIGLoginSheet = false
+    @State private var showRedditLoginSheet = false
     @State private var showR34KeySheet = false
     @State private var pendingFeedAfterLogin: FeedSource? = nil
     @State private var creatorGridSource: FeedSource? = nil
@@ -334,6 +309,10 @@ struct GoonedMainShell: View {
 
     private var isXChannel: Bool {
         activeChannel == .xForYou || activeChannel == .xFollowing || activeChannel == .xBookmarks
+    }
+
+    private var isRedditChannel: Bool {
+        activeChannel == .redditHome || activeChannel == .redditPopular || activeChannel == .redditSaved || activeChannel == .redditUpvoted
     }
 
     private var isIGChannel: Bool {
@@ -355,6 +334,10 @@ struct GoonedMainShell: View {
         case .xForYou: return xForYouModel
         case .xFollowing: return xFollowingModel
         case .xBookmarks: return xBookmarksModel
+        case .redditHome: return redditHomeModel
+        case .redditPopular: return redditPopularModel
+        case .redditSaved: return redditSavedModel
+        case .redditUpvoted: return redditUpvotedModel
         case .rule34: return r34Model
         case .igReels: return igReelsModel
         case .igFollowing: return igFollowingModel
@@ -390,7 +373,7 @@ struct GoonedMainShell: View {
             // 1. Main Full-Screen Feed Scroller (persistent per-channel models + instant horizontal swipe)
             FeedView(
                 model: activeModel,
-                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showR34KeySheet && creatorGridSource == nil,
+                isVisible: activeTab == .home && !showSettingsModal && !showXLoginSheet && !showIGLoginSheet && !showRedditLoginSheet && !showR34KeySheet && creatorGridSource == nil,
                 currentID: currentPostIDBinding,
                 onOpenCategories: {
                     withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
@@ -422,6 +405,10 @@ struct GoonedMainShell: View {
                 onConnectIG: {
                     pendingFeedAfterLogin = activeModel.source.isIGFeed ? activeModel.source : .igReels
                     showIGLoginSheet = true
+                },
+                onConnectReddit: {
+                    pendingFeedAfterLogin = activeModel.source.isRedditPersonalFeed ? activeModel.source : .redditHome
+                    showRedditLoginSheet = true
                 }
             )
             .id(activeChannel)
@@ -431,6 +418,7 @@ struct GoonedMainShell: View {
                         && !showSettingsModal
                         && !showXLoginSheet
                         && !showIGLoginSheet
+                        && !showRedditLoginSheet
                         && !showR34KeySheet
                         && creatorGridSource == nil,
                     onSwipeLeft: { handleHorizontalFeedSwipe(dx: -100) },
@@ -443,8 +431,57 @@ struct GoonedMainShell: View {
 
             // 2. Top Bar on Home (auto-hides alongside bottom dock when controls are collapsed)
             if activeTab == .home && !store.data.settings.controlsCollapsed {
-                VStack {
+                VStack(spacing: 8) {
                     homeTopBar
+                    if activeChannel == .forYou,
+                       !showSettingsModal,
+                       !showXLoginSheet,
+                       !showIGLoginSheet,
+                       !showRedditLoginSheet,
+                       !showR34KeySheet,
+                       creatorGridSource == nil,
+                       let ann = license.activeAnnouncement {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                Circle()
+                                    .fill(Theme.accent.opacity(0.24))
+                                    .frame(width: 26, height: 26)
+                                Image(systemName: "megaphone.fill")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                    .foregroundStyle(Theme.accentBright)
+                            }
+                            Text(ann.text)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 4)
+                            Button {
+                                withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                                    license.dismissAnnouncement(ann.id)
+                                }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 10.5, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.8))
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.white.opacity(0.12), in: Circle())
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color(red: 0.14, green: 0.04, blue: 0.09).opacity(0.92))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .stroke(Theme.accentBright.opacity(0.45), lineWidth: 1)
+                                )
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                        .padding(.horizontal, 14)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     Spacer()
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -589,6 +626,11 @@ struct GoonedMainShell: View {
                         pendingFeedAfterLogin = nil
                         showIGLoginSheet = true
                     },
+                    onConnectReddit: {
+                        showSettingsModal = false
+                        pendingFeedAfterLogin = nil
+                        showRedditLoginSheet = true
+                    },
                     onSetupR34Key: {
                         showSettingsModal = false
                         showR34KeySheet = true
@@ -671,6 +713,14 @@ struct GoonedMainShell: View {
         .sheet(isPresented: $showIGLoginSheet) {
             InstagramLoginSheet {
                 let target = pendingFeedAfterLogin ?? .igReels
+                pendingFeedAfterLogin = nil
+                selectFeed(target, forceReload: true)
+            }
+            .environmentObject(store)
+        }
+        .sheet(isPresented: $showRedditLoginSheet) {
+            RedditLoginSheet {
+                let target = pendingFeedAfterLogin ?? .redditHome
                 pendingFeedAfterLogin = nil
                 selectFeed(target, forceReload: true)
             }
@@ -854,6 +904,38 @@ struct GoonedMainShell: View {
                 slotPostIDs[.xBookmarks] = nil
                 Task { await xBookmarksModel.refresh(rotateCursor: true) }
             }
+        case .redditHome:
+            customBackStack.removeAll()
+            activeChannel = .redditHome
+            lastRedditChannel = .redditHome
+            if forceReload {
+                slotPostIDs[.redditHome] = nil
+                Task { await redditHomeModel.refresh(rotateCursor: true) }
+            }
+        case .redditPopular:
+            customBackStack.removeAll()
+            activeChannel = .redditPopular
+            lastRedditChannel = .redditPopular
+            if forceReload {
+                slotPostIDs[.redditPopular] = nil
+                Task { await redditPopularModel.refresh(rotateCursor: true) }
+            }
+        case .redditSaved:
+            customBackStack.removeAll()
+            activeChannel = .redditSaved
+            lastRedditChannel = .redditSaved
+            if forceReload {
+                slotPostIDs[.redditSaved] = nil
+                Task { await redditSavedModel.refresh(rotateCursor: true) }
+            }
+        case .redditUpvoted:
+            customBackStack.removeAll()
+            activeChannel = .redditUpvoted
+            lastRedditChannel = .redditUpvoted
+            if forceReload {
+                slotPostIDs[.redditUpvoted] = nil
+                Task { await redditUpvotedModel.refresh(rotateCursor: true) }
+            }
         case .rule34(let tag) where tag.isEmpty:
             customBackStack.removeAll()
             activeChannel = .rule34
@@ -972,16 +1054,26 @@ struct GoonedMainShell: View {
         }
     }
 
+    private func selectRedditFeedOrLogin(_ src: FeedSource) {
+        if store.data.redditSession.isConnected {
+            selectFeed(src)
+        } else {
+            pendingFeedAfterLogin = src
+            showRedditLoginSheet = true
+        }
+    }
+
     private var homeChannelIndex: Int {
         switch activeChannel {
         case .following: return 0
         case .forYou, .custom: return 1
         case .xForYou, .xFollowing, .xBookmarks: return 2
-        case .rule34: return 3
-        case .igReels, .igFollowing, .igSaved: return 4
-        case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return 5
-        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return 6
-        case .longErome: return 7
+        case .redditHome, .redditPopular, .redditSaved, .redditUpvoted: return 3
+        case .rule34: return 4
+        case .igReels, .igFollowing, .igSaved: return 5
+        case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return 6
+        case .longAll, .longEporner, .longXVideos, .longPornhub, .longXHamster, .longSpankBang: return 7
+        case .longErome: return 8
         }
     }
 
@@ -989,9 +1081,9 @@ struct GoonedMainShell: View {
         if let pid = slotPostIDs[activeChannel], MediaMetaRegistry.albumItems(for: pid).count > 1 {
             return
         }
-        let channels: [FeedSource] = [.following, .forYou, .xForYou, .rule34(""), .igReels, .ofForYou, .longVideos(.all), .longVideos(.erome)]
+        let channels: [FeedSource] = [.following, .forYou, .xForYou, .redditHome, .rule34(""), .igReels, .ofForYou, .longVideos(.all), .longVideos(.erome)]
         let cur = homeChannelIndex
-        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> R34 -> IG -> OF -> Long Videos
+        // Swipe left (dx < 0) moves forward: Following -> For You -> X -> Reddit -> R34 -> IG -> OF -> Long Videos
         // Swipe right (dx > 0) moves backward
         let nextIdx = dx < 0 ? cur + 1 : cur - 1
         guard channels.indices.contains(nextIdx) else { return }
@@ -999,6 +1091,8 @@ struct GoonedMainShell: View {
         let target = channels[nextIdx]
         if target.isXFeed {
             selectXFeedOrLogin(target)
+        } else if target.isRedditPersonalFeed {
+            selectRedditFeedOrLogin(target)
         } else if target.isIGFeed {
             selectIGFeedOrLogin(target)
         } else {
@@ -1057,6 +1151,13 @@ struct GoonedMainShell: View {
                     (.xFollowing, "Following", .xFollowing),
                     (.xBookmarks, "Bookmarks", .xBookmarks)
                 ]) { selectXFeedOrLogin($0) }
+            } else if isRedditChannel {
+                subChannelBar([
+                    (.redditHome, "Home", .redditHome),
+                    (.redditPopular, "Popular", .redditPopular),
+                    (.redditSaved, "Saved", .redditSaved),
+                    (.redditUpvoted, "Upvoted", .redditUpvoted)
+                ]) { selectRedditFeedOrLogin($0) }
             } else if isIGChannel {
                 subChannelBar([
                     (.igReels, "Reels", .igReels),
@@ -1119,13 +1220,30 @@ struct GoonedMainShell: View {
                             BrandLogoX(active: isXChannel, connected: store.data.xSession.isConnected)
                         }
 
-                        brandChannelButton(id: 3, active: activeChannel == .rule34) {
+                        brandChannelButton(id: 3, active: isRedditChannel) {
+                            if isRedditChannel {
+                                selectFeed(activeModel.source, forceReload: true)
+                            } else {
+                                let target: FeedSource
+                                switch lastRedditChannel {
+                                case .redditPopular: target = .redditPopular
+                                case .redditSaved: target = .redditSaved
+                                case .redditUpvoted: target = .redditUpvoted
+                                default: target = .redditHome
+                                }
+                                selectRedditFeedOrLogin(target)
+                            }
+                        } label: {
+                            BrandLogoReddit(active: isRedditChannel, connected: store.data.redditSession.isConnected)
+                        }
+
+                        brandChannelButton(id: 4, active: activeChannel == .rule34) {
                             selectFeed(.rule34(""), forceReload: activeChannel == .rule34)
                         } label: {
                             BrandLogoRule34(active: activeChannel == .rule34)
                         }
 
-                        brandChannelButton(id: 4, active: isIGChannel) {
+                        brandChannelButton(id: 5, active: isIGChannel) {
                             if isIGChannel {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
@@ -1136,7 +1254,7 @@ struct GoonedMainShell: View {
                             BrandLogoInstagram(active: isIGChannel, connected: store.data.igSession.isConnected)
                         }
 
-                        brandChannelButton(id: 5, active: isOFChannel) {
+                        brandChannelButton(id: 6, active: isOFChannel) {
                             if isOFChannel {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
@@ -1153,7 +1271,7 @@ struct GoonedMainShell: View {
                             BrandLogoOnlyFans(active: isOFChannel)
                         }
 
-                        brandChannelButton(id: 6, active: isLongChannel) {
+                        brandChannelButton(id: 7, active: isLongChannel) {
                             if isLongChannel {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
@@ -1172,7 +1290,7 @@ struct GoonedMainShell: View {
                             BrandLogoLongVideos(active: isLongChannel)
                         }
 
-                        brandChannelButton(id: 7, active: activeChannel == .longErome) {
+                        brandChannelButton(id: 8, active: activeChannel == .longErome) {
                             selectFeed(.longVideos(.erome), forceReload: activeChannel == .longErome)
                         } label: {
                             BrandLogoErome(active: activeChannel == .longErome)
@@ -1349,6 +1467,42 @@ struct GoonedMainShell: View {
 }
 
 // MARK: - Compact Brand Logos for Top Bar
+
+struct BrandLogoReddit: View {
+    var active: Bool
+    var connected: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(red: 1.0, green: 0.34, blue: 0.08), Color(red: 0.92, green: 0.20, blue: 0.0)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 26, height: 26)
+                .overlay(
+                    Circle().stroke(active ? Color.white : Color.white.opacity(0.28), lineWidth: active ? 1.5 : 0.8)
+                )
+                .overlay(
+                    Text("r/")
+                        .font(.system(size: 12.5, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                )
+
+            if connected {
+                Circle()
+                    .fill(Theme.accentBright)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color.black, lineWidth: 1))
+                    .offset(x: 1, y: -1)
+            }
+        }
+        .frame(width: 26, height: 26)
+    }
+}
 
 struct BrandLogoX: View {
     var active: Bool
