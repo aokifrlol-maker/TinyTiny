@@ -355,7 +355,8 @@ final class RedditPersonalAPI {
                    let mp4Obj = URL(string: mp4Str) {
                     if firstW == nil { firstW = s["x"] as? Int }
                     if firstH == nil { firstH = s["y"] as? Int }
-                    let posterObj = ((s["gif"] as? String) ?? (s["u"] as? String))?.replacingOccurrences(of: "&amp;", with: "&").flatMap { URL(string: $0) }
+                    let posterStr = ((s["gif"] as? String) ?? (s["u"] as? String))?.replacingOccurrences(of: "&amp;", with: "&")
+                    let posterObj = posterStr.flatMap { URL(string: $0) }
                     slides.append(AlbumMediaItem(id: "rdg_\(mid)_\(idx)", url: mp4Obj, posterURL: posterObj, isVideo: true))
                 } else if let u = (s["u"] as? String ?? s["gif"] as? String)?.replacingOccurrences(of: "&amp;", with: "&"),
                           u.hasPrefix("http"),
