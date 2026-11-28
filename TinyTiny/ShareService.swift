@@ -138,7 +138,7 @@ final class ShareService: ObservableObject {
         var shouldDeleteTemp = false
         var fallbackPickedURL: URL? = nil
 
-        if let offline = OfflineManager.shared.localMediaURL(for: post.id),
+        if let offline = OfflineManager.localMediaURL(forId: post.id),
            FileManager.default.fileExists(atPath: offline.path) {
             localFileURL = offline
         } else {
