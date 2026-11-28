@@ -576,7 +576,10 @@ fun GoonedReelCell(
                             }
                             !isShowingImage && offset.x > w * 0.70f -> {
                                 val step = if (gif.isLongVideoPost) 10 else 5
-                                exoPlayer?.let { p -> p.seekTo((p.currentPosition + step * 1000L).coerceAtMost(p.duration.coerceAtLeast(0L))) }
+                                exoPlayer?.let { p ->
+                                    val target = p.currentPosition + step * 1000L
+                                    p.seekTo(if (p.duration > 0L) target.coerceAtMost(p.duration) else target)
+                                }
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 skipIndicator = step
                                 scope.launch { delay(650); skipIndicator = null }
@@ -1325,7 +1328,7 @@ fun GoonedReelCell(
 @Composable
 private fun PlayerScrubberBar(player: ExoPlayer, isActive: Boolean) {
     var currentSec by remember(player) { mutableDoubleStateOf(0.0) }
-    var durationSec by remember(player) { mutableDoubleStateOf(1.0) }
+    var durationSec by remember(player) { mutableDoubleStateOf(0.0) }
     var isDragging by remember(player) { mutableStateOf(false) }
 
     LaunchedEffect(player, isActive) {
@@ -1452,8 +1455,9 @@ private fun TallOrNormalImage(urls: List<String>, fill: Boolean, knownAspect: Do
     val ctx = LocalContext.current
     var idx by remember(urls) { mutableIntStateOf(0) }
     var failed by remember(urls) { mutableStateOf(false) }
+    var retryNonce by remember(urls) { mutableIntStateOf(0) }
     val activeUrl = urls.getOrNull(idx)
-    val isTall = knownAspect != null && knownAspect > 0.0 && (1.0 / knownAspect) > 1.35
+    val isTall = knownAspect != null && knownAspect > 0.0 && (1.0 / knownAspect) > 2.2
 
     if (failed || activeUrl == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1462,7 +1466,7 @@ private fun TallOrNormalImage(urls: List<String>, fill: Boolean, knownAspect: Do
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .liquidGlassCapsule(tinted = true)
-                    .clickable { idx = 0; failed = false }
+                    .clickable { idx = 0; failed = false; retryNonce++ }
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
                 Icon(Icons.Default.BrokenImage, contentDescription = null, tint = Theme.accentBright, modifier = Modifier.size(18.dp))
@@ -1472,7 +1476,7 @@ private fun TallOrNormalImage(urls: List<String>, fill: Boolean, knownAspect: Do
         return
     }
 
-    val request = remember(activeUrl) {
+    val request = remember(activeUrl, retryNonce) {
         val rb = ImageRequest.Builder(ctx).data(activeUrl).crossfade(true)
         for ((k, v) in MediaHeaders.headers(activeUrl)) rb.addHeader(k, v)
         rb.build()

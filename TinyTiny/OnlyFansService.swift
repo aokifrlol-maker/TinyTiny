@@ -850,7 +850,7 @@ actor OnlyFansAPI {
         guard !q.isEmpty else { return await trending(after: after) }
 
         let cur = decodeCursor(after)
-        let o = (cur?["o"] as? Int) ?? 0
+        let o = (cur?["o"] as? Int) ?? (Int(after ?? "") ?? 0)
 
         var results: [Gif] = []
         var totalNextOffset = o
@@ -892,7 +892,7 @@ actor OnlyFansAPI {
 
         return GoonedFeedResponse(
             posts: results,
-            after: encodeCursor(["mode": "search", "o": max(totalNextOffset, o + 40)])
+            after: (results.isEmpty || q.count < 3) ? nil : encodeCursor(["mode": "search", "o": max(totalNextOffset, o + 40)])
         )
     }
 }

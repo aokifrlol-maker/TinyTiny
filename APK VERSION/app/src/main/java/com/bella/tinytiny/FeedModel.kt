@@ -216,9 +216,10 @@ class FeedModel(
             recordDedupKeys(initialItems)
         } else if (!initialSource.isList) {
             val key = cursorKey(initialSource, sort.value)
+            val initGen = loadGen
             scope.launch {
                 val cached = loadDiskCache(key)
-                if (items.value.isEmpty() && cached.isNotEmpty()) {
+                if (loadGen == initGen && source.value == initialSource && items.value.isEmpty() && cached.isNotEmpty()) {
                     val keepSeen = isProfileOrSearch(initialSource)
                     val fy = SmartTasteEngine.shared.state.value.sourceSettings
                     val filtered = cached.filter {
@@ -277,6 +278,7 @@ class FeedModel(
         allowLoadMore: Boolean = false
     ) {
         if (source.value == newSource && initialItems.isEmpty() && items.value.isNotEmpty()) {
+            loadGen++
             activeJob?.cancel()
             isLoading.value = false
             activeJob = scope.launch { refresh(rotateCursor = true, keepSavedCursor = false) }
@@ -320,6 +322,7 @@ class FeedModel(
     fun setSort(newSort: FeedSort) {
         if (sort.value == newSort) return
         sort.value = newSort
+        loadGen++
         activeJob?.cancel()
         isLoading.value = false // CRITICAL FIX
         activeJob = scope.launch { refresh(keepSavedCursor = true) }
@@ -797,7 +800,7 @@ class FeedModel(
         val igDef: kotlinx.coroutines.Deferred<GoonedFeedResponse?>? = if (fy.includeInstagram && d.igSession.isConnected && d.igSession.mixIntoForYou) async {
             try { InstagramAPI.reelsFeed(mixIGCursor) } catch (_: Throwable) { null }
         } else null
-        val personalRedditDef: kotlinx.coroutines.Deferred<GoonedFeedResponse?>? = if (d.redditSession.isConnected && d.redditSession.mixIntoForYou) async {
+        val personalRedditDef: kotlinx.coroutines.Deferred<GoonedFeedResponse?>? = if (fy.includeReddit && d.redditSession.isConnected && d.redditSession.mixIntoForYou) async {
             try { RedditPersonalAPI.homeFeed(mixPersonalRedditCursor) } catch (_: Throwable) { null }
         } else null
 

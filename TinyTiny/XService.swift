@@ -348,6 +348,7 @@ enum XTweetParser {
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static let dateLock = NSLock()
     private static let twitterDateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -357,7 +358,10 @@ enum XTweetParser {
     private static let isoFormatter = ISO8601DateFormatter()
 
     private static func parseTwitterDate(_ raw: String?) -> String? {
-        guard let raw, !raw.isEmpty, let date = twitterDateFormatter.date(from: raw) else { return nil }
+        guard let raw, !raw.isEmpty else { return nil }
+        dateLock.lock()
+        defer { dateLock.unlock() }
+        guard let date = twitterDateFormatter.date(from: raw) else { return nil }
         return isoFormatter.string(from: date)
     }
 
@@ -368,6 +372,8 @@ enum XTweetParser {
         else if let s = val as? String { ms = Double(s) }
         else { ms = nil }
         guard let ms, ms > 1_000_000_000_000 else { return nil }
+        dateLock.lock()
+        defer { dateLock.unlock() }
         return isoFormatter.string(from: Date(timeIntervalSince1970: ms / 1000.0))
     }
 
@@ -495,22 +501,17 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         if let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery, !q.isEmpty {
             path += "?" + q
         }
-        let escaped = path
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
         let js = """
-        (function(p) {
-            try {
-                if (!document.getElementById('react-root')) return false;
-                if ((location.pathname + location.search) === p) return false;
-                window.history.pushState({}, '', p);
-                window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-                window.scrollTo(0, 0);
-                return true;
-            } catch (e) { return false; }
-        })('\(escaped)')
+        try {
+            if (!document.getElementById('react-root')) return false;
+            if ((location.pathname + location.search) === p) return false;
+            window.history.pushState({}, '', p);
+            window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+            window.scrollTo(0, 0);
+            return true;
+        } catch (e) { return false; }
         """
-        let result = try? await wv.evaluateJavaScript(js)
+        let result = try? await wv.callAsyncJavaScript(js, arguments: ["p": path], in: nil, contentWorld: .page)
         if let b = result as? Bool { return b }
         return (result as? NSNumber)?.boolValue ?? false
     }
@@ -1067,7 +1068,9 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             return GoonedFeedResponse(posts: [], after: nil)
         }
         if isRateLimited {
-            return GoonedFeedResponse(posts: routeBuffers[routeKey] ?? [], after: nil)
+            let buffered = routeBuffers[routeKey] ?? []
+            routeBuffers[routeKey] = []
+            return GoonedFeedResponse(posts: buffered, after: nil)
         }
 
         if isRefresh {
@@ -1246,7 +1249,10 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
             return res
         }
 
-        // Current search tab/window ran dry — advance to the next pivot (Live / Media / Native Video / Historical `until:`)!
+        // Current search tab/window ran dry — advance to the next pivot (capped at stage 8 so empty queries terminate)
+        if stage >= 8 {
+            return GoonedFeedResponse(posts: [], after: nil)
+        }
         let dry = (searchDryByQuery[qKey] ?? 0) + 1
         searchDryByQuery[qKey] = dry
         if dry >= 1 {
@@ -1259,7 +1265,7 @@ final class XWebEngine: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
                 targetURL: target.url,
                 isRefresh: true
             )
-            return GoonedFeedResponse(posts: nextRes.posts, after: "xsearch_s\(stage)_\(pageCounter)")
+            return GoonedFeedResponse(posts: nextRes.posts, after: (nextRes.posts.isEmpty && stage >= 8) ? nil : "xsearch_s\(stage)_\(pageCounter)")
         }
 
         return GoonedFeedResponse(posts: [], after: "xsearch_s\(stage)_\(pageCounter)")

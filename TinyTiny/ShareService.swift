@@ -220,7 +220,8 @@ final class ShareService: ObservableObject {
             return await openDecryptedPayload(payload, key: key)
         }
 
-        guard !shareId.isEmpty,
+        let validId = shareId.range(of: "^[A-Za-z0-9_-]{4,64}$", options: .regularExpression) != nil
+        guard validId,
               let url = URL(string: "\(LicenseManager.shared.normalizedBaseURL)/v1/share/\(shareId)"),
               let (data, resp) = try? await session.data(from: url),
               (resp as? HTTPURLResponse)?.statusCode == 200,
@@ -745,12 +746,15 @@ struct DirectIGDropPayload: Identifiable {
     @MainActor
     static func fetchFromWorker(dropId: String) async -> DirectIGDropPayload? {
         let base = LicenseManager.shared.normalizedBaseURL
-        guard let url = URL(string: "\(base)/v1/igdrop/\(dropId)"),
+        let validDropId = dropId.range(of: "^[A-Za-z0-9_-]{4,64}$", options: .regularExpression) != nil
+        guard validDropId,
+              let url = URL(string: "\(base)/v1/igdrop/\(dropId)"),
               let (data, resp) = try? await URLSession.shared.data(from: url),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let mp4Str = json["mp4Url"] as? String,
-              let mp4URL = URL(string: mp4Str) else {
+              let mp4URL = URL(string: mp4Str),
+              mp4URL.scheme?.lowercased() == "https" else {
             return nil
         }
         let title = (json["title"] as? String) ?? "Video"

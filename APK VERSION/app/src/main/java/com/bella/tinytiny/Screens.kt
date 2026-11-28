@@ -438,7 +438,7 @@ fun GoonedBrowseOverlay(
                                         modifier = Modifier
                                             .weight(1f)
                                             .liquidGlassCard(16.dp, tinted)
-                                            .clickable { onSelectFeed(FeedSource.LongSearch(LongVideoSite.EROME, q)) }
+                                            .clickable { onOpenPost(album) }
                                             .padding(8.dp)
                                     ) {
                                         AsyncImage(
@@ -684,6 +684,15 @@ fun GoonedBrowseOverlay(
                                             FeedSource.LongVideos(site)
                                         }
                                         "multisearch" -> FeedSource.MultiSearch(recent.name)
+                                        "reddithome" -> FeedSource.RedditHome
+                                        "redditpopular" -> FeedSource.RedditPopular
+                                        "redditsaved" -> FeedSource.RedditSaved
+                                        "redditupvoted" -> FeedSource.RedditUpvoted
+                                        "longsearch" -> {
+                                            val parts = recent.name.split("|", limit = 2)
+                                            val site = LongVideoSite.entries.firstOrNull { it.rawValue == parts.first() } ?: LongVideoSite.ALL
+                                            FeedSource.LongSearch(site, parts.getOrElse(1) { recent.name })
+                                        }
                                         else -> FeedSource.ForYou
                                     }
                                     onSelectFeed(target)
@@ -2003,7 +2012,12 @@ fun AlgorithmEditorSheet(onDismiss: () -> Unit) {
                         }
                     }
                     GuardrailChip("Hide Yaoi / Bara", hideYaoi) {
-                        if (hideYaoi) UserStore.shared.removeBlockedTag("yaoi") else UserStore.shared.addBlockedTags("yaoi bara")
+                        if (hideYaoi) {
+                            UserStore.shared.removeBlockedTag("yaoi")
+                            UserStore.shared.removeBlockedTag("bara")
+                        } else {
+                            UserStore.shared.addBlockedTags("yaoi bara")
+                        }
                     }
                     GuardrailChip("Boost Femboy", boostFemboy) {
                         if (boostFemboy) UserStore.shared.removeBoostedTag("femboy") else UserStore.shared.addBoostedTags("femboy")

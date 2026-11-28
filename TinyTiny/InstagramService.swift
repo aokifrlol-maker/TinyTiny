@@ -595,13 +595,14 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
                         routeKey: routeAtCapture
                     )
                 }
-            guard !reels.isEmpty else { return }
+            guard !reels.isEmpty || maxId != nil else { return }
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if let maxId {
                     self.nextMaxIdByRoute[routeAtCapture] = maxId
                 }
+                guard !reels.isEmpty else { return }
                 let store = UserStore.shared
                 let fresh = reels.filter { post in
                     guard allowSeen || !store.isSeen(post),
@@ -1312,7 +1313,14 @@ enum InstagramAPI {
         if after != nil && maxId.isEmpty {
             return GoonedFeedResponse(posts: [], after: nil)
         }
-        let query = maxId.isEmpty ? "" : "?max_id=\(maxId)"
+        let safeMax = maxId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)?
+            .replacingOccurrences(of: "&", with: "%26")
+            .replacingOccurrences(of: "=", with: "%3D")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\\", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "") ?? ""
+        let query = safeMax.isEmpty ? "" : "?max_id=\(safeMax)"
         let triggerSavedJS = """
         (async function() {
             try {
@@ -1336,15 +1344,18 @@ enum InstagramAPI {
     /// Any Instagram creator's (`@username`) Reels & video timeline
     @MainActor
     static func userReels(_ username: String, after: String?) async -> GoonedFeedResponse {
-        let clean = username
+        let allowedUserChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._"))
+        let clean = String(username
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
             .replacingOccurrences(of: "ig:", with: "")
+            .unicodeScalars.filter { allowedUserChars.contains($0) })
+        guard !clean.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
         let url = URL(string: "https://www.instagram.com/\(clean)/reels/") ?? URL(string: "https://www.instagram.com/reels/")!
         let triggerProfileJS = """
         (async function() {
             try {
-                await fetch('https://www.instagram.com/api/v1/users/web_profile_info/?username=\(clean)', {
+                await fetch('https://www.instagram.com/api/v1/users/web_profile_info/?username=' + encodeURIComponent('\(clean)'), {
                     headers: {
                         'X-IG-App-ID': '936619743392459',
                         'X-Requested-With': 'XMLHttpRequest'

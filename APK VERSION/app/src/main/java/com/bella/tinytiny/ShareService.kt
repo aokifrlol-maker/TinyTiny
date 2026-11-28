@@ -237,7 +237,7 @@ object ShareService {
             }
         }
 
-        if (shareId.isEmpty()) return@withContext "Share drop not found."
+        if (!shareId.matches(Regex("^[A-Za-z0-9_-]{4,64}$"))) return@withContext "Share drop not found."
         try {
             val req = Request.Builder().url("${LicenseManager.normalizedBaseURL}/v1/share/$shareId").build()
             client.newCall(req).execute().use { resp ->
@@ -266,12 +266,37 @@ object ShareService {
             pendingReceivedTitle.value = payload.title
             return null
         }
+        if (!payload.inlineBase64.isNullOrEmpty()) {
+            try {
+                val plainBytes = Base64.decode(payload.inlineBase64, Base64.DEFAULT)
+                val safeExt = (payload.fileExtension ?: "mp4").lowercase().filter { it.isLetterOrDigit() }.take(8).ifEmpty { "mp4" }
+                val local = File(TinyTinyApplication.instance.cacheDir, "tt_drop_${UUID.randomUUID().toString().take(8)}.$safeExt")
+                local.writeBytes(plainBytes)
+                val localStr = "file://${local.absolutePath}"
+                val synth = Gif(
+                    id = "drop_${UUID.randomUUID().toString().take(8)}",
+                    title = payload.title,
+                    author = "Shared Drop",
+                    subreddit = "Drop",
+                    mediaType = if (safeExt in setOf("jpg", "jpeg", "png", "webp")) "image" else "video",
+                    mediaUrl = localStr,
+                    muxedUrl = localStr,
+                    muxedUrlHd = localStr,
+                    sourceUrl = localStr,
+                    permalink = localStr
+                )
+                pendingReceivedPost.value = synth
+                pendingReceivedPosts.value = null
+                pendingReceivedTitle.value = payload.title
+                return null
+            } catch (_: Throwable) {}
+        }
         val blobStr = payload.encryptedBlobUrl
         if (!blobStr.isNullOrEmpty()) {
             try {
-                val u = URI(blobStr)
+                val u = URI(blobStr).normalize()
                 val expectedHost = URI(LicenseManager.normalizedBaseURL).host
-                if (u.scheme == "https" && u.host == expectedHost && (u.path ?: "").startsWith("/v1/blob/")) {
+                if (u.scheme == "https" && u.host == expectedHost && u.userInfo == null && u.port == -1 && (u.path ?: "").startsWith("/v1/blob/")) {
                     val req = Request.Builder().url(blobStr).build()
                     client.newCall(req).execute().use { resp ->
                         if (resp.code == 200) {
@@ -294,6 +319,7 @@ object ShareService {
                                 permalink = localStr
                             )
                             pendingReceivedPost.value = synth
+                            pendingReceivedPosts.value = null
                             pendingReceivedTitle.value = payload.title
                             return null
                         }

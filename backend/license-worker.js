@@ -765,8 +765,8 @@ async function buildUsersStatsMessage(env) {
         if (now - last <= DAY_SEC) active24h++;
         if (now - last <= 7 * DAY_SEC) active7d++;
         if (st === "active" || now - last <= 7 * DAY_SEC) {
-          const m = info.model || "Unknown iPhone";
-          const ios = `iOS ${info.ios || "?"}`;
+          const m = info.model || "Unknown Device";
+          const ios = formatOsLabel(info.ios);
           const app = `v${info.app || "1.0"}`;
           modelCounts[m] = (modelCounts[m] || 0) + 1;
           iosCounts[ios] = (iosCounts[ios] || 0) + 1;
@@ -1525,6 +1525,9 @@ async function handleTelegramUpdate(env, update) {
       rec.lifetime = true;
       rec.expiresAt = null;
       rec.durationLabel = "Lifetime";
+    } else if (rec.lifetime) {
+      await sendTelegram(env, chatId, `<code>${escapeHtmlTg(rec.key)}</code> is already a <b>Lifetime</b> key (no change).`);
+      return new Response("ok");
     } else if (rec.activatedAt) {
       const base = Math.max(nowSec(), rec.expiresAt || nowSec());
       rec.lifetime = false;
@@ -2837,6 +2840,9 @@ export default {
       const range = request.headers.get("Range");
       if (range) reqHeaders["Range"] = range;
       const upstream = await fetch(info.mp4Url, { method: request.method, headers: reqHeaders });
+      if (!upstream.ok && upstream.status !== 206) {
+        return new Response("Upstream video link expired or unavailable", { status: upstream.status === 404 || upstream.status === 410 ? 410 : 502 });
+      }
       const outHeaders = new Headers({
         "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",

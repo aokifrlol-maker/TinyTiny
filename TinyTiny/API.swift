@@ -43,8 +43,10 @@ actor GoonedAPI {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    private static let pathSegmentAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.~"))
+
     private func enc(_ s: String) -> String {
-        s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
+        s.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed) ?? s
     }
 
     /// Generates a fresh random seed cursor `{"seed":"<random>","offset":0}` so `/reddit/foryou` rotates on every load instead of returning the static `foryou-ssr` cache.
@@ -56,7 +58,8 @@ actor GoonedAPI {
 
     /// Encodes a category exclusion cursor `{"categoryPool":{"from":null,"head":[...]}}` so `/reddit/category/{name}` excludes already-seen video IDs on the server.
     static func categoryExclusionCursor(seenIDs: [String]) -> String? {
-        let clean = Array(seenIDs.filter { !$0.hasPrefix("x_") }.prefix(120))
+        // Only include valid gooned.app Reddit post IDs (exclude x_, ig_, of_, r34_, lv_, rd_, media_, twvid_, etc.)
+        let clean = Array(seenIDs.filter { !$0.contains("_") && $0.count >= 4 && $0.count <= 12 }.suffix(120))
         guard !clean.isEmpty else { return nil }
         let payload: [String: Any] = [
             "categoryPool": [

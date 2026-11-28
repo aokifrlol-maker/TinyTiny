@@ -460,13 +460,17 @@ fun RedditLoginSheet(
 
     fun loadMagicLink(raw: String) {
         val trimmed = raw.trim()
-        if (trimmed.startsWith("https://", ignoreCase = true) || trimmed.startsWith("http://", ignoreCase = true)) {
+        val parsed = runCatching { android.net.Uri.parse(trimmed) }.getOrNull()
+        val host = parsed?.host?.lowercase() ?: ""
+        val isAllowedReddit = parsed?.scheme?.equals("https", ignoreCase = true) == true &&
+            (host == "reddit.com" || host.endsWith(".reddit.com") || host == "redditmail.com" || host.endsWith(".redditmail.com"))
+        if (isAllowedReddit) {
             statusText = "Opening one-time login link..."
             showPasteBar = false
             pastedLink = ""
             mainWebView?.loadUrl(trimmed)
         } else {
-            statusText = "Copy the full https:// login link from your Reddit email first"
+            statusText = "Copy the full https://reddit.com login link from your Reddit email first"
             showPasteBar = true
         }
     }

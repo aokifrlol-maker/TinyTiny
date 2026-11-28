@@ -21,12 +21,13 @@ final class OrientationDelegate: NSObject, UIApplicationDelegate {
         if let rotateTo {
             if #available(iOS 16.0, *) {
                 scene.requestGeometryUpdate(.iOS(interfaceOrientations: rotateTo)) { _ in }
+            } else {
+                let rawOrientation: Int = (rotateTo == .portrait)
+                    ? UIInterfaceOrientation.portrait.rawValue
+                    : UIInterfaceOrientation.landscapeRight.rawValue
+                UIDevice.current.setValue(rawOrientation, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
             }
-            let rawOrientation: Int = (rotateTo == .portrait)
-                ? UIInterfaceOrientation.portrait.rawValue
-                : UIInterfaceOrientation.landscapeRight.rawValue
-            UIDevice.current.setValue(rawOrientation, forKey: "orientation")
-            UIViewController.attemptRotationToDeviceOrientation()
         }
     }
 }

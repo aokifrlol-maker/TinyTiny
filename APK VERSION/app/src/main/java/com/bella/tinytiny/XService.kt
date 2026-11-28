@@ -241,7 +241,8 @@ object XTweetParser {
                                     ?: m.optString("id_str").takeIf { it.isNotEmpty() }?.let { "xmed_$it" }
                                 val dedupeKey = mediaKey ?: gid
 
-                                if (seen.add(gid) && seen.add(dedupeKey)) {
+                                val isNew = if (dedupeKey == gid) seen.add(gid) else (seen.add(gid) && seen.add(dedupeKey))
+                                if (isNew) {
                                     val thumb = m.optString("media_url_https").takeIf { it.isNotEmpty() }
                                         ?: m.optString("media_url").takeIf { it.isNotEmpty() }
                                     val orig = m.optJSONObject("original_info")
@@ -560,13 +561,18 @@ class XWebLane(private val laneName: String) {
         capturedOps.clear()
         directDisabledOps.clear()
         rateLimitedUntilMs = 0L
-        webView?.let { wv ->
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            wv.stopLoading()
-            wv.loadUrl("about:blank")
-            wv.destroy()
-        }
+        val wvToDestroy = webView
         webView = null
+        if (wvToDestroy != null) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    (wvToDestroy.parent as? ViewGroup)?.removeView(wvToDestroy)
+                    wvToDestroy.stopLoading()
+                    wvToDestroy.loadUrl("about:blank")
+                    wvToDestroy.destroy()
+                }
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")

@@ -159,7 +159,8 @@ object InstagramParser {
                         val code = node.optString("code").ifEmpty { node.optString("shortcode") }
                         val permalink = if (code.isNotEmpty()) "https://www.instagram.com/reel/$code/" else "https://www.instagram.com/$uname/"
                         val dedupeKey = if (code.length >= 5) "ig_code_$code" else gid
-                        if (seen.add(gid) && seen.add(dedupeKey)) {
+                        val isNew = if (dedupeKey == gid) seen.add(gid) else (seen.add(gid) && seen.add(dedupeKey))
+                        if (isNew) {
                             val thumb = node.optJSONObject("image_versions2")?.optJSONArray("candidates")?.optJSONObject(0)?.optString("url")
                                 ?: node.optString("display_url").takeIf { it.isNotEmpty() }
                                 ?: node.optString("thumbnail_src").takeIf { it.isNotEmpty() }
@@ -369,13 +370,18 @@ object InstagramWebEngine {
         routeBuffers.clear()
         routeCursors.clear()
         seenIdsByRoute.clear()
-        webView?.let { wv ->
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            wv.stopLoading()
-            wv.loadUrl("about:blank")
-            wv.destroy()
-        }
+        val wvToDestroy = webView
         webView = null
+        if (wvToDestroy != null) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    (wvToDestroy.parent as? ViewGroup)?.removeView(wvToDestroy)
+                    wvToDestroy.stopLoading()
+                    wvToDestroy.loadUrl("about:blank")
+                    wvToDestroy.destroy()
+                }
+            }
+        }
         try {
             val cm = CookieManager.getInstance()
             for (domain in listOf("https://www.instagram.com", "https://i.instagram.com")) {
@@ -700,19 +706,20 @@ object InstagramAPI {
         val maxId = after?.takeIf { !it.startsWith("igpage_") } ?: ""
         // Try fast direct authenticated Clips API first (~300ms), then fall back to WebView scraper
         fetchClipsHomeDirect(maxId)?.let { return it }
-        val escapedMax = maxId.replace("\\", "\\\\").replace("'", "\\'")
+        val qMax = org.json.JSONObject.quote(maxId)
         val trigger = if (maxId.isNotEmpty()) {
-            """fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'page_size=12&max_id='+encodeURIComponent('$escapedMax') }).catch(()=>{});"""
+            """(function(){var c=(document.cookie.match(/csrftoken=([^;]+)/)||[])[1]||'';fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459','x-csrftoken':c}, body:'page_size=12&max_id='+encodeURIComponent($qMax) }).catch(()=>{});})();"""
         } else {
-            """fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'page_size=12' }).catch(()=>{});"""
+            """(function(){var c=(document.cookie.match(/csrftoken=([^;]+)/)||[])[1]||'';fetch('/api/v1/clips/home/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459','x-csrftoken':c}, body:'page_size=12' }).catch(()=>{});})();"""
         }
         return InstagramWebEngine.fetchRoute("ig_reels", "https://www.instagram.com/reels/", after, apiTriggerJS = trigger)
     }
 
     suspend fun followingFeed(after: String? = null): GoonedFeedResponse {
         val maxId = after?.takeIf { !it.startsWith("igpage_") } ?: ""
+        val qMax = org.json.JSONObject.quote(maxId)
         val trigger = if (maxId.isNotEmpty()) {
-            """fetch('/api/v1/feed/timeline/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459'}, body:'reason=pagination&max_id='+encodeURIComponent('$maxId') }).catch(()=>{});"""
+            """(function(){var c=(document.cookie.match(/csrftoken=([^;]+)/)||[])[1]||'';fetch('/api/v1/feed/timeline/', { method:'POST', credentials:'include', headers:{'content-type':'application/x-www-form-urlencoded','x-ig-app-id':'936619743392459','x-csrftoken':c}, body:'reason=pagination&max_id='+encodeURIComponent($qMax) }).catch(()=>{});})();"""
         } else null
         return InstagramWebEngine.fetchRoute("ig_following", "https://www.instagram.com/?variant=following", after, apiTriggerJS = trigger)
     }
@@ -721,8 +728,9 @@ object InstagramAPI {
         val uname = UserStore.shared.data.value.igSession.username.trim().removePrefix("@")
         val target = if (uname.isNotEmpty() && uname != "IG Account") "https://www.instagram.com/$uname/saved/" else "https://www.instagram.com/accounts/saved/"
         val maxId = after?.takeIf { !it.startsWith("igpage_") } ?: ""
+        val qMax = org.json.JSONObject.quote(maxId)
         val trigger = if (maxId.isNotEmpty()) {
-            """fetch('/api/v1/feed/saved/posts/?max_id='+encodeURIComponent('$maxId'), { credentials:'include', headers:{'x-ig-app-id':'936619743392459'} }).catch(()=>{});"""
+            """fetch('/api/v1/feed/saved/posts/?max_id='+encodeURIComponent($qMax), { credentials:'include', headers:{'x-ig-app-id':'936619743392459'} }).catch(()=>{});"""
         } else null
         return InstagramWebEngine.fetchRoute("ig_saved", target, after, apiTriggerJS = trigger)
     }

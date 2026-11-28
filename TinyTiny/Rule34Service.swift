@@ -287,7 +287,7 @@ actor Rule34API {
             }
         }
 
-        return GoonedFeedResponse(posts: combined, after: "\(page + 1)")
+        return GoonedFeedResponse(posts: combined, after: combined.isEmpty ? nil : "\(page + 1)")
     }
 
     // MARK: - Tier 1: Direct `api.rule34.xxx`
@@ -531,6 +531,7 @@ actor Rule34API {
             let topTags = splitTags.prefix(8).map { "#\($0)" }.joined(separator: " ")
 
             let preferredImage = isGif ? fileUrl : sampleUrl
+            let playableMp4 = (lower.hasSuffix(".mp4") || lower.hasSuffix(".mov")) ? fileUrl : sampleUrl
             posts.append(
                 Gif(
                     id: postId,
@@ -542,14 +543,14 @@ actor Rule34API {
                     width: width,
                     height: height,
                     mediaType: isMp4 ? "video" : "image",
-                    mediaUrl: isMp4 ? fileUrl : preferredImage,
-                    muxedUrl: isMp4 ? fileUrl : nil,
-                    muxedUrlHd: isMp4 ? fileUrl : nil,
+                    mediaUrl: isMp4 ? playableMp4 : preferredImage,
+                    muxedUrl: isMp4 ? playableMp4 : nil,
+                    muxedUrlHd: isMp4 ? playableMp4 : nil,
                     hlsUrl: nil,
-                    posterUrl: fileUrl == preferredImage ? previewUrl : fileUrl,
+                    posterUrl: previewUrl,
                     thumbnailUrl: previewUrl,
-                    sourceUrl: "https://rule34.xxx",
-                    permalink: "https://rule34.xxx",
+                    sourceUrl: "https://yande.re/post/show/\(idVal)",
+                    permalink: "https://yande.re/post/show/\(idVal)",
                     createdUtc: nil
                 )
             )

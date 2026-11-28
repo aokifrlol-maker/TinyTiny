@@ -345,8 +345,8 @@ class SmartTasteEngine private constructor() {
         val pos = s.androidPosVisualVectors
         val neg = s.androidNegVisualVectors
         val candidates = posts.take(12).mapNotNull { post ->
-            if (visualScoreMirror.containsKey(post.id) || !visualInFlight.add(post.id)) return@mapNotNull null
             val u = post.thumbURL ?: post.posterURL ?: return@mapNotNull null
+            if (visualScoreMirror.containsKey(post.id) || !visualInFlight.add(post.id)) return@mapNotNull null
             post.id to u
         }
         if (candidates.isEmpty()) return

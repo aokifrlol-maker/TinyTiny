@@ -927,9 +927,12 @@ actor LongVideoAPI {
             let ns = cleaned as NSString
             for m in regex.matches(in: cleaned, range: NSRange(location: 0, length: ns.length)) {
                 let s = ns.substring(with: m.range)
-                // Skip poster frames that match a video's stem
+                // Skip poster frames that exactly match a video's stem (or stem + "_")
                 let stem = (URL(string: s)?.deletingPathExtension().lastPathComponent) ?? ""
-                let matchesVideo = videoURLs.contains { $0.deletingPathExtension().lastPathComponent.hasPrefix(stem) && !stem.isEmpty }
+                let matchesVideo = !stem.isEmpty && videoURLs.contains {
+                    let vStem = $0.deletingPathExtension().lastPathComponent
+                    return vStem == stem || vStem.hasPrefix(stem + "_") || stem.hasPrefix(vStem + "_")
+                }
                 if !matchesVideo, seenURLs.insert(s).inserted, let u = URL(string: s) {
                     albumItems.append(AlbumMediaItem(id: s, url: u, posterURL: u, isVideo: false))
                 }
@@ -978,6 +981,14 @@ actor LongVideoAPI {
         }
 
         if !urls.isEmpty {
+            if resolvedCache.count > 250 {
+                let cutoff = Date().addingTimeInterval(-1800)
+                resolvedCache = resolvedCache.filter { $0.value.cachedAt > cutoff }
+                if resolvedCache.count > 250 {
+                    let oldestKeys = resolvedCache.sorted { $0.value.cachedAt < $1.value.cachedAt }.prefix(80).map(\.key)
+                    for k in oldestKeys { resolvedCache.removeValue(forKey: k) }
+                }
+            }
             resolvedCache[gif.id] = ResolvedCacheEntry(urls: urls, cachedAt: Date())
             MediaMetaRegistry.register(postId: gif.id, extraVideoURLs: urls.map(\.absoluteString))
         }

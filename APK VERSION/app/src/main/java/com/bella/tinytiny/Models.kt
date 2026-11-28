@@ -77,8 +77,15 @@ data class Gif(
     override fun equals(other: Any?): Boolean = (other as? Gif)?.id == id
     override fun hashCode(): Int = id.hashCode()
 
+    private fun hasHost(raw: String?, domain: String): Boolean {
+        if (raw.isNullOrEmpty()) return false
+        val host = runCatching { android.net.Uri.parse(raw).host?.lowercase() }.getOrNull() ?: return false
+        return host == domain || host.endsWith(".$domain")
+    }
+
     val isXPost: Boolean
-        get() = id.startsWith("x_") || (sourceUrl?.contains("x.com") == true) || (permalink?.contains("x.com") == true)
+        get() = id.startsWith("x_") || hasHost(sourceUrl, "x.com") || hasHost(permalink, "x.com") ||
+            hasHost(sourceUrl, "twitter.com") || hasHost(permalink, "twitter.com")
 
     val isIGPost: Boolean
         get() = id.startsWith("ig_") || (sourceUrl?.contains("instagram.com") == true) || (permalink?.contains("instagram.com") == true)

@@ -257,6 +257,18 @@ struct GoonedBrowseOverlay: View {
                         let parts = recent.name.split(separator: "|", maxSplits: 1).map(String.init)
                         onSelectFeed(.ofCreator(id: parts.first ?? recent.name, handle: parts.count > 1 ? parts[1] : recent.name, displayName: nil))
                     case "ofsearch": onSelectFeed(.ofSearch(recent.name))
+                    case "reddithome": onSelectFeed(.redditHome)
+                    case "redditpopular": onSelectFeed(.redditPopular)
+                    case "redditsaved": onSelectFeed(.redditSaved)
+                    case "redditupvoted": onSelectFeed(.redditUpvoted)
+                    case "longvideos":
+                        let site = LongVideoSite(rawValue: recent.name) ?? .all
+                        onSelectFeed(.longVideos(site))
+                    case "longsearch":
+                        let parts = recent.name.split(separator: "|", maxSplits: 1).map(String.init)
+                        let site = LongVideoSite(rawValue: parts.first ?? "") ?? .all
+                        onSelectFeed(.longSearch(site, parts.count > 1 ? parts[1] : recent.name))
+                    case "multisearch": onSelectFeed(.multiSearch(recent.name))
                     default: onSelectFeed(.forYou)
                     }
                 } else {

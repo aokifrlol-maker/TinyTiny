@@ -55,16 +55,20 @@ final class RedditPersonalAPI {
         try await followingFeed(after: after)
     }
 
+    private static let pathSegmentAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.~"))
+
     func savedFeed(after: String?) async throws -> GoonedFeedResponse {
         let uname = await MainActor.run { UserStore.shared.data.redditSession.username }
-        guard !uname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
-        return try await fetchListing(oauthPath: "/user/\(uname)/saved", webPath: "/user/\(uname)/saved.json", after: after)
+        let encUname = uname.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed) ?? ""
+        guard !encUname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
+        return try await fetchListing(oauthPath: "/user/\(encUname)/saved", webPath: "/user/\(encUname)/saved.json", after: after)
     }
 
     func upvotedFeed(after: String?) async throws -> GoonedFeedResponse {
         let uname = await MainActor.run { UserStore.shared.data.redditSession.username }
-        guard !uname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
-        return try await fetchListing(oauthPath: "/user/\(uname)/upvoted", webPath: "/user/\(uname)/upvoted.json", after: after)
+        let encUname = uname.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed) ?? ""
+        guard !encUname.isEmpty else { return GoonedFeedResponse(posts: [], after: nil) }
+        return try await fetchListing(oauthPath: "/user/\(encUname)/upvoted", webPath: "/user/\(encUname)/upvoted.json", after: after)
     }
 
     private func fullWebCookieHeader(fallback: RedditAccountSession) async -> String {
@@ -72,7 +76,7 @@ final class RedditPersonalAPI {
         let rd = cookies.filter { $0.domain.lowercased().contains("reddit.com") && !$0.value.isEmpty }
         var map: [String: String] = ["over18": "1"]
         for c in rd { map[c.name] = c.value }
-        if !fallback.redditSessionCookie.isEmpty { map["reddit_session"] = fallback.redditSessionCookie }
+        if !fallback.redditSessionCookie.isEmpty && map["reddit_session"] == nil { map["reddit_session"] = fallback.redditSessionCookie }
         if !fallback.tokenV2.isEmpty && map["token_v2"] == nil { map["token_v2"] = fallback.tokenV2 }
         return map.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
     }
@@ -103,7 +107,7 @@ final class RedditPersonalAPI {
     }
 
     private func fetchOAuth(path: String, token: String, username: String, after: String?) async -> (status: Int, data: Data?) {
-        var comps = URLComponents(string: "https://oauth.reddit.com\(path)")!
+        guard var comps = URLComponents(string: "https://oauth.reddit.com\(path)") else { return (0, nil) }
         var items = [
             URLQueryItem(name: "raw_json", value: "1"),
             URLQueryItem(name: "limit", value: "50"),
@@ -149,7 +153,9 @@ final class RedditPersonalAPI {
         }
 
         // 2. Fallback: www.reddit.com with full WebView cookie jar + CORS headers
-        var comps = URLComponents(string: "https://www.reddit.com\(webPath)")!
+        guard var comps = URLComponents(string: "https://www.reddit.com\(webPath)") else {
+            return GoonedFeedResponse(posts: [], after: nil)
+        }
         var items = [
             URLQueryItem(name: "raw_json", value: "1"),
             URLQueryItem(name: "limit", value: "50"),
@@ -422,7 +428,30 @@ final class RedditPersonalAPI {
         }
     }
 
-    static func verifyUsername(cookieHeader: String) async -> String? {
+    static func verifyUsername(cookieHeader: String, tokenV2: String? = nil) async -> String? {
+        // 1. Primary: oauth.reddit.com/api/v1/me (bypasses www.reddit.com Fastly 403 WAF!)
+        let extractedToken: String? = tokenV2?.isEmpty == false ? tokenV2 : {
+            for part in cookieHeader.split(separator: ";") {
+                let kv = part.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1)
+                if kv.count == 2, kv[0] == "token_v2", !kv[1].isEmpty {
+                    return String(kv[1])
+                }
+            }
+            return nil
+        }()
+        if let tok = extractedToken, let oauthURL = URL(string: "https://oauth.reddit.com/api/v1/me") {
+            var oReq = URLRequest(url: oauthURL)
+            oReq.setValue("ios:com.tinytiny.app:v1.7 (by /u/tinytiny)", forHTTPHeaderField: "User-Agent")
+            oReq.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+            oReq.setValue("application/json", forHTTPHeaderField: "Accept")
+            if let (data, resp) = try? await RedditPersonalAPI.shared.session.data(for: oReq),
+               (resp as? HTTPURLResponse)?.statusCode == 200,
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let name = root["name"] as? String, !name.isEmpty {
+                return name
+            }
+        }
+        // 2. Fallback: www.reddit.com/api/me.json
         guard let url = URL(string: "https://www.reddit.com/api/me.json") else { return nil }
         var req = URLRequest(url: url)
         req.setValue(mobileUA, forHTTPHeaderField: "User-Agent")
@@ -456,9 +485,10 @@ struct RedditLoginSheet: View {
     private func loadMagicLink(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              (scheme == "https" || scheme == "http") else {
-            statusText = "Copy the full https:// login link from your Reddit email first"
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              (host == "reddit.com" || host.hasSuffix(".reddit.com") || host == "redditmail.com" || host.hasSuffix(".redditmail.com")) else {
+            statusText = "Copy the full https://reddit.com login link from your Reddit email first"
             showPasteBar = true
             return
         }

@@ -181,13 +181,17 @@ struct Gif: Codable, Identifiable, Hashable {
 
     private static func isPlayableVideoURLString(_ s: String) -> Bool {
         let lower = s.lowercased()
+        let pathExt = URL(string: s)?.pathExtension.lowercased() ?? ""
+        if ["jpg", "jpeg", "png", "webp", "gif", "avif", "heic"].contains(pathExt) {
+            return false
+        }
         if lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".webp") || lower.hasSuffix(".gif") {
             return false
         }
         if lower.contains("redgifs.com/watch/") || lower.contains("redgifs.com/ifr/") {
             return false
         }
-        if lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") {
+        if ["mp4", "mov", "m4v", "m3u8"].contains(pathExt) || lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".m3u8") {
             return true
         }
         // Some CDN video URLs don't end in .mp4 (e.g. X/IG/Reddit v.redd.it without ext)
@@ -481,12 +485,22 @@ enum MediaMetaRegistry {
             }
         }
         if fingerprints.count > 4000 {
-            fingerprints.removeAll(keepingCapacity: true)
-            extraVideos.removeAll(keepingCapacity: true)
-            albumMedia.removeAll(keepingCapacity: true)
-            postTags.removeAll(keepingCapacity: true)
-            postCreatorIds.removeAll(keepingCapacity: true)
-            postCreatorGender.removeAll(keepingCapacity: true)
+            for k in fingerprints.keys.prefix(1200) { fingerprints.removeValue(forKey: k) }
+        }
+        if postTags.count > 4000 {
+            for k in postTags.keys.prefix(1200) { postTags.removeValue(forKey: k) }
+        }
+        if extraVideos.count > 3000 {
+            for k in extraVideos.keys.prefix(900) { extraVideos.removeValue(forKey: k) }
+        }
+        if albumMedia.count > 1000 {
+            for k in albumMedia.keys.prefix(300) { albumMedia.removeValue(forKey: k) }
+        }
+        if postCreatorIds.count > 4000 {
+            for k in postCreatorIds.keys.prefix(1200) { postCreatorIds.removeValue(forKey: k) }
+        }
+        if postCreatorGender.count > 4000 {
+            for k in postCreatorGender.keys.prefix(1200) { postCreatorGender.removeValue(forKey: k) }
         }
     }
 

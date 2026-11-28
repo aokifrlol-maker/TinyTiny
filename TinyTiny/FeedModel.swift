@@ -204,6 +204,7 @@ final class FeedModel: ObservableObject {
     private var xMixAfterCursor: String? = nil
     private var igMixAfterCursor: String? = nil
     private var ofMixAfterCursor: String? = nil
+    private var redditMixAfterCursor: String? = nil
     private var ofMixOffset: Int = 0
     private var hasMore = true
     private var ids = Set<String>()
@@ -347,6 +348,8 @@ final class FeedModel: ObservableObject {
             afterCursor = cursor
             xMixAfterCursor = nil
             igMixAfterCursor = nil
+            ofMixAfterCursor = nil
+            redditMixAfterCursor = nil
             ofMixOffset = 0
             errorText = nil
         } else {
@@ -437,6 +440,8 @@ final class FeedModel: ObservableObject {
         }
         xMixAfterCursor = nil
         igMixAfterCursor = nil
+        ofMixAfterCursor = nil
+        redditMixAfterCursor = nil
         ofMixOffset = 0
         hasMore = true
         errorText = nil
@@ -920,8 +925,9 @@ final class FeedModel: ObservableObject {
         let rot = self.ofMixOffset
         self.ofMixOffset += 1
 
+        let curPR = self.redditMixAfterCursor
         async let personalTask: GoonedFeedResponse? = store.data.redditSession.isConnected
-            ? (try? await RedditPersonalAPI.shared.homeFeed(after: self.igMixAfterCursor))
+            ? (try? await RedditPersonalAPI.shared.homeFeed(after: curPR))
             : nil
         async let generalNsfwTask: GoonedFeedResponse? = try? await api.forYou(sort: self.sort.rawValue, after: cursor, limit: 24)
         async let tasteTask: [Gif] = {
@@ -946,7 +952,7 @@ final class FeedModel: ObservableObject {
         }()
 
         let (pResp, gResp, tPosts) = await (personalTask, generalNsfwTask, tasteTask)
-        if let pa = pResp?.after { self.igMixAfterCursor = pa }
+        if let pa = pResp?.after { self.redditMixAfterCursor = pa }
 
         var combined: [Gif] = []
         var seen = Set<String>()
@@ -1039,8 +1045,9 @@ final class FeedModel: ObservableObject {
         async let igTask: GoonedFeedResponse? = wantIG
             ? await InstagramAPI.reels(after: curIG)
             : nil
+        let curPRForYou = self.redditMixAfterCursor
         async let personalRedditTask: GoonedFeedResponse? = wantPersonalReddit
-            ? (try? await RedditPersonalAPI.shared.homeFeed(after: nil))
+            ? (try? await RedditPersonalAPI.shared.homeFeed(after: curPRForYou))
             : nil
 
         let (rResp, rTastePosts, ofResp, xResp, igResp, prResp) = await (redditTask, redditTasteTask, ofTask, xTask, igTask, personalRedditTask)
@@ -1048,13 +1055,15 @@ final class FeedModel: ObservableObject {
         if let xa = xResp?.after { self.xMixAfterCursor = xa }
         if let ia = igResp?.after { self.igMixAfterCursor = ia }
         if let ofa = ofResp?.after { self.ofMixAfterCursor = ofa }
+        if let pra = prResp?.after { self.redditMixAfterCursor = pra }
         self.ofMixOffset += 1
 
         func prep(_ posts: [Gif]?) -> [Gif] {
             guard let posts else { return [] }
-            return posts
+            let scored = posts
                 .filter { !store.isBlockedByAlgorithm($0) }
-                .sorted { store.scorePost($0) > store.scorePost($1) }
+                .map { ($0, store.scorePost($0)) }
+            return scored.sorted { $0.1 > $1.1 }.map(\.0)
         }
 
         let rPosts = prep((rTastePosts + (rResp?.posts ?? [])))

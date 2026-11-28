@@ -450,7 +450,8 @@ object OnlyFansAPI {
         )
         return try {
             val resp: OFFeedResponse = get("/posts", params)
-            GoonedFeedResponse(mapPosts(resp.posts, videosOnly = true), "${offset + 40}")
+            val mapped = mapPosts(resp.posts, videosOnly = true)
+            GoonedFeedResponse(mapped, if (resp.posts.isEmpty()) null else "${offset + 40}")
         } catch (_: Throwable) {
             GoonedFeedResponse()
         }
@@ -472,7 +473,8 @@ object OnlyFansAPI {
                 withHiddenGenders(mapOf("service" to "onlyfans", "type" to "videos", "sort" to "recent", "o" to "$offset", "n" to "40"))
             )
             val fbRows = if (fallback.dms.isNotEmpty()) fallback.dms else fallback.posts
-            GoonedFeedResponse(mapPosts(fbRows, prefix = "of_dm", videosOnly = true), "${offset + 40}")
+            val fbGifs = mapPosts(fbRows, prefix = "of_dm", videosOnly = true)
+            GoonedFeedResponse(fbGifs, if (fbRows.isEmpty()) null else "${offset + 40}")
         } catch (_: Throwable) {
             GoonedFeedResponse()
         }
