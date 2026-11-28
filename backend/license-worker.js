@@ -2762,7 +2762,65 @@ export default {
       return new Response(bodyStream, { status: isRange ? 206 : 200, headers });
     }
 
-    // 8. Seedr "Watchit" Folder -> Public Watch + Direct Download URLs
+    // 8. Seedr "Watchit" Folder & Admin Long-Video Watchit -> Public Watch + Direct Download URLs
+    if (request.method === "POST" && path === "/v1/admin/watchit") {
+      const body = await request.json().catch(() => ({}));
+      const rec = await getLicense(env, body.key);
+      const devId = body.deviceId || request.headers.get("X-Device-Id");
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
+      if (!check.ok) return json({ ok: false, error: check.error }, 403);
+      if (!rec.admin) return json({ ok: false, error: "Admin license required." }, 403);
+
+      const rawVideoUrl = String(body.videoUrl || "").trim();
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(rawVideoUrl);
+      } catch {
+        return json({ ok: false, error: "Invalid videoUrl" }, 400);
+      }
+      if (parsedUrl.protocol !== "https:") {
+        return json({ ok: false, error: "Only https:// video URLs are supported" }, 400);
+      }
+      const host = parsedUrl.hostname.toLowerCase();
+      if (
+        host === "localhost" ||
+        host.endsWith(".local") ||
+        host.startsWith("127.") ||
+        host.startsWith("10.") ||
+        host.startsWith("192.168.") ||
+        host.startsWith("169.254.") ||
+        host === "::1"
+      ) {
+        return json({ ok: false, error: "Disallowed host" }, 400);
+      }
+
+      const isHls = parsedUrl.pathname.toLowerCase().endsWith(".m3u8") || rawVideoUrl.toLowerCase().includes(".m3u8");
+      const rawTitle = String(body.title || "TinyTiny Video").trim().slice(0, 90);
+      const baseName = rawTitle.replace(/[^a-zA-Z0-9._ -]/g, "").trim() || "video";
+      const ext = isHls ? ".m3u8" : ".mp4";
+      const filename = baseName.toLowerCase().endsWith(ext) ? baseName : `${baseName}${ext}`;
+      const referer = String(body.referer || "").trim().slice(0, 300);
+
+      const id = randomId(10);
+      const meta = {
+        mode: "remote",
+        videoUrl: rawVideoUrl,
+        referer,
+        isHls,
+        filename,
+        contentType: isHls ? "application/vnd.apple.mpegurl" : "video/mp4",
+        createdAt: nowSec(),
+      };
+      await env.LICENSES.put(`watchit:${id}`, JSON.stringify(meta), { expirationTtl: 7 * DAY_SEC });
+      const baseUrl = getPublicBaseUrl(env) || url.origin;
+      return json({
+        ok: true,
+        id,
+        watchUrl: `${baseUrl}/w/${id}`,
+        downloadUrl: `${baseUrl}/w/${id}/download`,
+      });
+    }
+
     if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/w/")) {
       const parts = path.slice(3).split("/").filter(Boolean);
       const id = (parts[0] || "").replace(/[^a-z0-9]/gi, "");
@@ -2786,25 +2844,43 @@ export default {
         return new Response("Not found", { status: 404 });
       }
 
-      const auth = seedrAuthHeader(env);
-      if (!auth) return new Response("Seedr credentials not configured", { status: 500 });
+      let upstream;
+      if (meta.mode === "remote" && meta.videoUrl) {
+        const reqHeaders = {
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+        };
+        if (meta.referer) reqHeaders["Referer"] = meta.referer;
+        const rangeHeader = request.headers.get("Range");
+        if (rangeHeader) reqHeaders["Range"] = rangeHeader;
+        upstream = await fetch(meta.videoUrl, {
+          method: request.method,
+          headers: reqHeaders,
+          redirect: "follow",
+        });
+        if (!upstream.ok && upstream.status !== 206) {
+          return new Response("Video link expired or unavailable", { status: upstream.status === 404 || upstream.status === 410 ? 410 : 502 });
+        }
+      } else {
+        const auth = seedrAuthHeader(env);
+        if (!auth) return new Response("Seedr credentials not configured", { status: 500 });
 
-      const encodedPath = meta.davPath
-        .split("/")
-        .filter(Boolean)
-        .map((s) => encodeURIComponent(s))
-        .join("/");
-      const seedrUrl = `${SEEDR_DAV_BASE}/${encodedPath}`;
-      const reqHeaders = { Authorization: auth };
-      const rangeHeader = request.headers.get("Range");
-      if (rangeHeader) reqHeaders["Range"] = rangeHeader;
+        const encodedPath = meta.davPath
+          .split("/")
+          .filter(Boolean)
+          .map((s) => encodeURIComponent(s))
+          .join("/");
+        const seedrUrl = `${SEEDR_DAV_BASE}/${encodedPath}`;
+        const reqHeaders = { Authorization: auth };
+        const rangeHeader = request.headers.get("Range");
+        if (rangeHeader) reqHeaders["Range"] = rangeHeader;
 
-      const upstream = await fetch(seedrUrl, {
-        method: request.method,
-        headers: reqHeaders,
-      });
-      if (!upstream.ok && upstream.status !== 206) {
-        return new Response("Video unavailable on Seedr", { status: upstream.status === 404 ? 404 : 502 });
+        upstream = await fetch(seedrUrl, {
+          method: request.method,
+          headers: reqHeaders,
+        });
+        if (!upstream.ok && upstream.status !== 206) {
+          return new Response("Video unavailable on Seedr", { status: upstream.status === 404 ? 404 : 502 });
+        }
       }
 
       const disp = sub === "download" ? "attachment" : "inline";
@@ -3110,12 +3186,13 @@ function renderWatchitHTML(id, meta) {
   <div class="wrap">
     <div class="title">${safeName}</div>
     <div class="sub">${sizeLabel}Watchit Stream</div>
-    <video controls playsinline preload="metadata" src="/w/${id}/video"></video>
+    <video id="player" controls playsinline preload="metadata" ${meta.isHls ? "" : `src="/w/${id}/video"`}></video>
     <div class="actions">
       <a class="btn btn-primary" href="/w/${id}/download" download="${safeName}">Download Video</a>
       <button id="copyBtn" class="btn btn-ghost" type="button">Copy Direct Download URL</button>
     </div>
   </div>
+  ${meta.isHls ? `<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>` : ""}
   <script>
     const copyBtn = document.getElementById("copyBtn");
     copyBtn.onclick = async () => {
@@ -3123,6 +3200,18 @@ function renderWatchitHTML(id, meta) {
       copyBtn.textContent = "Copied!";
       setTimeout(() => (copyBtn.textContent = "Copy Direct Download URL"), 1800);
     };
+    ${meta.isHls ? `
+    const v = document.getElementById("player");
+    const src = "/w/${id}/video";
+    if (v.canPlayType("application/vnd.apple.mpegurl")) {
+      v.src = src;
+    } else if (window.Hls && Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(src);
+      hls.attachMedia(v);
+    } else {
+      v.src = src;
+    }` : ""}
   </script>
 </body>
 </html>`;

@@ -124,6 +124,44 @@ final class ShareService: ObservableObject {
         return await createEncryptedShareLink(for: post)
     }
 
+    /// Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) for any Long Video or video post.
+    func createAdminWatchitLink(for post: Gif) async -> (watchUrl: String, downloadUrl: String)? {
+        guard LicenseManager.shared.isAdmin else { return nil }
+        var candidates: [URL] = []
+        if post.isLongVideoPost {
+            let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
+            candidates.append(contentsOf: resolved)
+        }
+        candidates.append(contentsOf: post.allVideoURLs(hd: true))
+        let remoteCandidates = candidates.filter { ($0.scheme?.lowercased() ?? "") == "https" }
+        // Prefer direct MP4 over HLS .m3u8 so browser Download works cleanly
+        guard let picked = remoteCandidates.first(where: { !$0.absoluteString.lowercased().contains(".m3u8") })
+                ?? remoteCandidates.first else {
+            return nil
+        }
+        let base = LicenseManager.shared.normalizedBaseURL
+        guard let apiURL = URL(string: "\(base)/v1/admin/watchit") else { return nil }
+        var req = URLRequest(url: apiURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let referer = MediaHeaders.headers(for: picked)["Referer"] ?? post.sourceUrl ?? ""
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "key": LicenseManager.shared.status.licenseKey,
+            "deviceId": LicenseManager.shared.deviceId,
+            "videoUrl": picked.absoluteString,
+            "title": post.title ?? post.author ?? "TinyTiny Video",
+            "referer": referer
+        ])
+        guard let (data, resp) = try? await session.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let watchUrl = json["watchUrl"] as? String,
+              let downloadUrl = json["downloadUrl"] as? String else {
+            return nil
+        }
+        return (watchUrl, downloadUrl)
+    }
+
     private func sealAndPublishPayload(
         _ payload: ShareDropPayload,
         explicitKey: SymmetricKey? = nil,
@@ -318,6 +356,11 @@ struct ShareItemSheet: View {
     @State private var isCreatingDrop = false
     @State private var showActivitySheet = false
     @State private var showIGDirectSheet = false
+    @State private var watchitWatchURL: String? = nil
+    @State private var watchitDownloadURL: String? = nil
+    @State private var isCreatingWatchit = false
+    @State private var watchitCopied = false
+    @State private var watchitError: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -423,7 +466,91 @@ struct ShareItemSheet: View {
                     .padding(14)
                     .liquidGlassCard(cornerRadius: 18)
 
-                    // 2. Direct File / Post Link via System Share Sheet
+                    // 2. Admin Watch & Download URL (Watchit) + IG Direct
+                    if license.isAdmin, !gif.isImage {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "play.rectangle.on.rectangle.fill")
+                                    .foregroundStyle(Theme.accentBright)
+                                Text("Watchit Watch & Download (Admin)")
+                                    .font(.system(size: 14.5, weight: .bold))
+                                Spacer()
+                            }
+                            Text("Creates a clean browser Watch + Direct Download URL you can copy & paste anywhere.")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.68))
+
+                            if let watchitError {
+                                Text(watchitError)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color.red.opacity(0.9))
+                            }
+
+                            if let wUrl = watchitWatchURL {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(wUrl)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    HStack(spacing: 8) {
+                                        Button(watchitCopied ? "Copied!" : "Copy Watch URL") {
+                                            UIPasteboard.general.string = wUrl
+                                            watchitCopied = true
+                                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                        }
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 7)
+                                        .liquidGlassCapsule(active: true)
+
+                                        if let dUrl = watchitDownloadURL {
+                                            Button("Copy Download") {
+                                                UIPasteboard.general.string = dUrl
+                                                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                            }
+                                            .font(.caption.bold())
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 7)
+                                            .liquidGlassCapsule()
+                                        }
+                                    }
+                                }
+                                .padding(10)
+                                .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                            }
+
+                            Button {
+                                Task {
+                                    isCreatingWatchit = true
+                                    watchitError = nil
+                                    watchitCopied = false
+                                    if let res = await ShareService.shared.createAdminWatchitLink(for: gif) {
+                                        watchitWatchURL = res.watchUrl
+                                        watchitDownloadURL = res.downloadUrl
+                                        UIPasteboard.general.string = res.watchUrl
+                                        watchitCopied = true
+                                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    } else {
+                                        watchitError = "Could not resolve a direct video URL for this post."
+                                    }
+                                    isCreatingWatchit = false
+                                }
+                            } label: {
+                                Group {
+                                    if isCreatingWatchit { ProgressView().tint(.white) }
+                                    else { Text(watchitWatchURL == nil ? "Create Watch & Download URL" : "Regenerate Watchit URL") }
+                                }
+                                .font(.system(size: 13.5, weight: .bold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .liquidGlassCapsule(active: true)
+                            }
+                            .disabled(isCreatingWatchit)
+                        }
+                        .padding(14)
+                        .liquidGlassCard(cornerRadius: 18)
+                    }
+
                     if license.isAdmin, !gif.isImage, let mp4URL = gif.allVideoURLs(hd: true).first {
                         Button {
                             showIGDirectSheet = true

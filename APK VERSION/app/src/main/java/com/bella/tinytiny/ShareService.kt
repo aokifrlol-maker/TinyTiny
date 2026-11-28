@@ -9,6 +9,8 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -340,6 +342,43 @@ object ShareService {
         }
     }
 
+    /** Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) for any Long Video or video post. */
+    suspend fun createAdminWatchitLink(gif: Gif): Pair<String, String>? = withContext(Dispatchers.IO) {
+        if (!LicenseManager.isAdmin) return@withContext null
+        val candidates = mutableListOf<String>()
+        if (gif.isLongVideoPost) {
+            runCatching { LongVideoAPI.resolvePlayableURLs(gif) }.getOrNull()?.let { candidates.addAll(it) }
+        }
+        candidates.addAll(gif.allVideoURLs(hd = true))
+        val httpsCandidates = candidates.distinct().filter { it.startsWith("https://", ignoreCase = true) }
+        val picked = httpsCandidates.firstOrNull { !it.lowercase().contains(".m3u8") }
+            ?: httpsCandidates.firstOrNull()
+            ?: return@withContext null
+        try {
+            val referer = MediaHeaders.headers(picked)["Referer"] ?: gif.sourceUrl ?: ""
+            val bodyJson = JSONObject().apply {
+                put("key", LicenseManager.status.value.licenseKey)
+                put("deviceId", LicenseManager.deviceId)
+                put("videoUrl", picked)
+                put("title", gif.title ?: gif.author ?: "TinyTiny Video")
+                put("referer", referer)
+            }.toString()
+            val req = Request.Builder()
+                .url("${LicenseManager.normalizedBaseURL}/v1/admin/watchit")
+                .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.code != 200) return@withContext null
+                val json = JSONObject(resp.body?.string() ?: return@withContext null)
+                val w = json.optString("watchUrl")
+                val d = json.optString("downloadUrl")
+                if (w.isNotEmpty() && d.isNotEmpty()) w to d else null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     suspend fun fetchDirectIGDrop(dropId: String): DirectIGDropPayload? = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder().url("${LicenseManager.normalizedBaseURL}/v1/igdrop/$dropId").build()
@@ -368,6 +407,11 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
     var statusNote by remember { mutableStateOf<String?>(null) }
     var copied by remember { mutableStateOf(false) }
     var showIGDirect by remember { mutableStateOf(false) }
+    var watchitWatchUrl by remember { mutableStateOf<String?>(null) }
+    var watchitDownloadUrl by remember { mutableStateOf<String?>(null) }
+    var isCreatingWatchit by remember { mutableStateOf(false) }
+    var watchitCopied by remember { mutableStateOf(false) }
+    var watchitError by remember { mutableStateOf<String?>(null) }
 
     fun generate() {
         scope.launch {
@@ -412,7 +456,7 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                 .navigationBarsPadding()
                 .padding(20.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright)
                 Spacer(Modifier.width(8.dp))
@@ -461,6 +505,69 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                 statusNote?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 13.sp) }
                 Button(onClick = { generate() }, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)) {
                     Text("Generate Secret Link", fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (LicenseManager.isAdmin && !gif.isImage) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().liquidGlassCard(cornerRadius = 16.dp).padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Watchit Watch & Download (Admin)", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text("Creates a clean browser Watch + Direct Download URL you can copy & paste anywhere.", color = Theme.textSecondary, fontSize = 12.sp)
+                    watchitError?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp) }
+                    watchitWatchUrl?.let { wUrl ->
+                        Text(wUrl, color = Theme.accentBright, fontSize = 12.sp, maxLines = 2)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("Watchit URL", wUrl))
+                                    watchitCopied = true
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent)
+                            ) {
+                                Text(if (watchitCopied) "Copied!" else "Copy Watch URL", fontWeight = FontWeight.Bold)
+                            }
+                            watchitDownloadUrl?.let { dUrl ->
+                                OutlinedButton(onClick = {
+                                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("Watchit Download", dUrl))
+                                }) {
+                                    Text("Copy Download", color = Color.White)
+                                }
+                            }
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                isCreatingWatchit = true
+                                watchitError = null
+                                watchitCopied = false
+                                val res = ShareService.createAdminWatchitLink(gif)
+                                isCreatingWatchit = false
+                                if (res != null) {
+                                    watchitWatchUrl = res.first
+                                    watchitDownloadUrl = res.second
+                                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("Watchit URL", res.first))
+                                    watchitCopied = true
+                                } else {
+                                    watchitError = "Could not resolve a direct video URL for this post."
+                                }
+                            }
+                        },
+                        enabled = !isCreatingWatchit,
+                        colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (isCreatingWatchit) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text(if (watchitWatchUrl == null) "Create Watch & Download URL" else "Regenerate Watchit URL", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 
@@ -553,7 +660,7 @@ fun ShareCollectionSheet(posts: List<Gif>, title: String? = null, onDismiss: () 
                 .navigationBarsPadding()
                 .padding(20.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Lock, contentDescription = null, tint = Theme.accentBright)
                 Spacer(Modifier.width(8.dp))
@@ -673,7 +780,7 @@ fun ReceiveDropSheet(onDismiss: () -> Unit, onOpenPost: ((Gif) -> Unit)? = null)
                 .navigationBarsPadding()
                 .padding(20.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Open Encrypted Drop", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
