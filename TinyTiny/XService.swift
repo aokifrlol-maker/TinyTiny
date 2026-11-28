@@ -1631,9 +1631,11 @@ struct XLoginSheet: View {
                                         statusText = "Could not resolve ct0 — paste both cookies"
                                         return
                                     }
-                                    store.data.xSession.authToken = auth
-                                    store.data.xSession.ct0 = resolvedCt0
-                                    store.data.xSession.screenName = manualHandle.replacingOccurrences(of: "@", with: "")
+                                    var updated = store.data.xSession
+                                    updated.authToken = auth
+                                    updated.ct0 = resolvedCt0
+                                    updated.screenName = manualHandle.replacingOccurrences(of: "@", with: "")
+                                    store.updateXSession(updated)
                                     Task { await XWebEngine.shared.warmUp() }
                                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                                     onConnected?()
@@ -1701,14 +1703,15 @@ struct XLoginSheet: View {
             return false
         }
 
-        store.data.xSession.authToken = authToken
-        store.data.xSession.ct0 = ct0
+        var updated = store.data.xSession
+        updated.authToken = authToken
+        updated.ct0 = ct0
         if let range = twid.range(of: "u=") {
-            store.data.xSession.userId = String(twid[range.upperBound...])
+            updated.userId = String(twid[range.upperBound...])
         }
 
         // Try to grab @screen_name from the active webView DOM if available
-        if let wv = webViewRef, store.data.xSession.screenName.isEmpty {
+        if let wv = webViewRef, updated.screenName.isEmpty {
             let js = """
             (function() {
                 const html = document.documentElement ? document.documentElement.innerHTML : '';
@@ -1717,9 +1720,10 @@ struct XLoginSheet: View {
             })();
             """
             if let sn = try? await wv.evaluateJavaScript(js) as? String, !sn.isEmpty {
-                store.data.xSession.screenName = sn
+                updated.screenName = sn
             }
         }
+        store.updateXSession(updated)
 
         Task { await XWebEngine.shared.warmUp() }
         return true

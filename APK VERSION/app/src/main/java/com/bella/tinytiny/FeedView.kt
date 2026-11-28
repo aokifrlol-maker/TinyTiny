@@ -1526,6 +1526,7 @@ fun FeedStateView(
     val isLoading by model.isLoading.collectAsState()
     val errorText by model.errorText.collectAsState()
     val src by model.source.collectAsState()
+    val userData by UserStore.shared.data.collectAsState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(isEndOfFeed) {
@@ -1552,21 +1553,21 @@ fun FeedStateView(
                 ) {
                     Text("Load Fresh Batch", fontWeight = FontWeight.Bold)
                 }
-            } else if (src.isXFeed && !UserStore.shared.data.value.xSession.isConnected) {
+            } else if (src.isXFeed && !userData.xSession.isConnected) {
                 BrandLogoX(42.dp)
                 Text("Connect Personal 𝕏", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("Sign in once to stream your 𝕏 For You, Following, and Bookmarks.", color = Theme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
                 Button(onClick = onConnectX, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), shape = RoundedCornerShape(999.dp)) {
                     Text("Sign in with 𝕏", fontWeight = FontWeight.Bold)
                 }
-            } else if (src.isIGFeed && !UserStore.shared.data.value.igSession.isConnected) {
+            } else if (src.isIGFeed && !userData.igSession.isConnected) {
                 BrandLogoInstagram(44.dp)
                 Text("Connect Personal Instagram", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("Sign in once to stream IG Reels, Following, and Saved clips.", color = Theme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
                 Button(onClick = onConnectIG, colors = ButtonDefaults.buttonColors(containerColor = Theme.accent), shape = RoundedCornerShape(999.dp)) {
                     Text("Sign in with Instagram", fontWeight = FontWeight.Bold)
                 }
-            } else if (src.isRedditPersonalFeed && !UserStore.shared.data.value.redditSession.isConnected) {
+            } else if (src.isRedditPersonalFeed && !userData.redditSession.isConnected) {
                 BrandLogoReddit(44.dp)
                 Text("Connect Personal Reddit", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("Sign in once to browse your personal Reddit Home, Popular, Saved & Upvoted feeds without affecting your regular For You.", color = Theme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)

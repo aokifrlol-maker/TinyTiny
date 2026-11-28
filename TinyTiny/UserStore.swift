@@ -668,6 +668,19 @@ final class UserStore: ObservableObject {
         }
     }
 
+    func updateXSession(_ session: XAccountSession) {
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.xSession = session
+        if session.isConnected {
+            next.removedFollows.removeValue(forKey: "session:x")
+            localAddedTimestamps["session:x"] = now
+        }
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
+    }
+
     func disconnectX() {
         let now = Date().timeIntervalSince1970
         var next = data
@@ -684,6 +697,19 @@ final class UserStore: ObservableObject {
         }
     }
 
+    func updateIGSession(_ session: InstagramAccountSession) {
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.igSession = session
+        if session.isConnected {
+            next.removedFollows.removeValue(forKey: "session:ig")
+            localAddedTimestamps["session:ig"] = now
+        }
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
+    }
+
     func disconnectIG() {
         let now = Date().timeIntervalSince1970
         var next = data
@@ -695,6 +721,19 @@ final class UserStore: ObservableObject {
         saveNow()
         LicenseManager.shared.scheduleCloudSync()
         Task { await InstagramWebEngine.shared.resetSession() }
+    }
+
+    func updateRedditSession(_ session: RedditAccountSession) {
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.redditSession = session
+        if session.isConnected {
+            next.removedFollows.removeValue(forKey: "session:reddit")
+            localAddedTimestamps["session:reddit"] = now
+        }
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
     }
 
     func disconnectReddit() {

@@ -512,18 +512,33 @@ fun GoonedMainShell() {
     }
 
     fun selectXOrLogin(src: FeedSource) {
-        if (userData.xSession.isConnected) selectFeed(src)
-        else { pendingFeedAfterLogin = src; showXLogin = true }
+        if (UserStore.shared.data.value.xSession.isConnected) {
+            selectFeed(src)
+        } else {
+            if (!isCreatorProfile(src)) selectFeed(src)
+            pendingFeedAfterLogin = src
+            showXLogin = true
+        }
     }
 
     fun selectIGOrLogin(src: FeedSource) {
-        if (userData.igSession.isConnected) selectFeed(src)
-        else { pendingFeedAfterLogin = src; showIGLogin = true }
+        if (UserStore.shared.data.value.igSession.isConnected) {
+            selectFeed(src)
+        } else {
+            if (!isCreatorProfile(src)) selectFeed(src)
+            pendingFeedAfterLogin = src
+            showIGLogin = true
+        }
     }
 
     fun selectRedditOrLogin(src: FeedSource) {
-        if (userData.redditSession.isConnected) selectFeed(src)
-        else { pendingFeedAfterLogin = src; showRedditLogin = true }
+        if (UserStore.shared.data.value.redditSession.isConnected) {
+            selectFeed(src)
+        } else {
+            if (!isCreatorProfile(src)) selectFeed(src)
+            pendingFeedAfterLogin = src
+            showRedditLogin = true
+        }
     }
 
     LaunchedEffect(receivedPost) {

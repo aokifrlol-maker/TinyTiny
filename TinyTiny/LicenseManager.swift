@@ -588,7 +588,7 @@ final class LicenseManager: ObservableObject {
 
             var mergedRemovedFollows = UserStore.shared.data.removedFollows
             for (k, ts) in backup.userData.removedFollows {
-                if let addedAt = localAdded["follow:\(k)"], addedAt > ts { continue }
+                if let addedAt = localAdded["follow:\(k)"] ?? localAdded[k], addedAt > ts { continue }
                 if ts > (mergedRemovedFollows[k] ?? 0) { mergedRemovedFollows[k] = ts }
             }
             UserStore.shared.data.removedFollows = mergedRemovedFollows

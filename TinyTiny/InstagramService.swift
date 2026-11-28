@@ -1485,9 +1485,11 @@ struct InstagramLoginSheet: View {
                             Button {
                                 let sid = manualSessionId.trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !sid.isEmpty else { return }
-                                store.data.igSession.sessionId = sid
-                                store.data.igSession.csrfToken = manualCsrf.trimmingCharacters(in: .whitespacesAndNewlines)
-                                store.data.igSession.username = manualUsername.replacingOccurrences(of: "@", with: "")
+                                var updated = store.data.igSession
+                                updated.sessionId = sid
+                                updated.csrfToken = manualCsrf.trimmingCharacters(in: .whitespacesAndNewlines)
+                                updated.username = manualUsername.replacingOccurrences(of: "@", with: "")
+                                store.updateIGSession(updated)
                                 Task { await InstagramWebEngine.shared.warmUp() }
                                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                                 onConnected?()
@@ -1550,9 +1552,11 @@ struct InstagramLoginSheet: View {
 
         guard !sessionId.isEmpty else { return false }
 
-        store.data.igSession.sessionId = sessionId
-        store.data.igSession.csrfToken = csrf
-        store.data.igSession.userId = dsUserId
+        var updated = store.data.igSession
+        updated.sessionId = sessionId
+        updated.csrfToken = csrf
+        updated.userId = dsUserId
+        store.updateIGSession(updated)
         Task { await InstagramWebEngine.shared.warmUp() }
         return true
     }

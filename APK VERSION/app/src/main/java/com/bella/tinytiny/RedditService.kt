@@ -76,7 +76,37 @@ object RedditPersonalAPI {
         )
     }
 
-    suspend fun verifyUsername(cookieHeader: String): String? = withContext(Dispatchers.IO) {
+    suspend fun verifyUsername(cookieHeader: String, tokenV2: String? = null): String? = withContext(Dispatchers.IO) {
+        // 1. Primary: oauth.reddit.com/api/v1/me with Bearer token_v2 (bypasses www.reddit.com Fastly 403 WAF!)
+        val extractedToken = tokenV2?.takeIf { it.isNotEmpty() } ?: run {
+            cookieHeader.split(";").firstNotNullOfOrNull { part ->
+                val idx = part.indexOf('=')
+                if (idx > 0 && part.substring(0, idx).trim() == "token_v2") {
+                    part.substring(idx + 1).trim().takeIf { it.isNotEmpty() }
+                } else null
+            }
+        }
+        if (!extractedToken.isNullOrEmpty()) {
+            try {
+                val oReq = Request.Builder()
+                    .url("https://oauth.reddit.com/api/v1/me")
+                    .header("User-Agent", "android:com.bella.tinytiny:v1.7 (by /u/tinytiny)")
+                    .header("Authorization", "Bearer $extractedToken")
+                    .header("Accept", "application/json")
+                    .get()
+                    .build()
+                TinyTinyApplication.sharedHttpClient.newCall(oReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val raw = resp.body?.string()
+                        if (!raw.isNullOrEmpty()) {
+                            val name = JSONObject(raw).optString("name").trim()
+                            if (name.isNotEmpty()) return@withContext name
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+        // 2. Fallback: www.reddit.com/api/me.json
         try {
             val req = Request.Builder()
                 .url("https://www.reddit.com/api/me.json")
@@ -480,6 +510,24 @@ fun RedditLoginSheet(
         popupWebView = null
     }
 
+    fun finishLogin(sessionVal: String, tokenVal: String, uname: String) {
+        if (captured) return
+        captured = true
+        statusText = "Connected as u/$uname!"
+        closePopup()
+        val keepMix = UserStore.shared.data.value.redditSession.mixIntoForYou
+        UserStore.shared.updateRedditSession(
+            RedditAccountSession(
+                redditSessionCookie = sessionVal,
+                tokenV2 = tokenVal,
+                username = uname,
+                mixIntoForYou = keepMix
+            )
+        )
+        scope.launch { LicenseManager.injectRestoredSocialCookies() }
+        onSuccess()
+    }
+
     fun checkCookiesNow() {
         if (captured || checking) return
         checking = true
@@ -503,22 +551,29 @@ fun RedditLoginSheet(
                 val tokenVal = map["token_v2"] ?: ""
                 if (sessionVal.isNotEmpty() || tokenVal.isNotEmpty()) {
                     val temp = RedditAccountSession(redditSessionCookie = sessionVal, tokenV2 = tokenVal)
-                    val uname = RedditPersonalAPI.verifyUsername(temp.cookieHeader)
+                    var uname = RedditPersonalAPI.verifyUsername(temp.cookieHeader, tokenV2 = tokenVal)
+                    // 3rd Fallback: query /api/me.json directly inside WebView's own TLS stack (never Fastly-blocked)
+                    if (uname.isNullOrEmpty()) {
+                        val wv = mainWebView
+                        if (wv != null) {
+                            uname = withContext(Dispatchers.Main) {
+                                kotlinx.coroutines.suspendCancellableCoroutine<String?> { cont ->
+                                    try {
+                                        wv.evaluateJavascript(
+                                            "(function(){ try { var xhr = new XMLHttpRequest(); xhr.open('GET', '/api/me.json', false); xhr.withCredentials = true; xhr.send(null); if (xhr.status === 200) { var j = JSON.parse(xhr.responseText); return (j && j.data && j.data.name) ? j.data.name : ''; } } catch(e){} return ''; })()"
+                                        ) { raw ->
+                                            val clean = raw?.trim()?.trim('"')?.takeIf { it.isNotEmpty() && it != "null" }
+                                            if (cont.isActive) cont.resume(clean) {}
+                                        }
+                                    } catch (_: Throwable) {
+                                        if (cont.isActive) cont.resume(null) {}
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (!uname.isNullOrEmpty() && !captured) {
-                        captured = true
-                        statusText = "Connected as u/$uname!"
-                        closePopup()
-                        val keepMix = UserStore.shared.data.value.redditSession.mixIntoForYou
-                        UserStore.shared.updateRedditSession(
-                            RedditAccountSession(
-                                redditSessionCookie = sessionVal,
-                                tokenV2 = tokenVal,
-                                username = uname,
-                                mixIntoForYou = keepMix
-                            )
-                        )
-                        onSuccess()
-                        onDismiss()
+                        finishLogin(sessionVal, tokenVal, uname)
                     }
                 }
             } finally {
@@ -628,6 +683,7 @@ fun RedditLoginSheet(
                             settings.userAgentString = oauthSafeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            clearCache(true)
                             webChromeClient = object : WebChromeClient() {
                                 override fun onCreateWindow(
                                     view: WebView?,

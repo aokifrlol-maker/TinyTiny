@@ -881,6 +881,7 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                             settings.userAgentString = chromeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            clearCache(true)
                             webChromeClient = WebChromeClient()
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
@@ -891,7 +892,13 @@ fun InstagramLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                             loadUrl("https://www.instagram.com/accounts/login/")
                         }
                     },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    onRelease = { wv ->
+                        try {
+                            wv.stopLoading()
+                            wv.destroy()
+                        } catch (_: Throwable) {}
+                    }
                 )
             }
         }

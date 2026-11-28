@@ -566,14 +566,14 @@ object LicenseManager {
 
                     val mergedRemovedFollows = local.removedFollows.toMutableMap()
                     for ((k, ts) in backup.userData.removedFollows) {
-                        val addedAt = localAdded["follow:$k"]
+                        val addedAt = localAdded["follow:$k"] ?: localAdded[k]
                         if (addedAt != null && addedAt > ts) continue
                         if (ts > (mergedRemovedFollows[k] ?: 0.0)) mergedRemovedFollows[k] = ts
                     }
                     val rf = backup.userData.removedFollows
                     fun keepLocalFollow(fk: String): Boolean {
                         val remTs = rf[fk] ?: return true
-                        val addedAt = localAdded["follow:$fk"]
+                        val addedAt = localAdded["follow:$fk"] ?: localAdded[fk]
                         return addedAt != null && addedAt > remTs
                     }
                     val mergedU = (backup.userData.followedUsers.filter { "u:${it.lowercase()}" !in mergedRemovedFollows } +

@@ -530,13 +530,12 @@ struct RedditLoginSheet: View {
                     RedditLoginWebView(webViewRef: $webViewRef) { sessionCookie, tokenV2, username in
                         Task { @MainActor in
                             let keepMix = store.data.redditSession.mixIntoForYou
-                            store.data.redditSession = RedditAccountSession(
+                            store.updateRedditSession(RedditAccountSession(
                                 redditSessionCookie: sessionCookie,
                                 tokenV2: tokenV2,
                                 username: username,
                                 mixIntoForYou: keepMix
-                            )
-                            store.saveNow()
+                            ))
                             onSuccess()
                             dismiss()
                         }
@@ -729,7 +728,28 @@ private struct RedditLoginWebView: UIViewRepresentable {
             guard !sessionVal.isEmpty || !tokenVal.isEmpty else { return }
 
             let tempSession = RedditAccountSession(redditSessionCookie: sessionVal, tokenV2: tokenVal, username: "")
-            if let uname = await RedditPersonalAPI.verifyUsername(cookieHeader: tempSession.cookieHeader) {
+            var resolvedName = await RedditPersonalAPI.verifyUsername(cookieHeader: tempSession.cookieHeader, tokenV2: tokenVal)
+            if resolvedName == nil {
+                let js = """
+                (function() {
+                    try {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('GET', '/api/me.json', false);
+                        xhr.withCredentials = true;
+                        xhr.send(null);
+                        if (xhr.status === 200) {
+                            var j = JSON.parse(xhr.responseText);
+                            return (j && j.data && j.data.name) ? j.data.name : '';
+                        }
+                    } catch (e) {}
+                    return '';
+                })();
+                """
+                if let name = try? await webView.evaluateJavaScript(js) as? String, !name.isEmpty {
+                    resolvedName = name
+                }
+            }
+            if let uname = resolvedName, !uname.isEmpty {
                 guard !didCapture else { return }
                 didCapture = true
                 stopPolling()

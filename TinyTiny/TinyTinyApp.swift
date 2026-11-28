@@ -1076,6 +1076,7 @@ struct GoonedMainShell: View {
         if store.data.xSession.isConnected {
             selectFeed(src)
         } else {
+            if !isCreatorProfileSource(src) { selectFeed(src) }
             pendingFeedAfterLogin = src
             showXLoginSheet = true
         }
@@ -1085,6 +1086,7 @@ struct GoonedMainShell: View {
         if store.data.igSession.isConnected {
             selectFeed(src)
         } else {
+            if !isCreatorProfileSource(src) { selectFeed(src) }
             pendingFeedAfterLogin = src
             showIGLoginSheet = true
         }
@@ -1094,6 +1096,7 @@ struct GoonedMainShell: View {
         if store.data.redditSession.isConnected {
             selectFeed(src)
         } else {
+            if !isCreatorProfileSource(src) { selectFeed(src) }
             pendingFeedAfterLogin = src
             showRedditLoginSheet = true
         }
@@ -1246,7 +1249,7 @@ struct GoonedMainShell: View {
                         }
 
                         brandChannelButton(id: 2, active: isXChannel) {
-                            if isXChannel {
+                            if isXChannel && store.data.xSession.isConnected {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
                                 let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : .xForYou)
@@ -1257,7 +1260,7 @@ struct GoonedMainShell: View {
                         }
 
                         brandChannelButton(id: 3, active: isRedditChannel) {
-                            if isRedditChannel {
+                            if isRedditChannel && store.data.redditSession.isConnected {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
                                 let target: FeedSource
@@ -1280,7 +1283,7 @@ struct GoonedMainShell: View {
                         }
 
                         brandChannelButton(id: 5, active: isIGChannel) {
-                            if isIGChannel {
+                            if isIGChannel && store.data.igSession.isConnected {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
                                 let target: FeedSource = lastIGChannel == .igFollowing ? .igFollowing : (lastIGChannel == .igSaved ? .igSaved : .igReels)
