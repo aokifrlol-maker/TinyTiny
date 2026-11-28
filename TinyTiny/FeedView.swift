@@ -778,18 +778,6 @@ final class PlayerModel: ObservableObject {
         progressState.durationSeconds = 0
         durationSeconds = 0
     }
-
-    deinit {
-        if let endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-        }
-        statusObservation?.invalidate()
-        sizeObservation?.invalidate()
-        loadItemTask?.cancel()
-        stallWatchdogTask?.cancel()
-        previewGenerator?.cancelAllCGImageGeneration()
-        if let o = timeObserver { player.removeTimeObserver(o) }
-    }
 }
 
 // MARK: - gooned.app Vertical Scroller FeedView

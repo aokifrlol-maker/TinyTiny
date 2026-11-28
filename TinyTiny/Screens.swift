@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import WebKit
 
 // MARK: - 1. Browse / Search / Categories / X / Instagram / Rule34 Fullscreen Overlay
 

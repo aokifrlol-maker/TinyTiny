@@ -593,12 +593,12 @@ final class LicenseManager: ObservableObject {
             }
             UserStore.shared.data.removedFollows = mergedRemovedFollows
             let rf = backup.userData.removedFollows
+            func shouldDropFollow(_ fk: String) -> Bool {
+                guard let remTs = rf[fk] else { return false }
+                if let addedAt = localAdded["follow:\(fk)"] ?? localAdded[fk], addedAt > remTs { return false }
+                return true
+            }
             if !rf.isEmpty {
-                func shouldDropFollow(_ fk: String) -> Bool {
-                    guard let remTs = rf[fk] else { return false }
-                    if let addedAt = localAdded["follow:\(fk)"], addedAt > remTs { return false }
-                    return true
-                }
                 UserStore.shared.data.followedUsers.removeAll { shouldDropFollow("u:\($0.lowercased())") }
                 UserStore.shared.data.followedSubreddits.removeAll { shouldDropFollow("sub:\($0.lowercased())") }
                 UserStore.shared.data.followedXUsers.removeAll { shouldDropFollow("x:\($0.lowercased())") }

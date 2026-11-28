@@ -1781,10 +1781,6 @@ private struct HorizontalSwipeBridge: UIViewRepresentable {
             self.parent = parent
         }
 
-        deinit {
-            detach()
-        }
-
         func detach() {
             if let leftSwipe { attachedHost?.removeGestureRecognizer(leftSwipe) }
             if let rightSwipe { attachedHost?.removeGestureRecognizer(rightSwipe) }
