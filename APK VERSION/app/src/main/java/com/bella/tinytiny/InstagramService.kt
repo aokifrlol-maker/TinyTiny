@@ -382,15 +382,9 @@ object InstagramWebEngine {
                 }
             }
         }
-        try {
-            val cm = CookieManager.getInstance()
-            for (domain in listOf("https://www.instagram.com", "https://i.instagram.com")) {
-                cm.setCookie(domain, "sessionid=; Max-Age=0; Path=/")
-                cm.setCookie(domain, "csrftoken=; Max-Age=0; Path=/")
-                cm.setCookie(domain, "ds_user_id=; Max-Age=0; Path=/")
-            }
-            cm.flush()
-        } catch (_: Throwable) {}
+        XWebEngine.clearWebCookiesAndRestoreConnected(
+            listOf("https://www.instagram.com", "https://instagram.com", "https://i.instagram.com", "https://www.facebook.com", "https://m.facebook.com")
+        )
     }
 
     @SuppressLint("SetJavaScriptEnabled")

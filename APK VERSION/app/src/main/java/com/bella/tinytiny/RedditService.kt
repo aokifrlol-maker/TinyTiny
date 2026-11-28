@@ -71,14 +71,9 @@ object RedditPersonalAPI {
     }
 
     fun clearCookies() {
-        try {
-            val cm = CookieManager.getInstance()
-            for (domain in listOf("https://www.reddit.com", "https://reddit.com", "https://oauth.reddit.com")) {
-                cm.setCookie(domain, "reddit_session=; Max-Age=0; Path=/")
-                cm.setCookie(domain, "token_v2=; Max-Age=0; Path=/")
-            }
-            cm.flush()
-        } catch (_: Throwable) {}
+        XWebEngine.clearWebCookiesAndRestoreConnected(
+            listOf("https://www.reddit.com", "https://reddit.com", "https://old.reddit.com", "https://oauth.reddit.com", "https://accounts.google.com")
+        )
     }
 
     suspend fun verifyUsername(cookieHeader: String): String? = withContext(Dispatchers.IO) {

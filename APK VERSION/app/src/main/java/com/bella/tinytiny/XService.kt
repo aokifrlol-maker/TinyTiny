@@ -852,14 +852,27 @@ object XWebEngine {
     fun resetSession() {
         home.resetSession()
         shared.resetSession()
-        try {
-            val cm = CookieManager.getInstance()
-            for (domain in listOf("https://x.com", "https://twitter.com")) {
-                cm.setCookie(domain, "auth_token=; Max-Age=0; Path=/")
-                cm.setCookie(domain, "ct0=; Max-Age=0; Path=/")
+        clearWebCookiesAndRestoreConnected(
+            listOf("https://x.com", "https://twitter.com", "https://mobile.x.com", "https://mobile.twitter.com", "https://accounts.google.com")
+        )
+    }
+
+    internal fun clearWebCookiesAndRestoreConnected(origins: List<String>) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching {
+                val ws = android.webkit.WebStorage.getInstance()
+                for (origin in origins) ws.deleteOrigin(origin)
             }
-            cm.flush()
-        } catch (_: Throwable) {}
+            runCatching {
+                val cm = CookieManager.getInstance()
+                cm.removeAllCookies {
+                    cm.flush()
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                        LicenseManager.injectRestoredSocialCookies()
+                    }
+                }
+            }
+        }
     }
 
     suspend fun warmUp() {
@@ -1071,6 +1084,7 @@ fun XLoginSheet(onConnected: () -> Unit, onDismiss: () -> Unit) {
                             settings.userAgentString = chromeUa
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            clearCache(true)
                             webChromeClient = object : WebChromeClient() {
                                 override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
                                     val popup = WebView(ctx).apply {
