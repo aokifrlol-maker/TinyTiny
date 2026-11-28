@@ -2763,6 +2763,89 @@ export default {
     }
 
     // 8. Seedr "Watchit" Folder & Admin Long-Video Watchit -> Public Watch + Direct Download URLs
+    if (request.method === "POST" && path === "/v1/admin/watchit/init") {
+      const body = await request.json().catch(() => ({}));
+      const rec = await getLicense(env, body.key);
+      const devId = body.deviceId || request.headers.get("X-Device-Id");
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
+      if (!check.ok) return json({ ok: false, error: check.error }, 403);
+      if (!rec.admin) return json({ ok: false, error: "Admin license required." }, 403);
+
+      const id = randomId(10);
+      const chunkSize = 8 * 1024 * 1024; // 8 MiB per KV chunk (safe under 25 MiB KV & 128 MiB Worker RAM)
+      const rawTitle = String(body.title || "TinyTiny Video").trim().slice(0, 90);
+      const baseName = rawTitle.replace(/[^a-zA-Z0-9._ -]/g, "").trim() || "video";
+      const filename = baseName.toLowerCase().endsWith(".mp4") ? baseName : `${baseName}.mp4`;
+      await env.LICENSES.put(
+        `watchit:pending:${id}`,
+        JSON.stringify({ filename, contentType: "video/mp4", chunkSize, createdAt: nowSec() }),
+        { expirationTtl: 3600 }
+      );
+      return json({ ok: true, id, chunkSize });
+    }
+
+    if (request.method === "PUT" && path.startsWith("/v1/admin/watchit/chunk/")) {
+      const licKey = request.headers.get("X-License-Key");
+      const devId = request.headers.get("X-Device-Id");
+      const rec = await getLicense(env, licKey);
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
+      if (!check.ok) return json({ ok: false, error: check.error }, 403);
+      if (!rec.admin) return json({ ok: false, error: "Admin license required." }, 403);
+
+      const segs = path.slice("/v1/admin/watchit/chunk/".length).split("/").filter(Boolean);
+      const id = (segs[0] || "").replace(/[^a-z0-9]/gi, "");
+      const idx = parseInt(segs[1] || "-1", 10);
+      if (!id || !Number.isInteger(idx) || idx < 0 || idx > 40) {
+        return json({ ok: false, error: "Invalid chunk params" }, 400);
+      }
+      const buf = await request.arrayBuffer();
+      if (!buf || buf.byteLength === 0 || buf.byteLength > 16 * 1024 * 1024) {
+        return json({ ok: false, error: "Invalid chunk size" }, 400);
+      }
+      await env.LICENSES.put(`watchit:chunk:${id}:${idx}`, buf, { expirationTtl: 7 * DAY_SEC });
+      return json({ ok: true, idx, bytes: buf.byteLength });
+    }
+
+    if (request.method === "POST" && path.startsWith("/v1/admin/watchit/complete/")) {
+      const body = await request.json().catch(() => ({}));
+      const rec = await getLicense(env, body.key || request.headers.get("X-License-Key"));
+      const devId = body.deviceId || request.headers.get("X-Device-Id");
+      const check = validateRecordAccess(rec, devId, { requireDeviceId: true, requireBoundDevice: true });
+      if (!check.ok) return json({ ok: false, error: check.error }, 403);
+      if (!rec.admin) return json({ ok: false, error: "Admin license required." }, 403);
+
+      const id = path.slice("/v1/admin/watchit/complete/".length).replace(/[^a-z0-9]/gi, "");
+      const pendingRaw = id ? await env.LICENSES.get(`watchit:pending:${id}`) : null;
+      const pending = safeJsonParse(pendingRaw, {});
+      const size = Number(body.size || 0);
+      const chunkCount = Number(body.chunkCount || 0);
+      const chunkSize = Number(body.chunkSize || pending.chunkSize || 8 * 1024 * 1024);
+      if (!id || size <= 0 || chunkCount <= 0 || chunkCount > 41) {
+        return json({ ok: false, error: "Invalid complete payload" }, 400);
+      }
+      const rawTitle = String(body.title || pending.filename || "TinyTiny Video").trim().slice(0, 90);
+      const baseName = rawTitle.replace(/[^a-zA-Z0-9._ -]/g, "").trim() || "video";
+      const filename = baseName.toLowerCase().endsWith(".mp4") ? baseName : `${baseName}.mp4`;
+      const meta = {
+        mode: "kv_chunks",
+        size,
+        chunkSize,
+        chunkCount,
+        filename,
+        contentType: "video/mp4",
+        isHls: false,
+        createdAt: nowSec(),
+      };
+      await env.LICENSES.put(`watchit:${id}`, JSON.stringify(meta), { expirationTtl: 7 * DAY_SEC });
+      const baseUrl = getPublicBaseUrl(env) || url.origin;
+      return json({
+        ok: true,
+        id,
+        watchUrl: `${baseUrl}/w/${id}`,
+        downloadUrl: `${baseUrl}/w/${id}/download`,
+      });
+    }
+
     if (request.method === "POST" && path === "/v1/admin/watchit") {
       const body = await request.json().catch(() => ({}));
       const rec = await getLicense(env, body.key);
@@ -2772,29 +2855,35 @@ export default {
       if (!rec.admin) return json({ ok: false, error: "Admin license required." }, 403);
 
       const rawVideoUrl = String(body.videoUrl || "").trim();
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(rawVideoUrl);
-      } catch {
-        return json({ ok: false, error: "Invalid videoUrl" }, 400);
-      }
-      if (parsedUrl.protocol !== "https:") {
-        return json({ ok: false, error: "Only https:// video URLs are supported" }, 400);
-      }
-      const host = parsedUrl.hostname.toLowerCase();
-      if (
-        host === "localhost" ||
-        host.endsWith(".local") ||
-        host.startsWith("127.") ||
-        host.startsWith("10.") ||
-        host.startsWith("192.168.") ||
-        host.startsWith("169.254.") ||
-        host === "::1"
-      ) {
-        return json({ ok: false, error: "Disallowed host" }, 400);
+      const rawPageUrl = String(body.pageUrl || "").trim().slice(0, 500);
+      const rawSourceUrl = String(body.sourceUrl || "").trim().slice(0, 500);
+      let parsedUrl = null;
+      if (rawVideoUrl) {
+        try {
+          parsedUrl = new URL(rawVideoUrl);
+        } catch {
+          return json({ ok: false, error: "Invalid videoUrl" }, 400);
+        }
+        if (parsedUrl.protocol !== "https:") {
+          return json({ ok: false, error: "Only https:// video URLs are supported" }, 400);
+        }
+        const host = parsedUrl.hostname.toLowerCase();
+        if (
+          host === "localhost" ||
+          host.endsWith(".local") ||
+          host.startsWith("127.") ||
+          host.startsWith("10.") ||
+          host.startsWith("192.168.") ||
+          host.startsWith("169.254.") ||
+          host === "::1"
+        ) {
+          return json({ ok: false, error: "Disallowed host" }, 400);
+        }
+      } else if (!rawPageUrl && !rawSourceUrl) {
+        return json({ ok: false, error: "Missing videoUrl or pageUrl" }, 400);
       }
 
-      const isHls = parsedUrl.pathname.toLowerCase().endsWith(".m3u8") || rawVideoUrl.toLowerCase().includes(".m3u8");
+      const isHls = Boolean(parsedUrl && (parsedUrl.pathname.toLowerCase().endsWith(".m3u8") || rawVideoUrl.toLowerCase().includes(".m3u8")));
       const rawTitle = String(body.title || "TinyTiny Video").trim().slice(0, 90);
       const baseName = rawTitle.replace(/[^a-zA-Z0-9._ -]/g, "").trim() || "video";
       const ext = isHls ? ".m3u8" : ".mp4";
@@ -2805,6 +2894,8 @@ export default {
       const meta = {
         mode: "remote",
         videoUrl: rawVideoUrl,
+        pageUrl: rawPageUrl,
+        sourceUrl: rawSourceUrl,
         referer,
         isHls,
         filename,
@@ -2840,25 +2931,198 @@ export default {
         });
       }
 
+      if (sub === "seg") {
+        const encodedU = url.searchParams.get("u") || "";
+        let segUrl = "";
+        try {
+          segUrl = new TextDecoder().decode(b64UrlToUint8(encodedU));
+        } catch {
+          return new Response("Invalid segment", { status: 400 });
+        }
+        if (!segUrl.startsWith("https://")) return new Response("Invalid segment", { status: 400 });
+        const segHeaders = {
+          "User-Agent": WATCHIT_MOBILE_UA,
+        };
+        if (meta.referer) segHeaders["Referer"] = meta.referer;
+        const segResp = await fetch(segUrl, { method: request.method, headers: segHeaders, redirect: "follow" });
+        if (!segResp.ok && segResp.status !== 206) {
+          return new Response("Segment unavailable", { status: 502 });
+        }
+        const sh = new Headers({
+          "Content-Type": segResp.headers.get("Content-Type") || "video/mp2t",
+          "Cache-Control": "private, max-age=300",
+          "Access-Control-Allow-Origin": "*",
+        });
+        const scl = segResp.headers.get("Content-Length");
+        if (scl) sh.set("Content-Length", scl);
+        return new Response(request.method === "HEAD" ? null : segResp.body, { status: segResp.status, headers: sh });
+      }
+
       if (sub !== "video" && sub !== "download") {
         return new Response("Not found", { status: 404 });
       }
 
-      let upstream;
-      if (meta.mode === "remote" && meta.videoUrl) {
-        const reqHeaders = {
-          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-        };
-        if (meta.referer) reqHeaders["Referer"] = meta.referer;
+      if (meta.mode === "kv_chunks" && meta.size > 0 && meta.chunkCount > 0) {
+        const totalSize = Number(meta.size);
+        const chunkSize = Number(meta.chunkSize || 8 * 1024 * 1024);
         const rangeHeader = request.headers.get("Range");
-        if (rangeHeader) reqHeaders["Range"] = rangeHeader;
-        upstream = await fetch(meta.videoUrl, {
-          method: request.method,
-          headers: reqHeaders,
-          redirect: "follow",
+        const parsedRange = parseByteRange(rangeHeader, totalSize);
+        if (parsedRange?.invalid) {
+          return new Response("Range Not Satisfiable", {
+            status: 416,
+            headers: { "Content-Range": `bytes */${totalSize}` },
+          });
+        }
+        const isRange = Boolean(parsedRange);
+        const start = isRange ? parsedRange.start : 0;
+        const end = isRange ? parsedRange.end : totalSize - 1;
+        const outLen = end - start + 1;
+        const disp = sub === "download" ? "attachment" : "inline";
+        const safeFile = sanitizeFilename(meta.filename || "video.mp4");
+        const outHeaders = new Headers({
+          "Content-Type": meta.contentType || "video/mp4",
+          "Accept-Ranges": "bytes",
+          "Content-Length": String(outLen),
+          "Content-Disposition": `${disp}; filename="${safeFile}"`,
+          "Cache-Control": "private, max-age=3600",
+          "Access-Control-Allow-Origin": "*",
         });
-        if (!upstream.ok && upstream.status !== 206) {
-          return new Response("Video link expired or unavailable", { status: upstream.status === 404 || upstream.status === 410 ? 410 : 502 });
+        if (isRange) {
+          outHeaders.set("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+        }
+        if (request.method === "HEAD") {
+          return new Response(null, { status: isRange ? 206 : 200, headers: outHeaders });
+        }
+
+        const firstChunk = Math.floor(start / chunkSize);
+        const lastChunk = Math.floor(end / chunkSize);
+        let curChunk = firstChunk;
+        const bodyStream = new ReadableStream({
+          async pull(controller) {
+            if (curChunk > lastChunk) {
+              controller.close();
+              return;
+            }
+            const idx = curChunk++;
+            const rawBuf = await env.LICENSES.get(`watchit:chunk:${id}:${idx}`, "arrayBuffer");
+            if (!rawBuf) {
+              controller.error(new Error("Missing chunk " + idx));
+              return;
+            }
+            const chunkOffset = idx * chunkSize;
+            const sliceStart = Math.max(0, start - chunkOffset);
+            const sliceEnd = Math.min(rawBuf.byteLength, end - chunkOffset + 1);
+            if (sliceEnd > sliceStart) {
+              controller.enqueue(new Uint8Array(rawBuf, sliceStart, sliceEnd - sliceStart));
+            }
+          },
+        });
+        return new Response(bodyStream, { status: isRange ? 206 : 200, headers: outHeaders });
+      }
+
+      let upstream;
+      let resolvedTargetUrl = meta.videoUrl || "";
+      let resolvedIsHls = Boolean(meta.isHls);
+      if (meta.mode === "remote") {
+        const rangeHeader = request.headers.get("Range");
+        const fetchWithHeaders = async (targetUrl, ref) => {
+          const reqHeaders = {
+            "User-Agent": WATCHIT_MOBILE_UA,
+            Accept: "*/*",
+          };
+          if (ref) reqHeaders["Referer"] = ref;
+          if (rangeHeader) reqHeaders["Range"] = rangeHeader;
+          return fetch(targetUrl, {
+            method: request.method,
+            headers: reqHeaders,
+            redirect: "follow",
+          });
+        };
+
+        const hasSourcePage = Boolean(meta.pageUrl || meta.sourceUrl);
+        const likelyIpLocked =
+          !resolvedTargetUrl ||
+          /[?&]ip=/i.test(resolvedTargetUrl) ||
+          /(phncdn\.com|xhcdn\.com|sb-cd\.com|eporner\.com|xvideos-cdn\.com)/i.test(resolvedTargetUrl);
+
+        let cached = watchitResolveCache.get(id);
+        if (cached && Date.now() - cached.at > 12 * 60 * 1000) {
+          watchitResolveCache.delete(id);
+          cached = null;
+        }
+
+        if (hasSourcePage && likelyIpLocked) {
+          if (!cached) {
+            const fresh = await resolveWatchitRemoteMedia(meta);
+            if (fresh?.url) {
+              cached = { ...fresh, at: Date.now() };
+              watchitResolveCache.set(id, cached);
+            }
+          }
+          if (cached?.url) {
+            resolvedTargetUrl = cached.url;
+            resolvedIsHls = Boolean(cached.isHls);
+            upstream = await fetchWithHeaders(cached.url, cached.referer || meta.referer);
+            if (!upstream.ok && upstream.status !== 206) {
+              // PoP IP changed or token expired: re-resolve fresh on this isolate's IP and retry once
+              watchitResolveCache.delete(id);
+              const fresh = await resolveWatchitRemoteMedia(meta);
+              if (fresh?.url) {
+                watchitResolveCache.set(id, { ...fresh, at: Date.now() });
+                resolvedTargetUrl = fresh.url;
+                resolvedIsHls = Boolean(fresh.isHls);
+                upstream = await fetchWithHeaders(fresh.url, fresh.referer || meta.referer);
+              }
+            }
+          }
+        }
+
+        if (!upstream && resolvedTargetUrl) {
+          upstream = await fetchWithHeaders(resolvedTargetUrl, meta.referer);
+          if ((!upstream.ok && upstream.status !== 206) && hasSourcePage) {
+            const fresh = await resolveWatchitRemoteMedia(meta);
+            if (fresh?.url) {
+              watchitResolveCache.set(id, { ...fresh, at: Date.now() });
+              resolvedTargetUrl = fresh.url;
+              resolvedIsHls = Boolean(fresh.isHls);
+              upstream = await fetchWithHeaders(fresh.url, fresh.referer || meta.referer);
+            }
+          }
+        }
+
+        if (!upstream || (!upstream.ok && upstream.status !== 206)) {
+          return new Response("Video link expired or unavailable", {
+            status: upstream && (upstream.status === 404 || upstream.status === 410) ? 410 : 502,
+          });
+        }
+
+        // If serving an HLS playlist (.m3u8), rewrite segment/variant URLs to proxy through /w/<id>/seg
+        const ct = (upstream.headers.get("Content-Type") || "").toLowerCase();
+        if (resolvedIsHls || ct.includes("mpegurl") || resolvedTargetUrl.toLowerCase().includes(".m3u8")) {
+          const text = await upstream.text();
+          const baseObj = new URL(resolvedTargetUrl);
+          const rewritten = text
+            .split(/\r?\n/)
+            .map((line) => {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#")) return line;
+              try {
+                const abs = new URL(trimmed, baseObj).toString();
+                const b64 = uint8ToB64Url(new TextEncoder().encode(abs));
+                return `/w/${id}/seg?u=${b64}`;
+              } catch {
+                return line;
+              }
+            })
+            .join("\n");
+          return new Response(request.method === "HEAD" ? null : rewritten, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/vnd.apple.mpegurl",
+              "Cache-Control": "private, no-store",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
         }
       } else {
         const auth = seedrAuthHeader(env);
@@ -3029,6 +3293,185 @@ async function extractXVideosMP4(pageUrl) {
   } catch {
     return null;
   }
+}
+
+// MARK: - Server-Side Long-Video Resolver for Watchit (Bypasses IP-Locked CDN Tokens)
+
+const WATCHIT_MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+const WATCHIT_DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+const watchitResolveCache = new Map();
+
+function uint8ToB64Url(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function epornerBase36Hash(hex) {
+  let out = "";
+  for (let i = 0; i < Math.min(32, hex.length); i += 8) {
+    const val = parseInt(hex.slice(i, i + 8), 16);
+    out += Number.isFinite(val) ? val.toString(36) : "0";
+  }
+  return out;
+}
+
+async function resolveWatchitRemoteMedia(meta) {
+  const pageUrl = String(meta.pageUrl || "").trim();
+  const sourceUrl = String(meta.sourceUrl || "").trim();
+  const combined = `${sourceUrl} ${pageUrl}`.toLowerCase();
+
+  try {
+    // 1. Pornhub (pornhub:<vid> or viewkey=<vid>)
+    if (combined.includes("pornhub")) {
+      const vid =
+        sourceUrl.match(/^pornhub:([a-z0-9_-]+)/i)?.[1] ||
+        pageUrl.match(/[?&]viewkey=([a-z0-9_-]+)/i)?.[1] ||
+        pageUrl.match(/\/embed\/([a-z0-9_-]+)/i)?.[1];
+      if (vid) {
+        const embedResp = await fetch(`https://www.pornhub.com/embed/${vid}`, {
+          headers: {
+            "User-Agent": WATCHIT_MOBILE_UA,
+            "Accept-Language": "en-US,en;q=0.9",
+            Cookie: "accessAgeDisclaimerPH=1",
+          },
+          redirect: "follow",
+        });
+        if (embedResp.ok) {
+          const setCookies = typeof embedResp.headers.getSetCookie === "function"
+            ? embedResp.headers.getSetCookie()
+            : [];
+          const cookieHeader = ["accessAgeDisclaimerPH=1", ...setCookies.map((c) => c.split(";")[0]).filter(Boolean)].join("; ");
+          const cleaned = (await embedResp.text()).replace(/\\\//g, "/");
+          const gmMatch = cleaned.match(/https:\/\/www\.pornhub\.com\/video\/get_media\?[^"'\s\\]+/);
+          if (gmMatch) {
+            const gmResp = await fetch(gmMatch[0], {
+              headers: {
+                "User-Agent": WATCHIT_MOBILE_UA,
+                Referer: `https://www.pornhub.com/embed/${vid}`,
+                Cookie: cookieHeader,
+              },
+            });
+            if (gmResp.ok) {
+              const arr = await gmResp.json().catch(() => []);
+              if (Array.isArray(arr)) {
+                const mp4s = arr
+                  .filter((x) => x && (x.format === "mp4" || String(x.videoUrl || "").includes(".mp4")) && x.videoUrl)
+                  .sort((a, b) => (parseInt(String(b.quality || "0"), 10) || 0) - (parseInt(String(a.quality || "0"), 10) || 0));
+                if (mp4s.length > 0) {
+                  return { url: mp4s[0].videoUrl, referer: "https://www.pornhub.com/", isHls: false };
+                }
+              }
+            }
+          }
+          const hlsMatch = cleaned.match(/https:\/\/[^"'\s\\]+?master\.m3u8[^"'\s\\]*/);
+          if (hlsMatch) {
+            return { url: hlsMatch[0], referer: "https://www.pornhub.com/", isHls: true };
+          }
+        }
+      }
+    }
+
+    // 2. Eporner (eporner:<id> or /video-<id>/)
+    if (combined.includes("eporner")) {
+      const id =
+        sourceUrl.match(/^eporner:([a-z0-9_-]+)/i)?.[1] ||
+        pageUrl.match(/\/video-([a-z0-9_-]+)/i)?.[1] ||
+        pageUrl.match(/\/embed\/([a-z0-9_-]+)/i)?.[1];
+      if (id) {
+        const embedUrl = `https://www.eporner.com/embed/${id}/`;
+        const embedResp = await fetch(embedUrl, { headers: { "User-Agent": WATCHIT_MOBILE_UA } });
+        if (embedResp.ok) {
+          const html = await embedResp.text();
+          const vid = html.match(/vid\s*=\s*'([^']+)'/)?.[1];
+          const rawHash = html.match(/hash\s*=\s*'([^']+)'/)?.[1];
+          if (vid && rawHash && rawHash.length >= 32) {
+            const b36 = epornerBase36Hash(rawHash);
+            const xhrResp = await fetch(
+              `https://www.eporner.com/xhr/video/${vid}?hash=${b36}&domain=www.eporner.com&fallback=false&embed=true&supportedFormats=mp4`,
+              { headers: { "User-Agent": WATCHIT_MOBILE_UA, Referer: embedUrl } }
+            );
+            if (xhrResp.ok) {
+              const j = await xhrResp.json().catch(() => null);
+              const mp4Dict = j?.sources?.mp4;
+              if (mp4Dict && typeof mp4Dict === "object") {
+                const entries = Object.entries(mp4Dict)
+                  .map(([lbl, obj]) => ({ res: parseInt(lbl.replace(/\D+/g, ""), 10) || 480, src: obj?.src }))
+                  .filter((e) => e.src)
+                  .sort((a, b) => b.res - a.res);
+                if (entries.length > 0) {
+                  return { url: entries[0].src, referer: "https://www.eporner.com/", isHls: false };
+                }
+              }
+            }
+          }
+          const ldMp4 = html.match(/"contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)"/)?.[1];
+          if (ldMp4) return { url: ldMp4, referer: "https://www.eporner.com/", isHls: false };
+        }
+      }
+    }
+
+    // 3. XVideos
+    if (combined.includes("xvideos.com")) {
+      const target = pageUrl.startsWith("https://") ? pageUrl : sourceUrl;
+      const resp = await fetch(target, { headers: { "User-Agent": WATCHIT_DESKTOP_UA }, redirect: "follow" });
+      if (resp.ok) {
+        const html = await resp.text();
+        const high = html.match(/setVideoUrlHigh\('([^']+)'\)/i)?.[1];
+        const low = html.match(/setVideoUrlLow\('([^']+)'\)/i)?.[1];
+        const hls = html.match(/setVideoHLS\('([^']+)'\)/i)?.[1];
+        if (high || low) return { url: high || low, referer: "https://www.xvideos.com/", isHls: false };
+        if (hls) return { url: hls, referer: "https://www.xvideos.com/", isHls: true };
+      }
+    }
+
+    // 4. xHamster
+    if (combined.includes("xhamster.com")) {
+      const target = pageUrl.startsWith("https://") ? pageUrl : sourceUrl;
+      const resp = await fetch(target, { headers: { "User-Agent": WATCHIT_MOBILE_UA }, redirect: "follow" });
+      if (resp.ok) {
+        const cleaned = (await resp.text()).replace(/\\\//g, "/");
+        const mp4 =
+          cleaned.match(/https?:\/\/[^"'\s\\]+xhcdn\.com[^"'\s\\]+?(?:1080p|720p|480p)[^"'\s\\]*\.mp4/)?.[0] ||
+          cleaned.match(/https?:\/\/[^"'\s\\]+xhcdn\.com[^"'\s\\]+?\.mp4/)?.[0];
+        if (mp4) return { url: mp4, referer: "https://xhamster.com/", isHls: false };
+        const hls = cleaned.match(/https?:\/\/[^"'\s\\]+xhcdn\.com[^"'\s\\]+?\.m3u8[^"'\s\\]*/)?.[0];
+        if (hls) return { url: hls, referer: "https://xhamster.com/", isHls: true };
+      }
+    }
+
+    // 5. SpankBang
+    if (combined.includes("spankbang.com")) {
+      const target = pageUrl.startsWith("https://") ? pageUrl : sourceUrl;
+      const resp = await fetch(target, { headers: { "User-Agent": WATCHIT_DESKTOP_UA }, redirect: "follow" });
+      if (resp.ok) {
+        const cleaned = (await resp.text()).replace(/\\\//g, "/");
+        const matches = cleaned.match(/https?:\/\/[^"'\s\\]+(?:sb-cd|spankbang)\.com[^"'\s\\]+?\.mp4[^"'\s\\]*/g) || [];
+        if (matches.length > 0) {
+          matches.sort((a, b) => {
+            const score = (s) => (s.includes("1080p") ? 1080 : s.includes("720p") ? 720 : s.includes("480p") ? 480 : 240);
+            return score(b) - score(a);
+          });
+          return { url: matches[0], referer: "https://spankbang.com/", isHls: false };
+        }
+      }
+    }
+
+    // 6. Erome
+    if (combined.includes("erome.com")) {
+      const target = pageUrl.startsWith("https://") ? pageUrl : sourceUrl;
+      const resp = await fetch(target, {
+        headers: { "User-Agent": WATCHIT_DESKTOP_UA, Referer: "https://www.erome.com/" },
+        redirect: "follow",
+      });
+      if (resp.ok) {
+        const html = await resp.text();
+        const mp4 = html.match(/<source[^>]+src="(https:\/\/[^"]+\.mp4[^"]*)"/i)?.[1];
+        if (mp4) return { url: mp4, referer: "https://www.erome.com/", isHls: false };
+      }
+    }
+  } catch {}
+  return null;
 }
 
 // MARK: - Seedr "Watchit" Folder Auto-Link + Telegram Notifier

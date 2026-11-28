@@ -124,32 +124,144 @@ final class ShareService: ObservableObject {
         return await createEncryptedShareLink(for: post)
     }
 
-    /// Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) for any Long Video or video post.
+    /// Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) by uploading the MP4
+    /// from the device in 8MB chunks to the Worker (bypasses IP-locked & geo-blocked adult CDNs 100%).
     func createAdminWatchitLink(for post: Gif) async -> (watchUrl: String, downloadUrl: String)? {
         guard LicenseManager.shared.isAdmin else { return nil }
-        var candidates: [URL] = []
-        if post.isLongVideoPost {
-            let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
-            candidates.append(contentsOf: resolved)
-        }
-        candidates.append(contentsOf: post.allVideoURLs(hd: true))
-        let remoteCandidates = candidates.filter { ($0.scheme?.lowercased() ?? "") == "https" }
-        // Prefer direct MP4 over HLS .m3u8 so browser Download works cleanly
-        guard let picked = remoteCandidates.first(where: { !$0.absoluteString.lowercased().contains(".m3u8") })
-                ?? remoteCandidates.first else {
-            return nil
-        }
         let base = LicenseManager.shared.normalizedBaseURL
-        guard let apiURL = URL(string: "\(base)/v1/admin/watchit") else { return nil }
+        let licKey = LicenseManager.shared.status.licenseKey
+        let devId = LicenseManager.shared.deviceId
+        let title = post.title ?? post.author ?? "TinyTiny Video"
+
+        // 1. Obtain a local MP4 file (reuse Offline Vault copy if downloaded, otherwise stream-download on device IP)
+        var localFileURL: URL? = nil
+        var shouldDeleteTemp = false
+        var fallbackPickedURL: URL? = nil
+
+        if let offline = OfflineManager.shared.localMediaURL(for: post.id),
+           FileManager.default.fileExists(atPath: offline.path) {
+            localFileURL = offline
+        } else {
+            var candidates: [URL] = []
+            if post.isLongVideoPost {
+                let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
+                candidates.append(contentsOf: resolved)
+            }
+            candidates.append(contentsOf: post.allVideoURLs(hd: true))
+            let remoteCandidates = candidates.filter { ($0.scheme?.lowercased() ?? "") == "https" }
+            let mp4Candidates = remoteCandidates.filter { !$0.absoluteString.lowercased().contains(".m3u8") }
+            fallbackPickedURL = mp4Candidates.first ?? remoteCandidates.first
+
+            for cand in mp4Candidates.prefix(3) {
+                var dlReq = URLRequest(url: cand)
+                dlReq.timeoutInterval = 180
+                for (k, v) in MediaHeaders.headers(for: cand) {
+                    dlReq.setValue(v, forHTTPHeaderField: k)
+                }
+                if let (tmpURL, resp) = try? await session.download(for: dlReq),
+                   let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                   let attrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path),
+                   let fSize = (attrs[.size] as? NSNumber)?.int64Value,
+                   fSize > 4096, fSize <= 250 * 1024 * 1024 {
+                    let dest = FileManager.default.temporaryDirectory.appendingPathComponent("tt_watchit_\(UUID().uuidString).mp4")
+                    try? FileManager.default.removeItem(at: dest)
+                    if (try? FileManager.default.moveItem(at: tmpURL, to: dest)) != nil {
+                        localFileURL = dest
+                        shouldDeleteTemp = true
+                        break
+                    }
+                }
+            }
+        }
+
+        defer {
+            if shouldDeleteTemp, let f = localFileURL {
+                try? FileManager.default.removeItem(at: f)
+            }
+        }
+
+        // 2. Upload MP4 in 8 MiB chunks to Worker KV so `/w/<id>` streams & downloads from ANY IP forever!
+        if let fileURL = localFileURL,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+           let totalSize = (attrs[.size] as? NSNumber)?.int64Value,
+           totalSize > 0, totalSize <= 250 * 1024 * 1024,
+           let initURL = URL(string: "\(base)/v1/admin/watchit/init") {
+            var initReq = URLRequest(url: initURL)
+            initReq.httpMethod = "POST"
+            initReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            initReq.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "key": licKey,
+                "deviceId": devId,
+                "title": title
+            ])
+            if let (initData, initResp) = try? await session.data(for: initReq),
+               (initResp as? HTTPURLResponse)?.statusCode == 200,
+               let initJson = try? JSONSerialization.jsonObject(with: initData) as? [String: Any],
+               let wid = initJson["id"] as? String, !wid.isEmpty {
+                let chunkSize = (initJson["chunkSize"] as? Int) ?? (8 * 1024 * 1024)
+                if let handle = try? FileHandle(forReadingFrom: fileURL) {
+                    defer { try? handle.close() }
+                    var chunkIdx = 0
+                    var allOk = true
+                    while true {
+                        let slice = handle.readData(ofLength: chunkSize)
+                        if slice.isEmpty { break }
+                        guard let chunkURL = URL(string: "\(base)/v1/admin/watchit/chunk/\(wid)/\(chunkIdx)") else {
+                            allOk = false; break
+                        }
+                        var cReq = URLRequest(url: chunkURL)
+                        cReq.httpMethod = "PUT"
+                        cReq.timeoutInterval = 120
+                        cReq.setValue(licKey, forHTTPHeaderField: "X-License-Key")
+                        cReq.setValue(devId, forHTTPHeaderField: "X-Device-Id")
+                        cReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                        cReq.httpBody = slice
+                        if let (_, cResp) = try? await session.data(for: cReq),
+                           (cResp as? HTTPURLResponse)?.statusCode == 200 {
+                            chunkIdx += 1
+                        } else {
+                            allOk = false; break
+                        }
+                    }
+                    if allOk && chunkIdx > 0,
+                       let compURL = URL(string: "\(base)/v1/admin/watchit/complete/\(wid)") {
+                        var compReq = URLRequest(url: compURL)
+                        compReq.httpMethod = "POST"
+                        compReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        compReq.httpBody = try? JSONSerialization.data(withJSONObject: [
+                            "key": licKey,
+                            "deviceId": devId,
+                            "title": title,
+                            "size": totalSize,
+                            "chunkSize": chunkSize,
+                            "chunkCount": chunkIdx
+                        ])
+                        if let (cData, cResp) = try? await session.data(for: compReq),
+                           (cResp as? HTTPURLResponse)?.statusCode == 200,
+                           let cJson = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
+                           let watchUrl = cJson["watchUrl"] as? String,
+                           let downloadUrl = cJson["downloadUrl"] as? String {
+                            return (watchUrl, downloadUrl)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback (for HLS-only posts or >250MB videos): register remote URL with pageUrl metadata
+        guard let picked = fallbackPickedURL,
+              let apiURL = URL(string: "\(base)/v1/admin/watchit") else { return nil }
         var req = URLRequest(url: apiURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let referer = MediaHeaders.headers(for: picked)["Referer"] ?? post.sourceUrl ?? ""
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "key": LicenseManager.shared.status.licenseKey,
-            "deviceId": LicenseManager.shared.deviceId,
+            "key": licKey,
+            "deviceId": devId,
             "videoUrl": picked.absoluteString,
-            "title": post.title ?? post.author ?? "TinyTiny Video",
+            "pageUrl": post.permalink ?? "",
+            "sourceUrl": post.sourceUrl ?? "",
+            "title": title,
             "referer": referer
         ])
         guard let (data, resp) = try? await session.data(for: req),

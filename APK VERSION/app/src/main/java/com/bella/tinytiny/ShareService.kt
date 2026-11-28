@@ -342,29 +342,149 @@ object ShareService {
         }
     }
 
-    /** Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) for any Long Video or video post. */
+    /** Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) by uploading the MP4
+     *  in 8 MiB chunks from the device so `/w/<id>` streams & downloads from ANY IP without geo/IP-lock failures. */
     suspend fun createAdminWatchitLink(gif: Gif): Pair<String, String>? = withContext(Dispatchers.IO) {
         if (!LicenseManager.isAdmin) return@withContext null
-        val candidates = mutableListOf<String>()
-        if (gif.isLongVideoPost) {
-            runCatching { LongVideoAPI.resolvePlayableURLs(gif) }.getOrNull()?.let { candidates.addAll(it) }
+        val base = LicenseManager.normalizedBaseURL
+        val licKey = LicenseManager.status.value.licenseKey
+        val devId = LicenseManager.deviceId
+        val title = gif.title ?: gif.author ?: "TinyTiny Video"
+
+        var localFile: File? = null
+        var deleteTemp = false
+        var fallbackPicked: String? = null
+
+        val existingPath = OfflineManager.localMediaURL(gif.id)?.removePrefix("file://")
+        if (!existingPath.isNullOrEmpty() && File(existingPath).exists()) {
+            localFile = File(existingPath)
+        } else {
+            val candidates = mutableListOf<String>()
+            if (gif.isLongVideoPost) {
+                runCatching { LongVideoAPI.resolvePlayableURLs(gif) }.getOrNull()?.let { candidates.addAll(it) }
+            }
+            candidates.addAll(gif.allVideoURLs(hd = true))
+            val httpsCandidates = candidates.distinct().filter { it.startsWith("https://", ignoreCase = true) }
+            val mp4Candidates = httpsCandidates.filter { !it.lowercase().contains(".m3u8") }
+            fallbackPicked = mp4Candidates.firstOrNull() ?: httpsCandidates.firstOrNull()
+
+            for (cand in mp4Candidates.take(3)) {
+                val tmp = File(TinyTinyApplication.instance.cacheDir, "tt_watchit_${UUID.randomUUID()}.mp4")
+                try {
+                    val rb = Request.Builder().url(cand)
+                    for ((k, v) in MediaHeaders.headers(cand)) rb.header(k, v)
+                    client.newCall(rb.build()).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val stream = resp.body?.byteStream()
+                            if (stream != null) {
+                                tmp.outputStream().use { out -> stream.copyTo(out) }
+                                val sz = tmp.length()
+                                if (sz in 4097..(250L * 1024L * 1024L)) {
+                                    localFile = tmp
+                                    deleteTemp = true
+                                } else {
+                                    tmp.delete()
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                    tmp.delete()
+                }
+                if (localFile != null) break
+            }
         }
-        candidates.addAll(gif.allVideoURLs(hd = true))
-        val httpsCandidates = candidates.distinct().filter { it.startsWith("https://", ignoreCase = true) }
-        val picked = httpsCandidates.firstOrNull { !it.lowercase().contains(".m3u8") }
-            ?: httpsCandidates.firstOrNull()
-            ?: return@withContext null
+
+        try {
+            val f = localFile
+            if (f != null && f.exists() && f.length() in 1..(250L * 1024L * 1024L)) {
+                val initBody = JSONObject().apply {
+                    put("key", licKey)
+                    put("deviceId", devId)
+                    put("title", title)
+                }.toString()
+                val initReq = Request.Builder()
+                    .url("$base/v1/admin/watchit/init")
+                    .post(initBody.toRequestBody("application/json".toMediaType()))
+                    .build()
+                var wid = ""
+                var chunkSize = 8 * 1024 * 1024
+                client.newCall(initReq).execute().use { r ->
+                    if (r.code == 200) {
+                        val j = JSONObject(r.body?.string() ?: "{}")
+                        wid = j.optString("id")
+                        chunkSize = j.optInt("chunkSize", 8 * 1024 * 1024)
+                    }
+                }
+                if (wid.isNotEmpty()) {
+                    val buf = ByteArray(chunkSize)
+                    var chunkIdx = 0
+                    var allOk = true
+                    f.inputStream().use { inp ->
+                        while (true) {
+                            var readTotal = 0
+                            while (readTotal < chunkSize) {
+                                val n = inp.read(buf, readTotal, chunkSize - readTotal)
+                                if (n <= 0) break
+                                readTotal += n
+                            }
+                            if (readTotal <= 0) break
+                            val slice = if (readTotal == chunkSize) buf else buf.copyOf(readTotal)
+                            val cReq = Request.Builder()
+                                .url("$base/v1/admin/watchit/chunk/$wid/$chunkIdx")
+                                .header("X-License-Key", licKey)
+                                .header("X-Device-Id", devId)
+                                .put(slice.toRequestBody("application/octet-stream".toMediaType()))
+                                .build()
+                            val ok = client.newCall(cReq).execute().use { it.code == 200 }
+                            if (!ok) { allOk = false; break }
+                            chunkIdx++
+                        }
+                    }
+                    if (allOk && chunkIdx > 0) {
+                        val compBody = JSONObject().apply {
+                            put("key", licKey)
+                            put("deviceId", devId)
+                            put("title", title)
+                            put("size", f.length())
+                            put("chunkSize", chunkSize)
+                            put("chunkCount", chunkIdx)
+                        }.toString()
+                        val compReq = Request.Builder()
+                            .url("$base/v1/admin/watchit/complete/$wid")
+                            .post(compBody.toRequestBody("application/json".toMediaType()))
+                            .build()
+                        client.newCall(compReq).execute().use { resp ->
+                            if (resp.code == 200) {
+                                val j = JSONObject(resp.body?.string() ?: "{}")
+                                val w = j.optString("watchUrl")
+                                val d = j.optString("downloadUrl")
+                                if (w.isNotEmpty() && d.isNotEmpty()) return@withContext w to d
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            if (deleteTemp) localFile?.delete()
+        }
+
+        // Fallback (HLS-only or >250MB)
+        val picked = fallbackPicked ?: return@withContext null
         try {
             val referer = MediaHeaders.headers(picked)["Referer"] ?: gif.sourceUrl ?: ""
             val bodyJson = JSONObject().apply {
-                put("key", LicenseManager.status.value.licenseKey)
-                put("deviceId", LicenseManager.deviceId)
+                put("key", licKey)
+                put("deviceId", devId)
                 put("videoUrl", picked)
-                put("title", gif.title ?: gif.author ?: "TinyTiny Video")
+                put("pageUrl", gif.permalink ?: "")
+                put("sourceUrl", gif.sourceUrl ?: "")
+                put("title", title)
                 put("referer", referer)
             }.toString()
             val req = Request.Builder()
-                .url("${LicenseManager.normalizedBaseURL}/v1/admin/watchit")
+                .url("$base/v1/admin/watchit")
                 .post(bodyJson.toRequestBody("application/json".toMediaType()))
                 .build()
             client.newCall(req).execute().use { resp ->
