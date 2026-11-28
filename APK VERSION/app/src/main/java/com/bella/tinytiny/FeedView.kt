@@ -423,8 +423,6 @@ fun GoonedReelCell(
     val exoPlayer = remember(gif.id, activeVideoUrl, isCurrentPage, useReferer, retryToken) {
         if (!isCurrentPage || activeVideoUrl == null || isShowingImage) null
         else {
-            playbackFailed = false
-            isFirstFrameRendered = false
             val isLocal = activeVideoUrl.startsWith("file://")
             val dynamicClient = if (useReferer) SharedExoClients.withReferer else SharedExoClients.noReferer
             val okFactory = OkHttpDataSource.Factory(dynamicClient)
@@ -458,13 +456,20 @@ fun GoonedReelCell(
             ExoPlayer.Builder(ctx)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
                 .setLoadControl(loadControl)
-                .setAudioAttributes(audioAttrs, true)
+                .setAudioAttributes(audioAttrs, !userData.settings.muted)
                 .setHandleAudioBecomingNoisy(true)
                 .build().apply {
                     repeatMode = if (autoScrollState.value && playToEndState.value) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                     setMediaItem(mediaItem)
                     prepare()
                 }
+        }
+    }
+
+    LaunchedEffect(exoPlayer) {
+        if (exoPlayer != null) {
+            playbackFailed = false
+            isFirstFrameRendered = false
         }
     }
 
@@ -534,6 +539,11 @@ fun GoonedReelCell(
 
     LaunchedEffect(exoPlayer, userData.settings.muted, isHolding, speedLocked2x) {
         if (exoPlayer != null) {
+            val audioAttrs = androidx.media3.common.AudioAttributes.Builder()
+                .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build()
+            exoPlayer.setAudioAttributes(audioAttrs, !userData.settings.muted)
             exoPlayer.volume = if (userData.settings.muted) 0f else 1f
             exoPlayer.setPlaybackSpeed(if (isHolding || speedLocked2x) 2.0f else 1.0f)
         }
@@ -1376,6 +1386,7 @@ private object SharedExoClients {
 
     private fun buildClient(includeReferer: Boolean): okhttp3.OkHttpClient =
         TinyTinyApplication.sharedHttpClient.newBuilder()
+            .cache(null)
             .addInterceptor { chain ->
                 val req = chain.request()
                 val uStr = req.url.toString()
@@ -1623,7 +1634,7 @@ fun PostMoreSheet(
                     .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                     .background(if (tinted) Color(0xFF1F0812) else Color(0xFF12080E))
                     .border(1.dp, Color.White.copy(0.14f), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                    .clickable(enabled = false) {}
+                    .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
                     .navigationBarsPadding()
                     .padding(20.dp)
             ) {

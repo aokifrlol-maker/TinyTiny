@@ -58,10 +58,16 @@ class TinyTinyApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // Warm up ExoPlayer SQLite SimpleCache & OfflineManager index off the main thread
+        Thread {
+            try { mediaSimpleCache } catch (_: Throwable) {}
+            try { OfflineManager.localMediaURL("__warmup__") } catch (_: Throwable) {}
+        }.start()
     }
 
     override fun newImageLoader(): ImageLoader {
         val headerClient = sharedHttpClient.newBuilder()
+            .cache(null)
             .addInterceptor { chain ->
                 val req = chain.request()
                 val urlStr = req.url.toString()

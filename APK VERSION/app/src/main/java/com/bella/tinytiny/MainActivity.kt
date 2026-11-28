@@ -75,7 +75,21 @@ class MainActivity : FragmentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         syncFlagSecure()
         handleIntent(intent)
-        setContent { RootView() }
+        setContent {
+            androidx.compose.material3.MaterialTheme(
+                colorScheme = androidx.compose.material3.darkColorScheme(
+                    primary = Theme.accent,
+                    onPrimary = Color.White,
+                    secondary = Theme.accentBright,
+                    background = Theme.bg,
+                    surface = Theme.surface,
+                    onBackground = Color.White,
+                    onSurface = Color.White
+                )
+            ) {
+                RootView()
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -633,13 +633,25 @@ final class LicenseManager: ObservableObject {
                 let cur = UserStore.shared.data.algorithm.tagWeights[tk] ?? 0
                 if abs(tv) > abs(cur) { UserStore.shared.data.algorithm.tagWeights[tk] = tv }
             }
-            if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
+            if mergedRemovedFollows["session:x"] != nil {
+                if UserStore.shared.data.xSession.isConnected && shouldDropFollow("session:x") {
+                    UserStore.shared.data.xSession = XAccountSession()
+                }
+            } else if !UserStore.shared.data.xSession.isConnected && backup.userData.xSession.isConnected {
                 UserStore.shared.data.xSession = backup.userData.xSession
             }
-            if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
+            if mergedRemovedFollows["session:ig"] != nil {
+                if UserStore.shared.data.igSession.isConnected && shouldDropFollow("session:ig") {
+                    UserStore.shared.data.igSession = InstagramAccountSession()
+                }
+            } else if !UserStore.shared.data.igSession.isConnected && backup.userData.igSession.isConnected {
                 UserStore.shared.data.igSession = backup.userData.igSession
             }
-            if !UserStore.shared.data.redditSession.isConnected && backup.userData.redditSession.isConnected {
+            if mergedRemovedFollows["session:reddit"] != nil {
+                if UserStore.shared.data.redditSession.isConnected && shouldDropFollow("session:reddit") {
+                    UserStore.shared.data.redditSession = RedditAccountSession()
+                }
+            } else if !UserStore.shared.data.redditSession.isConnected && backup.userData.redditSession.isConnected {
                 UserStore.shared.data.redditSession = backup.userData.redditSession
             }
             UserStore.shared.markSeenBulk(backup.userData.seenIDs)

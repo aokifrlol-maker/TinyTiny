@@ -20,15 +20,31 @@ final class OfflineManager: ObservableObject {
         return URLSession(configuration: cfg)
     }()
 
+    @Published private(set) var cachedDiskUsageString: String = "0 MB"
+
     private static let indexLock = NSLock()
+    private static let vaultQueue = DispatchQueue(label: "tinytiny.offline.vault", qos: .utility)
     private nonisolated(unsafe) static var cachedVaultDir: URL? = nil
     private nonisolated(unsafe) static var mediaIndex: [String: URL] = [:]
     private nonisolated(unsafe) static var thumbIndex: [String: URL] = [:]
     private nonisolated(unsafe) static var indexReady: Bool = false
 
     private init() {
-        DispatchQueue.global(qos: .userInitiated).async {
+        Self.vaultQueue.async {
             Self.ensureIndexReady()
+            let usage = Self.computeDiskUsageString()
+            Task { @MainActor in
+                self.cachedDiskUsageString = usage
+            }
+        }
+    }
+
+    func refreshDiskUsage() {
+        Self.vaultQueue.async {
+            let usage = Self.computeDiskUsageString()
+            Task { @MainActor in
+                self.cachedDiskUsageString = usage
+            }
         }
     }
 
@@ -350,11 +366,15 @@ final class OfflineManager: ObservableObject {
         let stem = Self.safeFileStem(for: gif.id)
         Self.removeIndexedFile(stem: stem)
         let dir = Self.vaultDirectory
-        DispatchQueue.global(qos: .utility).async {
+        Self.vaultQueue.async {
             for ext in ["mp4", "mov", "m4v", "gif", "jpg", "png", "webp"] {
                 try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem).\(ext)"))
             }
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(stem)_thumb.jpg"))
+            let usage = Self.computeDiskUsageString()
+            Task { @MainActor in
+                self.cachedDiskUsageString = usage
+            }
         }
         if deleteFromPhotos {
             deleteSavedPhotos(forIds: [gif.id])
@@ -368,11 +388,14 @@ final class OfflineManager: ObservableObject {
         Self.clearIndexedFiles()
         deleteSavedPhotos(forIds: allIds)
         let dir = Self.vaultDirectory
-        DispatchQueue.global(qos: .utility).async {
+        Self.vaultQueue.async {
             if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
                 for f in files {
                     try? FileManager.default.removeItem(at: f)
                 }
+            }
+            Task { @MainActor in
+                self.cachedDiskUsageString = "0 MB"
             }
         }
         UserStore.shared.clearAllDownloadedRecords()
@@ -380,6 +403,10 @@ final class OfflineManager: ObservableObject {
     }
 
     func totalDiskUsageString() -> String {
+        cachedDiskUsageString
+    }
+
+    nonisolated private static func computeDiskUsageString() -> String {
         let dir = Self.vaultDirectory
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir,

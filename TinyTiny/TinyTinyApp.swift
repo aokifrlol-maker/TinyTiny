@@ -1758,6 +1758,10 @@ private struct HorizontalSwipeBridge: UIViewRepresentable {
         }
     }
 
+    static func dismantleUIView(_ uiView: BridgeView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
     final class BridgeView: UIView {
         var onAttached: ((UIView) -> Void)?
         override func didMoveToSuperview() {
@@ -1776,10 +1780,21 @@ private struct HorizontalSwipeBridge: UIViewRepresentable {
             self.parent = parent
         }
 
-        func attach(to host: UIView) {
-            guard attachedHost !== host else { return }
+        deinit {
+            detach()
+        }
+
+        func detach() {
             if let leftSwipe { attachedHost?.removeGestureRecognizer(leftSwipe) }
             if let rightSwipe { attachedHost?.removeGestureRecognizer(rightSwipe) }
+            leftSwipe = nil
+            rightSwipe = nil
+            attachedHost = nil
+        }
+
+        func attach(to host: UIView) {
+            guard attachedHost !== host else { return }
+            detach()
 
             let left = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
             left.direction = .left
@@ -1816,7 +1831,14 @@ private struct HorizontalSwipeBridge: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
+            if otherGestureRecognizer is UILongPressGestureRecognizer {
+                return false
+            }
+            if let scroll = otherGestureRecognizer.view as? UIScrollView,
+               scroll.contentSize.width > scroll.bounds.width + 2 {
+                return false
+            }
+            return true
         }
     }
 }

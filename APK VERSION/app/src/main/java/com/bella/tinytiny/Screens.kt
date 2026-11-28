@@ -1710,7 +1710,7 @@ fun GoonedSettingsModal(
             modifier = Modifier
                 .fillMaxSize()
                 .liquidGlassCard(28.dp, tinted = true)
-                .clickable(enabled = false) {}
+                .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
                 .padding(18.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp)

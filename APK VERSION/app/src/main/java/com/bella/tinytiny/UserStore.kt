@@ -491,39 +491,81 @@ class UserStore private constructor() {
     }
 
     fun updateXSession(session: XAccountSession) {
-        data.value = data.value.copy(xSession = session)
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            if (session.isConnected) {
+                nextRem.remove("session:x")
+                localAddedTimestamps["session:x"] = now
+            }
+            cur.copy(xSession = session, removedFollows = nextRem)
+        }
         saveNow()
         LicenseManager.scheduleCloudSync()
     }
 
     fun disconnectX() {
-        data.value = data.value.copy(xSession = XAccountSession())
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            nextRem["session:x"] = now
+            localAddedTimestamps.remove("session:x")
+            cur.copy(xSession = XAccountSession(), removedFollows = trimTombstones(nextRem))
+        }
         XWebEngine.resetSession()
         saveNow()
         LicenseManager.scheduleCloudSync()
     }
 
     fun updateIGSession(session: InstagramAccountSession) {
-        data.value = data.value.copy(igSession = session)
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            if (session.isConnected) {
+                nextRem.remove("session:ig")
+                localAddedTimestamps["session:ig"] = now
+            }
+            cur.copy(igSession = session, removedFollows = nextRem)
+        }
         saveNow()
         LicenseManager.scheduleCloudSync()
     }
 
     fun disconnectIG() {
-        data.value = data.value.copy(igSession = InstagramAccountSession())
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            nextRem["session:ig"] = now
+            localAddedTimestamps.remove("session:ig")
+            cur.copy(igSession = InstagramAccountSession(), removedFollows = trimTombstones(nextRem))
+        }
         InstagramWebEngine.resetSession()
         saveNow()
         LicenseManager.scheduleCloudSync()
     }
 
     fun updateRedditSession(session: RedditAccountSession) {
-        data.value = data.value.copy(redditSession = session)
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            if (session.isConnected) {
+                nextRem.remove("session:reddit")
+                localAddedTimestamps["session:reddit"] = now
+            }
+            cur.copy(redditSession = session, removedFollows = nextRem)
+        }
         saveNow()
         LicenseManager.scheduleCloudSync()
     }
 
     fun disconnectReddit() {
-        data.value = data.value.copy(redditSession = RedditAccountSession())
+        val now = System.currentTimeMillis() / 1000.0
+        data.update { cur ->
+            val nextRem = cur.removedFollows.toMutableMap()
+            nextRem["session:reddit"] = now
+            localAddedTimestamps.remove("session:reddit")
+            cur.copy(redditSession = RedditAccountSession(), removedFollows = trimTombstones(nextRem))
+        }
         RedditPersonalAPI.clearCookies()
         saveNow()
         LicenseManager.scheduleCloudSync()

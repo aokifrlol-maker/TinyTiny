@@ -605,16 +605,27 @@ fun ReceiveDropSheet(onDismiss: () -> Unit, onOpenPost: ((Gif) -> Unit)? = null)
                 err = null
                 uploadedLink = null
                 try {
-                    val tmp = File(ctx.cacheDir, "pick_${UUID.randomUUID().toString().take(8)}.mp4")
-                    ctx.contentResolver.openInputStream(uri)?.use { inp -> tmp.outputStream().use { inp.copyTo(it) } }
-                    val res = ShareService.createEncryptedFileShareLink(tmp, "Encrypted File Drop")
-                    tmp.delete()
-                    if (res != null) {
-                        uploadedLink = res.first
-                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("TinyTiny Drop", res.first))
-                    } else {
-                        err = "Upload failed (file must be under 90 MB)."
+                    val mime = ctx.contentResolver.getType(uri)
+                    val ext = android.webkit.MimeTypeMap.getSingleton()
+                        .getExtensionFromMimeType(mime)
+                        ?.takeIf { it.isNotBlank() } ?: "bin"
+                    val tmp = File(ctx.cacheDir, "pick_${UUID.randomUUID().toString().take(8)}.$ext")
+                    try {
+                        withContext(Dispatchers.IO) {
+                            ctx.contentResolver.openInputStream(uri)?.use { inp ->
+                                tmp.outputStream().use { inp.copyTo(it) }
+                            }
+                        }
+                        val res = ShareService.createEncryptedFileShareLink(tmp, "Encrypted File Drop")
+                        if (res != null) {
+                            uploadedLink = res.first
+                            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("TinyTiny Drop", res.first))
+                        } else {
+                            err = "Upload failed (file must be under 90 MB)."
+                        }
+                    } finally {
+                        tmp.delete()
                     }
                 } catch (e: Throwable) {
                     err = e.localizedMessage ?: "Could not read file."

@@ -1208,14 +1208,19 @@ final class InstagramWebEngine: NSObject, ObservableObject, WKScriptMessageHandl
         activeRouteKey = ""
         routeBuffers.removeAll()
         seenIds.removeAll()
+        seenIdsByRoute.removeAll()
         nextMaxIdByRoute.removeAll()
         dryPayloadCountByRoute.removeAll()
+        cachedDirectThreads.removeAll()
         let store = WKWebsiteDataStore.default()
         let cookies = await store.httpCookieStore.allCookies()
-        for c in cookies where c.domain.contains("instagram.com") {
+        for c in cookies where c.domain.contains("instagram.com") || c.domain.contains("facebook.com") {
             await store.httpCookieStore.deleteCookie(c)
         }
         webView?.load(URLRequest(url: URL(string: "about:blank")!))
+        directWebView?.load(URLRequest(url: URL(string: "about:blank")!))
+        directWebView?.removeFromSuperview()
+        directWebView = nil
     }
 }
 

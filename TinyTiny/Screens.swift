@@ -1532,7 +1532,9 @@ struct GoonedLikesView: View {
     private func deleteSelected() {
         let targets = selectedPosts
         guard !targets.isEmpty else { return }
-        OfflineManager.shared.deleteSavedPhotos(forIds: targets.map(\.id))
+        if mode == "offline" {
+            OfflineManager.shared.deleteSavedPhotos(forIds: targets.map(\.id))
+        }
         for post in targets {
             if mode == "offline" {
                 offline.removeDownload(post, deleteFromPhotos: false)
@@ -1551,24 +1553,48 @@ struct GoonedLikesView: View {
         if let local = offline.localMediaURL(for: post) {
             return local
         }
-        var remote: URL? = post.isImage ? (post.thumbURL ?? post.allVideoURLs(hd: true).first) : post.allVideoURLs(hd: true).first
+        var remote: URL?
+        if post.isImage {
+            remote = post.imageURL ?? post.posterURL ?? post.thumbURL
+        } else {
+            let candidates = post.allVideoURLs(hd: true)
+            remote = candidates.first(where: { !$0.absoluteString.lowercased().contains(".m3u8") }) ?? candidates.first
+        }
         if remote == nil && post.isLongVideoPost {
             let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
-            remote = resolved.first ?? MediaMetaRegistry.albumItems(for: post.id).first?.url
+            remote = resolved.first(where: { !$0.absoluteString.lowercased().contains(".m3u8") })
+                ?? resolved.first
+                ?? MediaMetaRegistry.albumItems(for: post.id).first?.url
         }
-        guard let url = remote else { return nil }
+        guard let url = remote, !url.absoluteString.lowercased().contains(".m3u8") else { return nil }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 35
+        req.timeoutInterval = 45
         for (k, v) in MediaHeaders.headers(for: url) {
             req.setValue(v, forHTTPHeaderField: k)
         }
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400,
-              !data.isEmpty else { return nil }
+        if let host = url.host?.lowercased() {
+            let allCookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+            let matching = allCookies.filter { c in
+                let d = c.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                return host == d || host.hasSuffix("." + d)
+            }
+            if !matching.isEmpty {
+                let cookieHeader = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
+        }
+        guard let (downloadedTemp, resp) = try? await URLSession.shared.download(for: req),
+              (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400 else { return nil }
         let ext = url.pathExtension.isEmpty ? (post.isImage ? "jpg" : "mp4") : url.pathExtension
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tt_export_\(OfflineManager.safeFileStem(for: post.id)).\(ext)")
-        try? data.write(to: tmp, options: [.atomic])
-        return tmp
+        try? FileManager.default.removeItem(at: tmp)
+        do {
+            try FileManager.default.moveItem(at: downloadedTemp, to: tmp)
+            return tmp
+        } catch {
+            try? FileManager.default.removeItem(at: downloadedTemp)
+            return nil
+        }
     }
 
     private func cleanupTempExportFiles() {

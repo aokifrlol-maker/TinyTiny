@@ -2,7 +2,16 @@ name: Build IPA
 
 on:
   push:
+    branches: [ main ]
+    paths:
+      - 'TinyTiny/**'
+      - 'project.yml'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -16,6 +25,8 @@ jobs:
         run: xcodebuild -version
 
       - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
         run: brew install xcodegen
 
       - name: Generate Xcode project

@@ -458,9 +458,6 @@ final class PlayerModel: ObservableObject {
                     self.promoteReadyIfRenderable()
                 }
                 let ratio = min(max(cur / d, 0), 1)
-                if ratio >= 0.97 && self.progressState.progress < 0.97 {
-                    self.onClipEnded?()
-                }
                 if abs(self.progressState.progress - ratio) >= 0.004 || abs(self.progressState.currentSeconds - cur) >= 0.24 {
                     self.progressState.currentSeconds = cur
                     self.progressState.durationSeconds = d
@@ -548,7 +545,6 @@ final class PlayerModel: ObservableObject {
             hasValidVideoSize = false
             layerReadyForDisplay = false
             loadCandidate(at: currentURLIndex)
-            if wantsPlaying { player.play() }
         } else {
             allFailed = true
         }
@@ -775,17 +771,24 @@ final class PlayerModel: ObservableObject {
         scrubPreviewImage = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         teardownGeneration += 1
-        let gen = teardownGeneration
-        let p = player
-        DispatchQueue.main.async { [weak self] in
-            if let self, self.teardownGeneration != gen { return }
-            p.replaceCurrentItem(with: nil)
-        }
+        player.replaceCurrentItem(with: nil)
         prepared = false
         progressState.progress = 0
         progressState.currentSeconds = 0
         progressState.durationSeconds = 0
         durationSeconds = 0
+    }
+
+    deinit {
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        statusObservation?.invalidate()
+        sizeObservation?.invalidate()
+        loadItemTask?.cancel()
+        stallWatchdogTask?.cancel()
+        previewGenerator?.cancelAllCGImageGeneration()
+        if let o = timeObserver { player.removeTimeObserver(o) }
     }
 }
 
@@ -1296,6 +1299,7 @@ struct GoonedReelCell: View {
     @State private var speedLocked2x = false
     @State private var showMoreSheet = false
     @State private var isScrubbing = false
+    @State private var isBarScrubbing = false
     @State private var scrubStartSeconds: Double = 0
     @State private var scrubTargetSeconds: Double = 0
     @State private var scrubDuration: Double = 0
@@ -1562,7 +1566,7 @@ struct GoonedReelCell: View {
                             HStack(spacing: 8) {
                                 Button {
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    offline.toggleDownload(gif)
+                                    offline.toggleDownload(activeDownloadGif)
                                 } label: {
                                     Image(systemName: downloaded ? "checkmark.circle.fill" : "arrow.down.to.line")
                                         .font(.system(size: 13, weight: .bold))
@@ -1757,6 +1761,9 @@ struct GoonedReelCell: View {
     private func scheduleActivePrepare() {
         activateTask?.cancel()
         activateTask = Task { @MainActor in
+            defer {
+                if !Task.isCancelled { activateTask = nil }
+            }
             // 55ms debounce: fast flicking through multiple videos never spins up decoders for skipped cells
             try? await Task.sleep(nanoseconds: 55_000_000)
             guard !Task.isCancelled, isActive else { return }
@@ -1766,6 +1773,7 @@ struct GoonedReelCell: View {
                 let urls = gif.allVideoURLs(hd: store.data.settings.hd)
                 if !urls.isEmpty {
                     player.prepare(urls: urls)
+                    syncPlayback()
                 }
                 if gif.isLongVideoPost {
                     let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: gif)
@@ -2497,8 +2505,8 @@ struct GoonedReelCell: View {
         PlayerScrubberBar(
             player: player,
             progressState: player.progressState,
-            isScrubbing: $isScrubbing,
-            isImage: gif.isImage,
+            isScrubbing: $isBarScrubbing,
+            isImage: isShowingImage,
             width: width
         )
     }
@@ -2534,7 +2542,7 @@ private struct PlayerScrubberBar: View {
                     .frame(width: max(0, width * progressState.progress))
             }
             .frame(height: isScrubbing ? 6 : 2.5)
-            .frame(height: 16)
+            .frame(height: 36)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)

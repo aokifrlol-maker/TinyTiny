@@ -613,9 +613,21 @@ object LicenseManager {
                             removedLikedIDs = mergedRemovedLikes,
                             removedDownloadedIDs = mergedRemovedDl,
                             removedFollows = mergedRemovedFollows,
-                            xSession = if (!local.xSession.isConnected && backup.userData.xSession.isConnected) backup.userData.xSession else local.xSession,
-                            igSession = if (!local.igSession.isConnected && backup.userData.igSession.isConnected) backup.userData.igSession else local.igSession,
-                            redditSession = if (!local.redditSession.isConnected && backup.userData.redditSession.isConnected) backup.userData.redditSession else local.redditSession,
+                            xSession = when {
+                                "session:x" in mergedRemovedFollows -> if (local.xSession.isConnected && keepLocalFollow("session:x")) local.xSession else XAccountSession()
+                                !local.xSession.isConnected && backup.userData.xSession.isConnected -> backup.userData.xSession
+                                else -> local.xSession
+                            },
+                            igSession = when {
+                                "session:ig" in mergedRemovedFollows -> if (local.igSession.isConnected && keepLocalFollow("session:ig")) local.igSession else InstagramAccountSession()
+                                !local.igSession.isConnected && backup.userData.igSession.isConnected -> backup.userData.igSession
+                                else -> local.igSession
+                            },
+                            redditSession = when {
+                                "session:reddit" in mergedRemovedFollows -> if (local.redditSession.isConnected && keepLocalFollow("session:reddit")) local.redditSession else RedditAccountSession()
+                                !local.redditSession.isConnected && backup.userData.redditSession.isConnected -> backup.userData.redditSession
+                                else -> local.redditSession
+                            },
                             r34Credentials = if (!local.r34Credentials.isConnected && backup.userData.r34Credentials.isConnected) backup.userData.r34Credentials else local.r34Credentials,
                             seenIDs = (UserStore.shared.exportSnapshotForBackup().seenIDs + backup.userData.seenIDs).distinct().takeLast(12_000)
                         )

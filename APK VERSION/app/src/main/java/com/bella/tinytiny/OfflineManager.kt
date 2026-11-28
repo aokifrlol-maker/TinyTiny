@@ -39,13 +39,19 @@ object OfflineManager {
         synchronized(this) {
             if (cacheIndexed) return
             vaultDir.listFiles()?.forEach { f ->
-                if (f.isFile && f.length() > 0) {
+                if (f.isFile) {
                     val name = f.name
-                    if (name.endsWith("_thumb.jpg")) {
-                        stemToThumbPath[name.removeSuffix("_thumb.jpg")] = "file://${f.absolutePath}"
-                    } else {
-                        val stem = name.substringBeforeLast('.')
-                        stemToMediaPath[stem] = "file://${f.absolutePath}"
+                    if (name.endsWith(".part")) {
+                        runCatching { f.delete() }
+                        return@forEach
+                    }
+                    if (f.length() > 0) {
+                        if (name.endsWith("_thumb.jpg")) {
+                            stemToThumbPath[name.removeSuffix("_thumb.jpg")] = "file://${f.absolutePath}"
+                        } else {
+                            val stem = name.substringBeforeLast('.')
+                            stemToMediaPath[stem] = "file://${f.absolutePath}"
+                        }
                     }
                 }
             }
@@ -53,8 +59,15 @@ object OfflineManager {
         }
     }
 
-    private fun safeFileStem(id: String): String =
-        id.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifEmpty { "media" }
+    private fun safeFileStem(id: String): String {
+        val cleaned = id.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "media" }
+        if (cleaned.length <= 48) return cleaned
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(id.toByteArray(Charsets.UTF_8))
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+        return "${cleaned.take(40)}_$digest"
+    }
 
     fun localMediaURL(id: String): String? {
         ensureIndex()
@@ -93,9 +106,12 @@ object OfflineManager {
         }
     }
 
-    suspend fun download(gif: Gif) {
-        if (gif.id in activeDownloads.value) return
-        activeDownloads.value = activeDownloads.value + gif.id
+    suspend fun download(gif: Gif) = withContext(Dispatchers.IO) {
+        if (gif.id in activeDownloads.value) return@withContext
+        synchronized(this@OfflineManager) {
+            if (gif.id in activeDownloads.value) return@withContext
+            activeDownloads.value = activeDownloads.value + gif.id
+        }
         setProgress(gif.id, 0.08)
         lastError.value = null
         try {
@@ -117,7 +133,7 @@ object OfflineManager {
             val uniqueCandidates = candidates.distinct().filter { !it.startsWith("file://") }
             if (uniqueCandidates.isEmpty()) {
                 lastError.value = "No downloadable media URL available."
-                return
+                return@withContext
             }
 
             var savedFile: File? = null
@@ -153,7 +169,9 @@ object OfflineManager {
                 lastError.value = "Download failed. Try again."
             }
         } finally {
-            activeDownloads.value = activeDownloads.value - gif.id
+            synchronized(this@OfflineManager) {
+                activeDownloads.value = activeDownloads.value - gif.id
+            }
             setProgress(gif.id, null)
         }
     }

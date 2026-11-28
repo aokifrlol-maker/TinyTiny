@@ -582,16 +582,21 @@ object InstagramWebEngine {
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val ig = UserStore.shared.data.value.igSession
         if (!ig.isConnected) return@withContext Result.failure(IllegalStateException("Not signed into Instagram"))
+        val uploadId = System.currentTimeMillis().toString()
+        val tmpVideoFile = java.io.File(TinyTinyApplication.instance.cacheDir, "tt_ig_dm_$uploadId.mp4")
         try {
             val dlReq = Request.Builder().url(videoUrl).apply {
                 for ((k, v) in MediaHeaders.headers(videoUrl)) header(k, v)
                 if (!referer.isNullOrEmpty()) header("Referer", referer)
             }.build()
-            val videoBytes = TinyTinyApplication.longTransferHttpClient.newCall(dlReq).execute().use { r ->
+            TinyTinyApplication.longTransferHttpClient.newCall(dlReq).execute().use { r ->
                 if (!r.isSuccessful) return@withContext Result.failure(IllegalStateException("Failed to fetch MP4 (${r.code})"))
-                r.body?.bytes() ?: return@withContext Result.failure(IllegalStateException("Empty video"))
+                val stream = r.body?.byteStream() ?: return@withContext Result.failure(IllegalStateException("Empty video"))
+                stream.use { inp -> tmpVideoFile.outputStream().use { out -> inp.copyTo(out) } }
             }
-            val uploadId = System.currentTimeMillis().toString()
+            if (!tmpVideoFile.exists() || tmpVideoFile.length() <= 0L) {
+                return@withContext Result.failure(IllegalStateException("Empty video"))
+            }
             val cookies = CookieManager.getInstance().getCookie("https://www.instagram.com")
                 ?.takeIf { it.contains("sessionid=") }
                 ?: "sessionid=${ig.sessionId}; csrftoken=${ig.csrfToken}; ds_user_id=${ig.userId}"
@@ -614,14 +619,15 @@ object InstagramWebEngine {
                 .header("Cookie", cookies)
                 .header("X-Instagram-Rupload-Params", ruploadParams)
                 .header("X-Entity-Name", "fb_uploader_$uploadId")
-                .header("X-Entity-Length", "${videoBytes.size}")
+                .header("X-Entity-Length", "${tmpVideoFile.length()}")
                 .header("Offset", "0")
-                .post(videoBytes.toRequestBody("application/octet-stream".toMediaType()))
+                .post(okhttp3.RequestBody.create("application/octet-stream".toMediaType(), tmpVideoFile))
                 .build()
 
             TinyTinyApplication.longTransferHttpClient.newCall(upReq).execute().use { upResp ->
                 if (!upResp.isSuccessful) return@withContext Result.failure(IllegalStateException("IG upload failed (${upResp.code})"))
             }
+            tmpVideoFile.delete()
 
             val ctxToken = UUID.randomUUID().toString()
             val encodedThreads = URLEncoder.encode("""["$threadId"]""", "UTF-8")

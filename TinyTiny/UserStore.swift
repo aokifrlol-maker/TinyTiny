@@ -134,7 +134,24 @@ final class UserStore: ObservableObject {
     private var _seenIDs: [String]
     private var _savedCursors: [String: String]
     var localAddedTimestamps: [String: Double] = [:]
-    @Published var data: UserData { didSet { scheduleSave() } }
+    @Published var data: UserData {
+        didSet {
+            let now = Date().timeIntervalSince1970
+            if !oldValue.xSession.isConnected && data.xSession.isConnected {
+                data.removedFollows.removeValue(forKey: "session:x")
+                localAddedTimestamps["session:x"] = now
+            }
+            if !oldValue.igSession.isConnected && data.igSession.isConnected {
+                data.removedFollows.removeValue(forKey: "session:ig")
+                localAddedTimestamps["session:ig"] = now
+            }
+            if !oldValue.redditSession.isConnected && data.redditSession.isConnected {
+                data.removedFollows.removeValue(forKey: "session:reddit")
+                localAddedTimestamps["session:reddit"] = now
+            }
+            scheduleSave()
+        }
+    }
     @Published var categories: [GoonedCategory] = GoonedCategory.defaultCategories
     private var saveTask: Task<Void, Never>?
     private var suppressSaveDueToDecryptError = false
@@ -652,17 +669,44 @@ final class UserStore: ObservableObject {
     }
 
     func disconnectX() {
-        data.xSession = XAccountSession()
-        Task { await XWebEngine.shared.resetSession() }
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.xSession = XAccountSession()
+        next.removedFollows["session:x"] = now
+        trimTombstones(&next.removedFollows)
+        localAddedTimestamps.removeValue(forKey: "session:x")
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
+        Task {
+            await XWebEngine.shared.resetSession()
+            await XWebEngine.home.resetSession()
+        }
     }
 
     func disconnectIG() {
-        data.igSession = InstagramAccountSession()
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.igSession = InstagramAccountSession()
+        next.removedFollows["session:ig"] = now
+        trimTombstones(&next.removedFollows)
+        localAddedTimestamps.removeValue(forKey: "session:ig")
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
         Task { await InstagramWebEngine.shared.resetSession() }
     }
 
     func disconnectReddit() {
-        data.redditSession = RedditAccountSession()
+        let now = Date().timeIntervalSince1970
+        var next = data
+        next.redditSession = RedditAccountSession()
+        next.removedFollows["session:reddit"] = now
+        trimTombstones(&next.removedFollows)
+        localAddedTimestamps.removeValue(forKey: "session:reddit")
+        data = next
+        saveNow()
+        LicenseManager.shared.scheduleCloudSync()
         Task { await RedditPersonalAPI.clearCookies() }
     }
 

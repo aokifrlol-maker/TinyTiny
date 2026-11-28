@@ -8,9 +8,15 @@ on:
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,3 +41,15 @@ jobs:
         with:
           name: TinyTiny-apk
           path: APK VERSION/app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish Latest APK Release Asset
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp "APK VERSION/app/build/outputs/apk/release/app-release.apk" TinyTiny.apk
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest TinyTiny.apk --clobber
+          else
+            gh release create latest TinyTiny.apk --title "TinyTiny Latest Builds" --notes "Automated latest Android APK build"
+          fi
