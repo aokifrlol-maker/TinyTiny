@@ -211,7 +211,7 @@ enum GoonedDockTab: Int, CaseIterable {
 
 enum HomeChannel: Hashable {
     case following, forYou
-    case xForYou, xFollowing, xBookmarks
+    case xForYou, xFollowing, xBookmarks, xImages
     case redditHome, redditPopular, redditSaved, redditUpvoted
     case rule34
     case igReels, igFollowing, igSaved
@@ -278,6 +278,7 @@ private final class FeedModelRegistry: ObservableObject {
     lazy var xForYouModel = FeedModel(source: .xForYou)
     lazy var xFollowingModel = FeedModel(source: .xFollowing)
     lazy var xBookmarksModel = FeedModel(source: .xBookmarks)
+    lazy var xImagesModel = FeedModel(source: .xImages)
     lazy var redditHomeModel = FeedModel(source: .redditHome)
     lazy var redditPopularModel = FeedModel(source: .redditPopular)
     lazy var redditSavedModel = FeedModel(source: .redditSaved)
@@ -311,6 +312,7 @@ struct GoonedMainShell: View {
     private var xForYouModel: FeedModel { feeds.xForYouModel }
     private var xFollowingModel: FeedModel { feeds.xFollowingModel }
     private var xBookmarksModel: FeedModel { feeds.xBookmarksModel }
+    private var xImagesModel: FeedModel { feeds.xImagesModel }
     private var redditHomeModel: FeedModel { feeds.redditHomeModel }
     private var redditPopularModel: FeedModel { feeds.redditPopularModel }
     private var redditSavedModel: FeedModel { feeds.redditSavedModel }
@@ -364,7 +366,7 @@ struct GoonedMainShell: View {
     private var tinted: Bool { store.data.settings.tintedGlass }
 
     private var isXChannel: Bool {
-        activeChannel == .xForYou || activeChannel == .xFollowing || activeChannel == .xBookmarks
+        activeChannel == .xForYou || activeChannel == .xFollowing || activeChannel == .xBookmarks || activeChannel == .xImages
     }
 
     private var isRedditChannel: Bool {
@@ -390,6 +392,7 @@ struct GoonedMainShell: View {
         case .xForYou: return xForYouModel
         case .xFollowing: return xFollowingModel
         case .xBookmarks: return xBookmarksModel
+        case .xImages: return xImagesModel
         case .redditHome: return redditHomeModel
         case .redditPopular: return redditPopularModel
         case .redditSaved: return redditSavedModel
@@ -579,7 +582,7 @@ struct GoonedMainShell: View {
                 let defaultScope: GoonedBrowseOverlay.SearchScope = {
                     switch activeChannel {
                     case .longErome: return .erome
-                    case .xForYou, .xFollowing, .xBookmarks: return .x
+                    case .xForYou, .xFollowing, .xBookmarks, .xImages: return .x
                     case .redditHome, .redditPopular, .redditSaved, .redditUpvoted: return .reddit
                     case .igReels, .igFollowing, .igSaved: return .ig
                     case .ofForYou, .ofTrending, .ofLatest, .ofDMs: return .of
@@ -940,6 +943,14 @@ struct GoonedMainShell: View {
                 slotPostIDs[.xBookmarks] = nil
                 Task { await xBookmarksModel.refresh(rotateCursor: true) }
             }
+        case .xImages:
+            customBackStack.removeAll()
+            activeChannel = .xImages
+            lastXChannel = .xImages
+            if forceReload {
+                slotPostIDs[.xImages] = nil
+                Task { await xImagesModel.refresh(rotateCursor: true) }
+            }
         case .redditHome:
             customBackStack.removeAll()
             activeChannel = .redditHome
@@ -1106,7 +1117,7 @@ struct GoonedMainShell: View {
         switch activeChannel {
         case .following: return 0
         case .forYou, .custom: return 1
-        case .xForYou, .xFollowing, .xBookmarks: return 2
+        case .xForYou, .xFollowing, .xBookmarks, .xImages: return 2
         case .redditHome, .redditPopular, .redditSaved, .redditUpvoted: return 3
         case .rule34: return 4
         case .igReels, .igFollowing, .igSaved: return 5
@@ -1188,7 +1199,8 @@ struct GoonedMainShell: View {
                 subChannelBar([
                     (.xForYou, "For You", .xForYou),
                     (.xFollowing, "Following", .xFollowing),
-                    (.xBookmarks, "Bookmarks", .xBookmarks)
+                    (.xBookmarks, "Saved", .xBookmarks),
+                    (.xImages, "Images", .xImages)
                 ]) { selectXFeedOrLogin($0) }
             } else if isRedditChannel {
                 subChannelBar([
@@ -1252,7 +1264,7 @@ struct GoonedMainShell: View {
                             if isXChannel && store.data.xSession.isConnected {
                                 selectFeed(activeModel.source, forceReload: true)
                             } else {
-                                let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : .xForYou)
+                                let target: FeedSource = lastXChannel == .xFollowing ? .xFollowing : (lastXChannel == .xBookmarks ? .xBookmarks : (lastXChannel == .xImages ? .xImages : .xForYou))
                                 selectXFeedOrLogin(target)
                             }
                         } label: {

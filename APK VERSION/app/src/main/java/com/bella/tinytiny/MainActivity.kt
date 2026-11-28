@@ -57,7 +57,7 @@ enum class GoonedDockTab { HOME, LIKES, BROWSE, PROFILE }
 
 enum class HomeChannel {
     FOLLOWING, FOR_YOU,
-    X_FOR_YOU, X_FOLLOWING, X_BOOKMARKS, X_LIKES,
+    X_FOR_YOU, X_FOLLOWING, X_BOOKMARKS, X_LIKES, X_IMAGES,
     REDDIT_HOME, REDDIT_POPULAR, REDDIT_SAVED, REDDIT_UPVOTED,
     RULE34,
     IG_REELS, IG_FOLLOWING, IG_SAVED,
@@ -288,6 +288,7 @@ fun GoonedMainShell() {
     val xFollowingModel = remember { FeedModel(FeedSource.XFollowing) }
     val xBookmarksModel = remember { FeedModel(FeedSource.XBookmarks) }
     val xLikesModel = remember { FeedModel(FeedSource.XLikes) }
+    val xImagesModel = remember { FeedModel(FeedSource.XImages) }
     val redditHomeModel = remember { FeedModel(FeedSource.RedditHome) }
     val redditPopularModel = remember { FeedModel(FeedSource.RedditPopular) }
     val redditSavedModel = remember { FeedModel(FeedSource.RedditSaved) }
@@ -357,6 +358,7 @@ fun GoonedMainShell() {
         HomeChannel.X_FOLLOWING -> xFollowingModel
         HomeChannel.X_BOOKMARKS -> xBookmarksModel
         HomeChannel.X_LIKES -> xLikesModel
+        HomeChannel.X_IMAGES -> xImagesModel
         HomeChannel.REDDIT_HOME -> redditHomeModel
         HomeChannel.REDDIT_POPULAR -> redditPopularModel
         HomeChannel.REDDIT_SAVED -> redditSavedModel
@@ -446,7 +448,7 @@ fun GoonedMainShell() {
         backStack.clear()
         activeChannel = target
         when (target) {
-            HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES -> lastXChannel = target
+            HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES, HomeChannel.X_IMAGES -> lastXChannel = target
             HomeChannel.IG_REELS, HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED -> lastIGChannel = target
             HomeChannel.OF_FOR_YOU, HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS -> lastOFChannel = target
             HomeChannel.LONG_ALL, HomeChannel.LONG_EPORNER, HomeChannel.LONG_XVIDEOS, HomeChannel.LONG_PORNHUB, HomeChannel.LONG_XHAMSTER, HomeChannel.LONG_SPANKBANG -> lastLongChannel = target
@@ -470,6 +472,7 @@ fun GoonedMainShell() {
             FeedSource.XFollowing -> switchToChannel(HomeChannel.X_FOLLOWING, xFollowingModel, forceReload)
             FeedSource.XBookmarks -> switchToChannel(HomeChannel.X_BOOKMARKS, xBookmarksModel, forceReload)
             FeedSource.XLikes -> switchToChannel(HomeChannel.X_LIKES, xLikesModel, forceReload)
+            FeedSource.XImages -> switchToChannel(HomeChannel.X_IMAGES, xImagesModel, forceReload)
             FeedSource.RedditHome -> { lastRedditChannel = HomeChannel.REDDIT_HOME; switchToChannel(HomeChannel.REDDIT_HOME, redditHomeModel, forceReload) }
             FeedSource.RedditPopular -> { lastRedditChannel = HomeChannel.REDDIT_POPULAR; switchToChannel(HomeChannel.REDDIT_POPULAR, redditPopularModel, forceReload) }
             FeedSource.RedditSaved -> { lastRedditChannel = HomeChannel.REDDIT_SAVED; switchToChannel(HomeChannel.REDDIT_SAVED, redditSavedModel, forceReload) }
@@ -580,7 +583,7 @@ fun GoonedMainShell() {
         }
     }
 
-    val isXGroup = activeChannel in setOf(HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES)
+    val isXGroup = activeChannel in setOf(HomeChannel.X_FOR_YOU, HomeChannel.X_FOLLOWING, HomeChannel.X_BOOKMARKS, HomeChannel.X_LIKES, HomeChannel.X_IMAGES)
     val isRedditGroup = activeChannel in setOf(HomeChannel.REDDIT_HOME, HomeChannel.REDDIT_POPULAR, HomeChannel.REDDIT_SAVED, HomeChannel.REDDIT_UPVOTED)
     val isIGGroup = activeChannel in setOf(HomeChannel.IG_REELS, HomeChannel.IG_FOLLOWING, HomeChannel.IG_SAVED)
     val isOFGroup = activeChannel in setOf(HomeChannel.OF_FOR_YOU, HomeChannel.OF_TRENDING, HomeChannel.OF_LATEST, HomeChannel.OF_DMS)
@@ -729,6 +732,7 @@ fun GoonedMainShell() {
                                     HomeChannel.X_FOLLOWING -> FeedSource.XFollowing
                                     HomeChannel.X_BOOKMARKS -> FeedSource.XBookmarks
                                     HomeChannel.X_LIKES -> FeedSource.XLikes
+                                    HomeChannel.X_IMAGES -> FeedSource.XImages
                                     else -> FeedSource.XForYou
                                 }
                                 selectXOrLogin(target)
@@ -799,7 +803,8 @@ fun GoonedMainShell() {
                     isXGroup -> listOf(
                         Triple("For You", activeChannel == HomeChannel.X_FOR_YOU, { selectXOrLogin(FeedSource.XForYou) }),
                         Triple("Following", activeChannel == HomeChannel.X_FOLLOWING, { selectXOrLogin(FeedSource.XFollowing) }),
-                        Triple("Bookmarks", activeChannel == HomeChannel.X_BOOKMARKS, { selectXOrLogin(FeedSource.XBookmarks) }),
+                        Triple("Saved", activeChannel == HomeChannel.X_BOOKMARKS, { selectXOrLogin(FeedSource.XBookmarks) }),
+                        Triple("Images", activeChannel == HomeChannel.X_IMAGES, { selectXOrLogin(FeedSource.XImages) }),
                         Triple("Likes", activeChannel == HomeChannel.X_LIKES, { selectXOrLogin(FeedSource.XLikes) })
                     )
                     isRedditGroup -> listOf(

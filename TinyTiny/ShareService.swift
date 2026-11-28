@@ -35,6 +35,13 @@ final class ShareService: ObservableObject {
         return URLSession(configuration: cfg)
     }()
 
+    private let watchitSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 120
+        cfg.timeoutIntervalForResource = 1200
+        return URLSession(configuration: cfg)
+    }()
+
     private init() {}
 
     /// Creates an AES-256-GCM encrypted drop (`https://.../s/<id>#k=<key>` + `TTDROP:` code).
@@ -126,12 +133,13 @@ final class ShareService: ObservableObject {
 
     /// Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) by uploading the MP4
     /// from the device in 8MB chunks to the Worker (bypasses IP-locked & geo-blocked adult CDNs 100%).
-    func createAdminWatchitLink(for post: Gif) async -> (watchUrl: String, downloadUrl: String)? {
+    func createAdminWatchitLink(for post: Gif, onProgress: ((String) -> Void)? = nil) async -> (watchUrl: String, downloadUrl: String)? {
         guard LicenseManager.shared.isAdmin else { return nil }
         let base = LicenseManager.shared.normalizedBaseURL
         let licKey = LicenseManager.shared.status.licenseKey
         let devId = LicenseManager.shared.deviceId
         let title = post.title ?? post.author ?? "TinyTiny Video"
+        let maxBytes: Int64 = 500 * 1024 * 1024
 
         // 1. Obtain a local MP4 file (reuse Offline Vault copy if downloaded, otherwise stream-download on device IP)
         var localFileURL: URL? = nil
@@ -142,33 +150,42 @@ final class ShareService: ObservableObject {
            FileManager.default.fileExists(atPath: offline.path) {
             localFileURL = offline
         } else {
+            onProgress?("Resolving video stream...")
             var candidates: [URL] = []
             if post.isLongVideoPost {
                 let resolved = await LongVideoAPI.shared.resolvePlayableURLs(for: post)
                 candidates.append(contentsOf: resolved)
             }
+            candidates.append(contentsOf: post.allVideoURLs(hd: false))
             candidates.append(contentsOf: post.allVideoURLs(hd: true))
-            let remoteCandidates = candidates.filter { ($0.scheme?.lowercased() ?? "") == "https" }
-            let mp4Candidates = remoteCandidates.filter { !$0.absoluteString.lowercased().contains(".m3u8") }
+            var seenURLs = Set<String>()
+            let remoteCandidates = candidates.filter { ($0.scheme?.lowercased() ?? "") == "https" && seenURLs.insert($0.absoluteString).inserted }
+            // Prefer smaller/faster MP4s (480p/720p) over massive 1080p so device download + upload finishes quickly
+            let rawMp4s = remoteCandidates.filter { !$0.absoluteString.lowercased().contains(".m3u8") }
+            let mp4Candidates = rawMp4s.count > 1 ? rawMp4s.reversed() : rawMp4s
             fallbackPickedURL = mp4Candidates.first ?? remoteCandidates.first
 
-            for cand in mp4Candidates.prefix(3) {
-                var dlReq = URLRequest(url: cand)
-                dlReq.timeoutInterval = 180
-                for (k, v) in MediaHeaders.headers(for: cand) {
-                    dlReq.setValue(v, forHTTPHeaderField: k)
-                }
-                if let (tmpURL, resp) = try? await session.download(for: dlReq),
-                   let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                   let attrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path),
-                   let fSize = (attrs[.size] as? NSNumber)?.int64Value,
-                   fSize > 4096, fSize <= 250 * 1024 * 1024 {
-                    let dest = FileManager.default.temporaryDirectory.appendingPathComponent("tt_watchit_\(UUID().uuidString).mp4")
-                    try? FileManager.default.removeItem(at: dest)
-                    if (try? FileManager.default.moveItem(at: tmpURL, to: dest)) != nil {
-                        localFileURL = dest
-                        shouldDeleteTemp = true
-                        break
+            onProgress?("Downloading video on device...")
+            outer: for cand in mp4Candidates.prefix(3) {
+                for useRef in [true, false] {
+                    var dlReq = URLRequest(url: cand)
+                    dlReq.timeoutInterval = 1200
+                    for (k, v) in MediaHeaders.headers(for: cand) {
+                        if !useRef && k.lowercased() == "referer" { continue }
+                        dlReq.setValue(v, forHTTPHeaderField: k)
+                    }
+                    if let (tmpURL, resp) = try? await watchitSession.download(for: dlReq),
+                       let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                       let attrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path),
+                       let fSize = (attrs[.size] as? NSNumber)?.int64Value,
+                       fSize > 4096, fSize <= maxBytes {
+                        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("tt_watchit_\(UUID().uuidString).mp4")
+                        try? FileManager.default.removeItem(at: dest)
+                        if (try? FileManager.default.moveItem(at: tmpURL, to: dest)) != nil {
+                            localFileURL = dest
+                            shouldDeleteTemp = true
+                            break outer
+                        }
                     }
                 }
             }
@@ -184,7 +201,7 @@ final class ShareService: ObservableObject {
         if let fileURL = localFileURL,
            let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
            let totalSize = (attrs[.size] as? NSNumber)?.int64Value,
-           totalSize > 0, totalSize <= 250 * 1024 * 1024,
+           totalSize > 0, totalSize <= maxBytes,
            let initURL = URL(string: "\(base)/v1/admin/watchit/init") {
             var initReq = URLRequest(url: initURL)
             initReq.httpMethod = "POST"
@@ -194,11 +211,12 @@ final class ShareService: ObservableObject {
                 "deviceId": devId,
                 "title": title
             ])
-            if let (initData, initResp) = try? await session.data(for: initReq),
+            if let (initData, initResp) = try? await watchitSession.data(for: initReq),
                (initResp as? HTTPURLResponse)?.statusCode == 200,
                let initJson = try? JSONSerialization.jsonObject(with: initData) as? [String: Any],
                let wid = initJson["id"] as? String, !wid.isEmpty {
                 let chunkSize = (initJson["chunkSize"] as? Int) ?? (8 * 1024 * 1024)
+                let estTotalChunks = max(1, Int((totalSize + Int64(chunkSize) - 1) / Int64(chunkSize)))
                 if let handle = try? FileHandle(forReadingFrom: fileURL) {
                     defer { try? handle.close() }
                     var chunkIdx = 0
@@ -206,17 +224,18 @@ final class ShareService: ObservableObject {
                     while true {
                         let slice = handle.readData(ofLength: chunkSize)
                         if slice.isEmpty { break }
+                        onProgress?("Uploading part \(chunkIdx + 1)/\(estTotalChunks)...")
                         guard let chunkURL = URL(string: "\(base)/v1/admin/watchit/chunk/\(wid)/\(chunkIdx)") else {
                             allOk = false; break
                         }
                         var cReq = URLRequest(url: chunkURL)
                         cReq.httpMethod = "PUT"
-                        cReq.timeoutInterval = 120
+                        cReq.timeoutInterval = 180
                         cReq.setValue(licKey, forHTTPHeaderField: "X-License-Key")
                         cReq.setValue(devId, forHTTPHeaderField: "X-Device-Id")
                         cReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
                         cReq.httpBody = slice
-                        if let (_, cResp) = try? await session.data(for: cReq),
+                        if let (_, cResp) = try? await watchitSession.data(for: cReq),
                            (cResp as? HTTPURLResponse)?.statusCode == 200 {
                             chunkIdx += 1
                         } else {
@@ -225,6 +244,7 @@ final class ShareService: ObservableObject {
                     }
                     if allOk && chunkIdx > 0,
                        let compURL = URL(string: "\(base)/v1/admin/watchit/complete/\(wid)") {
+                        onProgress?("Finalizing link...")
                         var compReq = URLRequest(url: compURL)
                         compReq.httpMethod = "POST"
                         compReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -236,7 +256,7 @@ final class ShareService: ObservableObject {
                             "chunkSize": chunkSize,
                             "chunkCount": chunkIdx
                         ])
-                        if let (cData, cResp) = try? await session.data(for: compReq),
+                        if let (cData, cResp) = try? await watchitSession.data(for: compReq),
                            (cResp as? HTTPURLResponse)?.statusCode == 200,
                            let cJson = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
                            let watchUrl = cJson["watchUrl"] as? String,
@@ -248,9 +268,14 @@ final class ShareService: ObservableObject {
             }
         }
 
-        // 3. Fallback (for HLS-only posts or >250MB videos): register remote URL with pageUrl metadata
-        guard let picked = fallbackPickedURL,
-              let apiURL = URL(string: "\(base)/v1/admin/watchit") else { return nil }
+        // 3. Fallback ONLY for non-IP-locked direct URLs (never return a broken IP-locked phncdn/eporner link!)
+        guard let picked = fallbackPickedURL else { return nil }
+        let lowerPicked = picked.absoluteString.lowercased()
+        let isIpLockedCdn = lowerPicked.contains("ip=") || lowerPicked.contains("phncdn.com") ||
+            lowerPicked.contains("eporner.com") || lowerPicked.contains("xhcdn.com") ||
+            lowerPicked.contains("sb-cd.com") || lowerPicked.contains("xvideos-cdn.com")
+        if isIpLockedCdn { return nil }
+        guard let apiURL = URL(string: "\(base)/v1/admin/watchit") else { return nil }
         var req = URLRequest(url: apiURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -473,6 +498,7 @@ struct ShareItemSheet: View {
     @State private var isCreatingWatchit = false
     @State private var watchitCopied = false
     @State private var watchitError: String? = nil
+    @State private var watchitStatus: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -636,21 +662,31 @@ struct ShareItemSheet: View {
                                     isCreatingWatchit = true
                                     watchitError = nil
                                     watchitCopied = false
-                                    if let res = await ShareService.shared.createAdminWatchitLink(for: gif) {
+                                    watchitStatus = "Preparing video..."
+                                    if let res = await ShareService.shared.createAdminWatchitLink(for: gif, onProgress: { msg in
+                                        watchitStatus = msg
+                                    }) {
                                         watchitWatchURL = res.watchUrl
                                         watchitDownloadURL = res.downloadUrl
                                         UIPasteboard.general.string = res.watchUrl
                                         watchitCopied = true
                                         UINotificationFeedbackGenerator().notificationOccurred(.success)
                                     } else {
-                                        watchitError = "Could not resolve a direct video URL for this post."
+                                        watchitError = "Could not download/upload this video (check connection or size <= 500MB)."
                                     }
+                                    watchitStatus = nil
                                     isCreatingWatchit = false
                                 }
                             } label: {
                                 Group {
-                                    if isCreatingWatchit { ProgressView().tint(.white) }
-                                    else { Text(watchitWatchURL == nil ? "Create Watch & Download URL" : "Regenerate Watchit URL") }
+                                    if isCreatingWatchit {
+                                        HStack(spacing: 8) {
+                                            ProgressView().tint(.white)
+                                            Text(watchitStatus ?? "Uploading...")
+                                        }
+                                    } else {
+                                        Text(watchitWatchURL == nil ? "Create Watch & Download URL" : "Regenerate Watchit URL")
+                                    }
                                 }
                                 .font(.system(size: 13.5, weight: .bold))
                                 .frame(maxWidth: .infinity)

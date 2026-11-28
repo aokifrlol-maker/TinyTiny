@@ -342,14 +342,24 @@ object ShareService {
         }
     }
 
+    private val watchitClient: okhttp3.OkHttpClient by lazy {
+        TinyTinyApplication.longTransferHttpClient.newBuilder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15, java.util.concurrent.TimeUnit.MINUTES)
+            .writeTimeout(15, java.util.concurrent.TimeUnit.MINUTES)
+            .callTimeout(20, java.util.concurrent.TimeUnit.MINUTES)
+            .build()
+    }
+
     /** Admin-only: creates a public Watchit Watch & Direct Download URL (`/w/<id>`) by uploading the MP4
      *  in 8 MiB chunks from the device so `/w/<id>` streams & downloads from ANY IP without geo/IP-lock failures. */
-    suspend fun createAdminWatchitLink(gif: Gif): Pair<String, String>? = withContext(Dispatchers.IO) {
+    suspend fun createAdminWatchitLink(gif: Gif, onProgress: ((String) -> Unit)? = null): Pair<String, String>? = withContext(Dispatchers.IO) {
         if (!LicenseManager.isAdmin) return@withContext null
         val base = LicenseManager.normalizedBaseURL
         val licKey = LicenseManager.status.value.licenseKey
         val devId = LicenseManager.deviceId
         val title = gif.title ?: gif.author ?: "TinyTiny Video"
+        val maxBytes = 500L * 1024L * 1024L
 
         var localFile: File? = null
         var deleteTemp = false
@@ -359,45 +369,51 @@ object ShareService {
         if (!existingPath.isNullOrEmpty() && File(existingPath).exists()) {
             localFile = File(existingPath)
         } else {
+            withContext(Dispatchers.Main) { onProgress?.invoke("Resolving video stream...") }
             val candidates = mutableListOf<String>()
             if (gif.isLongVideoPost) {
                 runCatching { LongVideoAPI.resolvePlayableURLs(gif) }.getOrNull()?.let { candidates.addAll(it) }
             }
+            candidates.addAll(gif.allVideoURLs(hd = false))
             candidates.addAll(gif.allVideoURLs(hd = true))
             val httpsCandidates = candidates.distinct().filter { it.startsWith("https://", ignoreCase = true) }
-            val mp4Candidates = httpsCandidates.filter { !it.lowercase().contains(".m3u8") }
+            val rawMp4s = httpsCandidates.filter { !it.lowercase().contains(".m3u8") }
+            val mp4Candidates = if (rawMp4s.size > 1) rawMp4s.reversed() else rawMp4s
             fallbackPicked = mp4Candidates.firstOrNull() ?: httpsCandidates.firstOrNull()
 
-            for (cand in mp4Candidates.take(3)) {
-                val tmp = File(TinyTinyApplication.instance.cacheDir, "tt_watchit_${UUID.randomUUID()}.mp4")
-                try {
-                    val rb = Request.Builder().url(cand)
-                    for ((k, v) in MediaHeaders.headers(cand)) rb.header(k, v)
-                    client.newCall(rb.build()).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val stream = resp.body?.byteStream()
-                            if (stream != null) {
-                                tmp.outputStream().use { out -> stream.copyTo(out) }
-                                val sz = tmp.length()
-                                if (sz in 4097..(250L * 1024L * 1024L)) {
-                                    localFile = tmp
-                                    deleteTemp = true
-                                } else {
-                                    tmp.delete()
+            withContext(Dispatchers.Main) { onProgress?.invoke("Downloading video on device...") }
+            outer@ for (cand in mp4Candidates.take(3)) {
+                for (useRef in listOf(true, false)) {
+                    val tmp = File(TinyTinyApplication.instance.cacheDir, "tt_watchit_${UUID.randomUUID()}.mp4")
+                    try {
+                        val rb = Request.Builder().url(cand)
+                        for ((k, v) in MediaHeaders.headers(cand, includeReferer = useRef)) rb.header(k, v)
+                        watchitClient.newCall(rb.build()).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val stream = resp.body?.byteStream()
+                                if (stream != null) {
+                                    tmp.outputStream().use { out -> stream.copyTo(out) }
+                                    val sz = tmp.length()
+                                    if (sz in 4097..maxBytes) {
+                                        localFile = tmp
+                                        deleteTemp = true
+                                    } else {
+                                        tmp.delete()
+                                    }
                                 }
                             }
                         }
+                    } catch (_: Throwable) {
+                        tmp.delete()
                     }
-                } catch (_: Throwable) {
-                    tmp.delete()
+                    if (localFile != null) break@outer
                 }
-                if (localFile != null) break
             }
         }
 
         try {
             val f = localFile
-            if (f != null && f.exists() && f.length() in 1..(250L * 1024L * 1024L)) {
+            if (f != null && f.exists() && f.length() in 1..maxBytes) {
                 val initBody = JSONObject().apply {
                     put("key", licKey)
                     put("deviceId", devId)
@@ -409,7 +425,7 @@ object ShareService {
                     .build()
                 var wid = ""
                 var chunkSize = 8 * 1024 * 1024
-                client.newCall(initReq).execute().use { r ->
+                watchitClient.newCall(initReq).execute().use { r ->
                     if (r.code == 200) {
                         val j = JSONObject(r.body?.string() ?: "{}")
                         wid = j.optString("id")
@@ -417,6 +433,7 @@ object ShareService {
                     }
                 }
                 if (wid.isNotEmpty()) {
+                    val estTotalChunks = maxOf(1, ((f.length() + chunkSize - 1) / chunkSize).toInt())
                     val buf = ByteArray(chunkSize)
                     var chunkIdx = 0
                     var allOk = true
@@ -429,6 +446,8 @@ object ShareService {
                                 readTotal += n
                             }
                             if (readTotal <= 0) break
+                            val partNum = chunkIdx + 1
+                            withContext(Dispatchers.Main) { onProgress?.invoke("Uploading part $partNum/$estTotalChunks...") }
                             val slice = if (readTotal == chunkSize) buf else buf.copyOf(readTotal)
                             val cReq = Request.Builder()
                                 .url("$base/v1/admin/watchit/chunk/$wid/$chunkIdx")
@@ -436,12 +455,13 @@ object ShareService {
                                 .header("X-Device-Id", devId)
                                 .put(slice.toRequestBody("application/octet-stream".toMediaType()))
                                 .build()
-                            val ok = client.newCall(cReq).execute().use { it.code == 200 }
+                            val ok = watchitClient.newCall(cReq).execute().use { it.code == 200 }
                             if (!ok) { allOk = false; break }
                             chunkIdx++
                         }
                     }
                     if (allOk && chunkIdx > 0) {
+                        withContext(Dispatchers.Main) { onProgress?.invoke("Finalizing link...") }
                         val compBody = JSONObject().apply {
                             put("key", licKey)
                             put("deviceId", devId)
@@ -454,7 +474,7 @@ object ShareService {
                             .url("$base/v1/admin/watchit/complete/$wid")
                             .post(compBody.toRequestBody("application/json".toMediaType()))
                             .build()
-                        client.newCall(compReq).execute().use { resp ->
+                        watchitClient.newCall(compReq).execute().use { resp ->
                             if (resp.code == 200) {
                                 val j = JSONObject(resp.body?.string() ?: "{}")
                                 val w = j.optString("watchUrl")
@@ -470,8 +490,13 @@ object ShareService {
             if (deleteTemp) localFile?.delete()
         }
 
-        // Fallback (HLS-only or >250MB)
+        // Fallback ONLY for non-IP-locked direct URLs (never return a broken IP-locked phncdn/eporner link!)
         val picked = fallbackPicked ?: return@withContext null
+        val lowerPicked = picked.lowercase()
+        val isIpLocked = lowerPicked.contains("ip=") || lowerPicked.contains("phncdn.com") ||
+            lowerPicked.contains("eporner.com") || lowerPicked.contains("xhcdn.com") ||
+            lowerPicked.contains("sb-cd.com") || lowerPicked.contains("xvideos-cdn.com")
+        if (isIpLocked) return@withContext null
         try {
             val referer = MediaHeaders.headers(picked)["Referer"] ?: gif.sourceUrl ?: ""
             val bodyJson = JSONObject().apply {
@@ -532,6 +557,7 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
     var isCreatingWatchit by remember { mutableStateOf(false) }
     var watchitCopied by remember { mutableStateOf(false) }
     var watchitError by remember { mutableStateOf<String?>(null) }
+    var watchitStatus by remember { mutableStateOf<String?>(null) }
 
     fun generate() {
         scope.launch {
@@ -665,7 +691,11 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                                 isCreatingWatchit = true
                                 watchitError = null
                                 watchitCopied = false
-                                val res = ShareService.createAdminWatchitLink(gif)
+                                watchitStatus = "Preparing video..."
+                                val res = ShareService.createAdminWatchitLink(gif) { msg ->
+                                    watchitStatus = msg
+                                }
+                                watchitStatus = null
                                 isCreatingWatchit = false
                                 if (res != null) {
                                     watchitWatchUrl = res.first
@@ -674,7 +704,7 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                                     cm.setPrimaryClip(ClipData.newPlainText("Watchit URL", res.first))
                                     watchitCopied = true
                                 } else {
-                                    watchitError = "Could not resolve a direct video URL for this post."
+                                    watchitError = "Could not download/upload this video (check connection or size <= 500MB)."
                                 }
                             }
                         },
@@ -684,6 +714,8 @@ fun ShareItemSheet(gif: Gif, onDismiss: () -> Unit) {
                     ) {
                         if (isCreatingWatchit) {
                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(watchitStatus ?: "Uploading...", fontWeight = FontWeight.Bold)
                         } else {
                             Text(if (watchitWatchUrl == null) "Create Watch & Download URL" else "Regenerate Watchit URL", fontWeight = FontWeight.Bold)
                         }

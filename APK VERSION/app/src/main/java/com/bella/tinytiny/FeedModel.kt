@@ -34,6 +34,7 @@ sealed class FeedSource {
     data object XFollowing : FeedSource()
     data object XBookmarks : FeedSource()
     data object XLikes : FeedSource()
+    data object XImages : FeedSource()
     data class XSearch(val query: String) : FeedSource()
     data class XUser(val handle: String) : FeedSource()
     data object IGReels : FeedSource()
@@ -57,7 +58,7 @@ sealed class FeedSource {
     data class CustomList(val title: String) : FeedSource()
 
     val isList: Boolean get() = this is CustomList
-    val isXFeed: Boolean get() = this is XForYou || this is XFollowing || this is XBookmarks || this is XLikes || this is XSearch || this is XUser
+    val isXFeed: Boolean get() = this is XForYou || this is XFollowing || this is XBookmarks || this is XLikes || this is XImages || this is XSearch || this is XUser
     val isIGFeed: Boolean get() = this is IGReels || this is IGFollowing || this is IGSaved || this is IGUser
     val isRedditPersonalFeed: Boolean get() = this is RedditHome || this is RedditPopular || this is RedditSaved || this is RedditUpvoted
     val isRule34Feed: Boolean get() = this is Rule34
@@ -86,6 +87,7 @@ sealed class FeedSource {
             is XFollowing -> "𝕏 Following"
             is XBookmarks -> "𝕏 Bookmarks"
             is XLikes -> "𝕏 Likes"
+            is XImages -> "𝕏 Images"
             is XSearch -> "𝕏: $query"
             is XUser -> "@${handle.replace("@", "")}"
             is IGReels -> "IG Reels"
@@ -138,6 +140,7 @@ sealed class FeedSource {
             is XFollowing -> "xfollowing" to "xfollowing"
             is XBookmarks -> "xbookmarks" to "xbookmarks"
             is XLikes -> "xlikes" to "xlikes"
+            is XImages -> "ximages" to "ximages"
             is XSearch -> "xsearch" to query
             is XUser -> "xuser" to handle
             is IGReels -> "igreels" to "igreels"
@@ -593,6 +596,7 @@ class FeedModel(
         is FeedSource.XFollowing -> XAPI.following(cursor)
         is FeedSource.XBookmarks -> XAPI.bookmarks(cursor)
         is FeedSource.XLikes -> XAPI.likes(cursor)
+        is FeedSource.XImages -> XAPI.images(cursor)
         is FeedSource.XSearch -> XAPI.search(src.query, s.rawValue, cursor)
         is FeedSource.XUser -> XAPI.userTweets(src.handle, cursor)
         is FeedSource.IGReels -> InstagramAPI.reelsFeed(cursor)

@@ -203,7 +203,77 @@ object XTweetParser {
                     )
 
                     // NOTE: Never `return` early on failure — continue walking children!
-                    if (eligible) {
+                    if (eligible && routeKey == "x_images") {
+                        // Solely Images section: extract ONLY photo media (and multi-photo albums), skip all videos/GIFs
+                        val photos = mutableListOf<Triple<String, Int?, Int?>>()
+                        for (mIdx in 0 until mediaArr.length()) {
+                            val m = mediaArr.optJSONObject(mIdx) ?: continue
+                            val type = m.optString("type").lowercase()
+                            if (type != "photo") continue
+                            val rawPhoto = m.optString("media_url_https").takeIf { it.isNotEmpty() }
+                                ?: m.optString("media_url").takeIf { it.isNotEmpty() }
+                                ?: continue
+                            val orig = m.optJSONObject("original_info")
+                            val large = m.optJSONObject("sizes")?.optJSONObject("large")
+                            val w = m.optInt("original_img_width", 0).takeIf { it > 0 }
+                                ?: orig?.optInt("width", 0)?.takeIf { it > 0 }
+                                ?: large?.optInt("w", 0)?.takeIf { it > 0 }
+                            val h = m.optInt("original_img_height", 0).takeIf { it > 0 }
+                                ?: orig?.optInt("height", 0)?.takeIf { it > 0 }
+                                ?: large?.optInt("h", 0)?.takeIf { it > 0 }
+                            photos.add(Triple(rawPhoto, w, h))
+                        }
+                        if (photos.isNotEmpty()) {
+                            val firstM = mediaArr.optJSONObject(0)
+                            val rawTweetId = restId.ifEmpty {
+                                firstM?.optString("source_status_id_str")?.ifEmpty { firstM.optString("id_str") } ?: ""
+                            }
+                            if (rawTweetId.isNotEmpty()) {
+                                val gid = "x_img_$rawTweetId"
+                                if (seen.add(gid)) {
+                                    val (firstUrl, w, h) = photos.first()
+                                    val created = parseTwitterDate(legacy?.optString("created_at"))
+                                        ?: node.optLong("created_at_ms", 0L).takeIf { it > 0 }?.let { Instant.ofEpochMilli(it).toString() }
+                                    val hashTags = Regex("#([A-Za-z0-9_]+)").findAll(cleanText).map { it.groupValues[1].lowercase() }.toList()
+                                    val bioTags = PornTagCatalog.extractRecognizedTagsFromQuery("$cleanText $authorBio")
+                                    val albumItems = if (photos.size > 1) {
+                                        photos.mapIndexed { idx, (u, _, _) ->
+                                            AlbumMediaItem(id = "${gid}_$idx", url = u, posterUrl = u, isVideo = false)
+                                        }
+                                    } else emptyList()
+                                    MediaMetaRegistry.register(
+                                        postId = gid,
+                                        tags = (hashTags + bioTags).distinct(),
+                                        creatorName = authorClean,
+                                        albumItems = albumItems,
+                                        followedByViewer = relFollow
+                                    )
+                                    out.add(
+                                        Gif(
+                                            id = gid,
+                                            title = cleanText,
+                                            author = authorClean,
+                                            subreddit = null,
+                                            upvotes = legacy?.optInt("favorite_count", 0) ?: node.optInt("favorite_count", 0),
+                                            duration = null,
+                                            width = w,
+                                            height = h,
+                                            mediaType = "image",
+                                            mediaUrl = firstUrl,
+                                            muxedUrl = null,
+                                            muxedUrlHd = null,
+                                            hlsUrl = null,
+                                            posterUrl = firstUrl,
+                                            thumbnailUrl = firstUrl,
+                                            sourceUrl = "https://x.com/$authorClean/status/$rawTweetId",
+                                            permalink = "https://x.com/$authorClean/status/$rawTweetId",
+                                            createdUtc = created
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    } else if (eligible) {
                         for (mIdx in 0 until mediaArr.length()) {
                             val m = mediaArr.optJSONObject(mIdx) ?: continue
                             val type = m.optString("type")
@@ -917,6 +987,19 @@ object XAPI {
         val url = if (sn.isNotEmpty() && sn != "𝕏 Account") "https://x.com/$sn/likes" else "https://x.com/i/history/likes"
         val key = if (sn.isNotEmpty()) "x_likes_${sn.lowercase()}" else "x_likes"
         return XWebEngine.shared.fetchRoute(key, url, after)
+    }
+
+    suspend fun images(after: String? = null): GoonedFeedResponse {
+        val algo = UserStore.shared.data.value.algorithm
+        val tasteTags = (algo.boostedTags + SmartTasteEngine.shared.activeQueryTags(algo.boostedTags, algo.blockedTags, 4)).distinct()
+        val tag = (tasteTags.firstOrNull() ?: "nsfw").replace("_", " ")
+        val enc = URLEncoder.encode("$tag filter:images -filter:videos", "UTF-8")
+        return XWebEngine.shared.fetchRoute(
+            "x_images",
+            "https://x.com/search?q=$enc&src=typed_query&f=top",
+            after,
+            directOpName = "SearchTimeline"
+        )
     }
 
     suspend fun search(query: String, sort: String = "hot", after: String? = null): GoonedFeedResponse {

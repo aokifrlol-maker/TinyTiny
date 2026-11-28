@@ -453,7 +453,15 @@ fun GoonedReelCell(
                 .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
                 .build()
 
+            val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(ctx).apply {
+                parameters = buildUponParameters()
+                    .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, false)
+                    .setPreferredAudioLanguages("en", "und")
+                    .build()
+            }
+
             ExoPlayer.Builder(ctx)
+                .setTrackSelector(trackSelector)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
                 .setLoadControl(loadControl)
                 .setAudioAttributes(audioAttrs, !userData.settings.muted)
@@ -1397,10 +1405,12 @@ private object SharedExoClients {
                 for ((k, v) in MediaHeaders.headers(uStr, includeReferer = includeReferer)) {
                     rb.header(k, v)
                 }
-                try {
-                    val cookies = CookieManager.getInstance().getCookie(uStr)
-                    if (!cookies.isNullOrEmpty()) rb.header("Cookie", cookies)
-                } catch (_: Throwable) {}
+                if (!uStr.contains("v.redd.it", ignoreCase = true)) {
+                    try {
+                        val cookies = CookieManager.getInstance().getCookie(uStr)
+                        if (!cookies.isNullOrEmpty()) rb.header("Cookie", cookies)
+                    } catch (_: Throwable) {}
+                }
                 chain.proceed(rb.build())
             }
             .build()

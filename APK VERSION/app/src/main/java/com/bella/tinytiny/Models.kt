@@ -216,10 +216,18 @@ data class Gif(
                 urls.add(local)
             }
         }
-        val candidates: List<String?> = if ((isXPost || hlsUrl?.contains("v.redd.it") == true) && !hlsUrl.isNullOrEmpty()) {
-            if (hd) listOf(hlsUrl, muxedUrlHd, muxedUrl, mediaUrl) else listOf(hlsUrl, muxedUrl, muxedUrlHd, mediaUrl)
+        // Synthesize v.redd.it HLSPlaylist.m3u8 whenever a Reddit video only provided silent DASH_*.mp4
+        val allRaw = listOfNotNull(hlsUrl, muxedUrlHd, muxedUrl, mediaUrl)
+        val vreddId = allRaw.firstNotNullOfOrNull { u ->
+            Regex("https?://v\\.redd\\.it/([A-Za-z0-9]+)", RegexOption.IGNORE_CASE).find(u)?.groupValues?.getOrNull(1)
+        }
+        val effectiveHls = hlsUrl?.takeIf { it.isNotEmpty() }
+            ?: vreddId?.let { "https://v.redd.it/$it/HLSPlaylist.m3u8" }
+        val isRedditVideo = vreddId != null || id.startsWith("rd_")
+        val candidates: List<String?> = if ((isXPost || isRedditVideo) && !effectiveHls.isNullOrEmpty()) {
+            if (hd) listOf(effectiveHls, muxedUrlHd, muxedUrl, mediaUrl) else listOf(effectiveHls, muxedUrl, muxedUrlHd, mediaUrl)
         } else {
-            if (hd) listOf(muxedUrlHd, muxedUrl, mediaUrl, hlsUrl) else listOf(muxedUrl, muxedUrlHd, mediaUrl, hlsUrl)
+            if (hd) listOf(muxedUrlHd, muxedUrl, mediaUrl, effectiveHls) else listOf(muxedUrl, muxedUrlHd, mediaUrl, effectiveHls)
         }
         val extra = MediaMetaRegistry.extraVideoURLs(id)
         for (raw in (candidates + extra)) {

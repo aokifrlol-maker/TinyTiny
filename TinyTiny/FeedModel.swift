@@ -10,6 +10,7 @@ enum FeedSource: Hashable {
     case xFollowing
     case xBookmarks
     case xLikes
+    case xImages
     case xSearch(String)
     case xUser(String)
     case igReels
@@ -43,6 +44,7 @@ enum FeedSource: Hashable {
         case .xFollowing: return "𝕏 Following"
         case .xBookmarks: return "𝕏 Bookmarks"
         case .xLikes: return "𝕏 Likes"
+        case .xImages: return "𝕏 Images"
         case .xSearch(let q): return "𝕏: \(q)"
         case .xUser(let u): return "@\(u.replacingOccurrences(of: "@", with: ""))"
         case .igReels: return "IG Reels"
@@ -80,7 +82,7 @@ enum FeedSource: Hashable {
 
     var isXFeed: Bool {
         switch self {
-        case .xForYou, .xFollowing, .xBookmarks, .xLikes, .xSearch, .xUser:
+        case .xForYou, .xFollowing, .xBookmarks, .xLikes, .xImages, .xSearch, .xUser:
             return true
         default:
             return false
@@ -144,6 +146,7 @@ enum FeedSource: Hashable {
         case .xFollowing: return ("xfollowing", "xfollowing")
         case .xBookmarks: return ("xbookmarks", "xbookmarks")
         case .xLikes: return ("xlikes", "xlikes")
+        case .xImages: return ("ximages", "ximages")
         case .xSearch(let q): return ("xsearch", q)
         case .xUser(let u): return ("xuser", u)
         case .igReels: return ("igreels", "igreels")
@@ -835,6 +838,8 @@ final class FeedModel: ObservableObject {
             return await XAPI.bookmarks(after: cursor)
         case .xLikes:
             return await XAPI.likes(after: cursor)
+        case .xImages:
+            return await XAPI.images(after: cursor)
         case .xSearch(let query):
             return await XAPI.search(query, sort: sort.rawValue, after: cursor)
         case .xUser(let handle):

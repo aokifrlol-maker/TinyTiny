@@ -663,6 +663,7 @@ fun GoonedBrowseOverlay(
                                         "xfollowing" -> FeedSource.XFollowing
                                         "xbookmarks" -> FeedSource.XBookmarks
                                         "xlikes" -> FeedSource.XLikes
+                                        "ximages" -> FeedSource.XImages
                                         "xsearch" -> FeedSource.XSearch(recent.name)
                                         "xuser" -> FeedSource.XUser(recent.name)
                                         "igreels" -> FeedSource.IGReels

@@ -242,6 +242,7 @@ struct GoonedBrowseOverlay: View {
                     case "xforyou": onSelectFeed(.xForYou)
                     case "xfollowing": onSelectFeed(.xFollowing)
                     case "xbookmarks": onSelectFeed(.xBookmarks)
+                    case "ximages": onSelectFeed(.xImages)
                     case "xlikes": onSelectFeed(.xLikes)
                     case "xsearch": onSelectFeed(.xSearch(recent.name))
                     case "xuser": onSelectFeed(.xUser(recent.name))

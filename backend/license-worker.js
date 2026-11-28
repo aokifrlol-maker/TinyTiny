@@ -2795,7 +2795,7 @@ export default {
       const segs = path.slice("/v1/admin/watchit/chunk/".length).split("/").filter(Boolean);
       const id = (segs[0] || "").replace(/[^a-z0-9]/gi, "");
       const idx = parseInt(segs[1] || "-1", 10);
-      if (!id || !Number.isInteger(idx) || idx < 0 || idx > 40) {
+      if (!id || !Number.isInteger(idx) || idx < 0 || idx > 64) {
         return json({ ok: false, error: "Invalid chunk params" }, 400);
       }
       const buf = await request.arrayBuffer();
@@ -2820,7 +2820,7 @@ export default {
       const size = Number(body.size || 0);
       const chunkCount = Number(body.chunkCount || 0);
       const chunkSize = Number(body.chunkSize || pending.chunkSize || 8 * 1024 * 1024);
-      if (!id || size <= 0 || chunkCount <= 0 || chunkCount > 41) {
+      if (!id || size <= 0 || chunkCount <= 0 || chunkCount > 65) {
         return json({ ok: false, error: "Invalid complete payload" }, 400);
       }
       const rawTitle = String(body.title || pending.filename || "TinyTiny Video").trim().slice(0, 90);

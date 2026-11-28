@@ -198,6 +198,107 @@ enum XTweetParser {
         let details = dict["details"] as? [String: Any]
         let noteText = (((dict["note_tweet"] as? [String: Any])?["note_tweet_results"] as? [String: Any])?["result"] as? [String: Any])?["text"] as? String
 
+        // Solely Images route (`x_images`): extract ONLY photo attachments (and multi-photo albums), skip all videos/GIFs
+        if routeKey == "x_images" {
+            var photoItems: [(url: String, w: Int?, h: Int?)] = []
+            for media in mediaList {
+                let type = ((media["type"] as? String) ?? "").lowercased()
+                guard type == "photo" else { continue }
+                guard let photoStr = (media["media_url_https"] as? String) ?? (media["media_url"] as? String),
+                      !photoStr.isEmpty else { continue }
+                var w: Int? = (media["original_img_width"] as? Int)
+                var h: Int? = (media["original_img_height"] as? Int)
+                if let origInfo = media["original_info"] as? [String: Any] {
+                    if w == nil { w = origInfo["width"] as? Int }
+                    if h == nil { h = origInfo["height"] as? Int }
+                } else if let sizes = media["sizes"] as? [String: Any],
+                          let large = sizes["large"] as? [String: Any] {
+                    if w == nil { w = large["w"] as? Int }
+                    if h == nil { h = large["h"] as? Int }
+                }
+                photoItems.append((photoStr, w, h))
+            }
+            guard let firstPhoto = photoItems.first else { return nil }
+            let rawTweetId = (dict["rest_id"] as? String)
+                ?? (legacy["id_str"] as? String)
+                ?? (mediaList.first?["source_status_id_str"] as? String)
+                ?? (mediaList.first?["id_str"] as? String)
+                ?? UUID().uuidString
+            let authorMeta = extractAuthorAndBio(from: dict)
+            let author = authorMeta.screenName ?? fallbackAuthor ?? "x_user"
+            let authorBio = authorMeta.bio ?? fallbackBio ?? ""
+            let isFollowed = authorMeta.isFollowedByViewer ?? fallbackFollowed
+            let rawText = (legacy["full_text"] as? String)
+                ?? (details?["full_text"] as? String)
+                ?? (dict["full_text"] as? String)
+                ?? noteText
+                ?? (legacy["text"] as? String)
+                ?? (dict["text"] as? String)
+                ?? ""
+            let cleanTitle = cleanTweetText(rawText)
+            let possiblySensitive = (legacy["possibly_sensitive"] as? Bool)
+                ?? (dict["possibly_sensitive"] as? Bool)
+                ?? (dict["is_nsfw"] as? Bool)
+                ?? false
+            let firstMedia = mediaList.first
+            let warningDict = (firstMedia?["sensitive_media_warning"] as? [String: Any])
+                ?? (firstMedia?["ext_sensitive_media_warning"] as? [String: Any])
+            let hasAdultWarning = (warningDict?["adult_content"] as? Bool == true)
+                || (warningDict?["nudity"] as? Bool == true)
+            let hasGraphicViolenceOnly = (warningDict?["graphic_violence"] as? Bool == true) && !hasAdultWarning
+            guard AdultContentClassifier.isEligibleXTweet(
+                text: cleanTitle,
+                author: author,
+                authorBio: authorBio,
+                possiblySensitive: possiblySensitive,
+                hasAdultWarning: hasAdultWarning,
+                hasGraphicViolenceOnly: hasGraphicViolenceOnly,
+                routeKey: routeKey
+            ) else { return nil }
+
+            let gid = "x_img_\(rawTweetId)"
+            let bioTags = PornTagCatalog.extractRecognizedTags(fromQuery: authorBio, categories: GoonedCategory.defaultCategories)
+            MediaMetaRegistry.register(
+                postId: gid,
+                tags: bioTags,
+                creatorName: author,
+                followedByViewer: isFollowed
+            )
+            if photoItems.count > 1 {
+                let slides = photoItems.enumerated().compactMap { idx, item -> AlbumMediaItem? in
+                    guard let u = URL(string: item.url) else { return nil }
+                    return AlbumMediaItem(id: "\(gid)_\(idx)", url: u, posterURL: u, isVideo: false)
+                }
+                if slides.count > 1 {
+                    MediaMetaRegistry.registerAlbumItems(postId: gid, items: slides)
+                }
+            }
+            let favCount = (legacy["favorite_count"] as? Int) ?? (dict["favorite_count"] as? Int) ?? 0
+            let isoCreated = parseTwitterDate((legacy["created_at"] as? String) ?? (dict["created_at"] as? String))
+                ?? parseCreatedAtMs(details?["created_at_ms"] ?? dict["created_at_ms"])
+            let permalink = "https://x.com/\(author)/status/\(rawTweetId)"
+            return Gif(
+                id: gid,
+                title: cleanTitle,
+                author: author,
+                subreddit: nil,
+                upvotes: favCount,
+                duration: nil,
+                width: firstPhoto.w,
+                height: firstPhoto.h,
+                mediaType: "image",
+                mediaUrl: firstPhoto.url,
+                muxedUrl: nil,
+                muxedUrlHd: nil,
+                hlsUrl: nil,
+                posterUrl: firstPhoto.url,
+                thumbnailUrl: firstPhoto.url,
+                sourceUrl: permalink,
+                permalink: permalink,
+                createdUtc: isoCreated
+            )
+        }
+
         // Find the first video or animated_gif media attachment
         for media in mediaList {
             let type = ((media["type"] as? String) ?? "").lowercased()
@@ -1493,6 +1594,18 @@ enum XAPI {
         let url = URL(string: urlString) ?? URL(string: "https://x.com/i/history/likes")!
         return await XWebEngine.shared.fetchFeed(
             routeKey: "x_likes_\(sn.isEmpty ? "me" : sn)",
+            targetURL: url,
+            isRefresh: after == nil
+        )
+    }
+
+    static func images(after: String? = nil) async -> GoonedFeedResponse {
+        let boosted = UserStore.shared.data.algorithm.boostedTags.first?.replacingOccurrences(of: "_", with: " ")
+        let query = "\(boosted ?? "nsfw") filter:images -filter:videos"
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "nsfw%20filter:images"
+        let url = URL(string: "https://x.com/search?q=\(encoded)&src=typed_query&f=top")!
+        return await XWebEngine.shared.fetchFeed(
+            routeKey: "x_images",
             targetURL: url,
             isRefresh: after == nil
         )
